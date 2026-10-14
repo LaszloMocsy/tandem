@@ -23,7 +23,19 @@ You need [Rust](https://rustup.rs), [Bun](https://bun.sh), the [Tauri prerequisi
 bun install --cwd ui   # frontend dependencies
 cargo tauri dev        # run the app with hot reload
 cargo tauri build      # build a release bundle
-cargo test             # Rust tests
+```
+
+Checks, which CI runs on every pull request and every push to `main`:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+cd ui
+bun run lint        # oxlint
+bun run typecheck   # tsc -b
+bun run test        # vitest
 ```
 
 ## License
