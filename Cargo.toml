@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["core", "mcp", "desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/LaszloMocsy/tandem"
+publish = false
+
+[workspace.dependencies]
+tandem-board-core = { path = "core" }
+tandem-board-mcp = { path = "mcp" }

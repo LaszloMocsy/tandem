@@ -1,0 +1,8 @@
+# Rust
+/target/
+
+# Tauri-generated schemas
+/desktop/gen/schemas
+
+# OS
+.DS_Store
