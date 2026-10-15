@@ -29,7 +29,7 @@ pub enum StoreError {
     AlreadyExists { path: PathBuf },
 }
 
-fn io_error(path: &Path) -> impl FnOnce(io::Error) -> StoreError + '_ {
+pub(super) fn io_error(path: &Path) -> impl FnOnce(io::Error) -> StoreError + '_ {
     move |source| StoreError::Io {
         path: path.to_owned(),
         source,
@@ -64,7 +64,7 @@ pub fn list_task_files(dir: &Path) -> Result<Vec<(TaskId, PathBuf)>, StoreError>
 pub fn read_task(path: &Path) -> Result<Task, StoreError> {
     let id = id_for_path(path)?;
     let bytes = fs::read(path).map_err(io_error(path))?;
-    parse_file(id, &bytes).map_err(|source| StoreError::Invalid {
+    parse_task_file(id, &bytes).map_err(|source| StoreError::Invalid {
         path: path.to_owned(),
         source,
     })
@@ -77,7 +77,7 @@ pub fn write_task(dir: &Path, task: &Task) -> Result<PathBuf, StoreError> {
     let path = task_path(dir, task.id);
     match fs::read(&path) {
         Ok(existing) => {
-            parse_file(task.id, &existing).map_err(|source| StoreError::Invalid {
+            parse_task_file(task.id, &existing).map_err(|source| StoreError::Invalid {
                 path: path.clone(),
                 source,
             })?;
@@ -119,7 +119,9 @@ fn id_for_path(path: &Path) -> Result<TaskId, StoreError> {
         })
 }
 
-fn parse_file(id: TaskId, bytes: &[u8]) -> Result<Task, ParseError> {
+/// Parses the contents of the file for task `id`, checking that the `id` in
+/// its frontmatter matches.
+pub fn parse_task_file(id: TaskId, bytes: &[u8]) -> Result<Task, ParseError> {
     let text = std::str::from_utf8(bytes).map_err(|_| ParseError::NotUtf8)?;
     let task = Task::parse(text)?;
     if task.id != id {
@@ -143,7 +145,7 @@ fn serialize(path: &Path, task: &Task) -> Result<String, StoreError> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
+pub(super) enum Mode {
     Replace,
     CreateNew,
 }
@@ -151,7 +153,7 @@ enum Mode {
 /// Writes a temp file next to `path`, flushes it to disk, then renames it
 /// into place, so readers see either the old file or the new one. The temp
 /// name never matches `<id>.md`, so listing and the watcher ignore it.
-fn write_atomic(path: &Path, contents: &str, mode: Mode) -> Result<(), StoreError> {
+pub(super) fn write_atomic(path: &Path, contents: &str, mode: Mode) -> Result<(), StoreError> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let mut builder = tempfile::Builder::new();
     builder.prefix(".tmp-").suffix(".tandem");

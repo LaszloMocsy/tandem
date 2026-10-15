@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use jiff::civil::Date;
 use serde::Deserialize;
 
@@ -17,6 +19,14 @@ pub enum Status {
 }
 
 impl Status {
+    pub const ALL: [Self; 5] = [
+        Self::Backlog,
+        Self::Todo,
+        Self::InProgress,
+        Self::Finished,
+        Self::Done,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Backlog => "backlog",
@@ -37,6 +47,8 @@ pub enum Priority {
 }
 
 impl Priority {
+    pub const ALL: [Self; 3] = [Self::High, Self::Medium, Self::Low];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::High => "high",
@@ -45,6 +57,33 @@ impl Priority {
         }
     }
 }
+
+impl FromStr for Status {
+    type Err = UnknownValue;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|status| status.as_str() == s)
+            .ok_or_else(|| UnknownValue(s.to_owned()))
+    }
+}
+
+impl FromStr for Priority {
+    type Err = UnknownValue;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|priority| priority.as_str() == s)
+            .ok_or_else(|| UnknownValue(s.to_owned()))
+    }
+}
+
+/// A string that is not a known status or priority.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown value `{0}`")]
+pub struct UnknownValue(pub String);
 
 /// One task file: the frontmatter fields in the order they are written,
 /// then the Markdown body.
@@ -205,4 +244,23 @@ fn push_field(out: &mut String, key: &str, value: &str) {
     out.push_str(": ");
     out.push_str(value);
     out.push('\n');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statuses_and_priorities_round_trip_through_strings() {
+        for status in Status::ALL {
+            assert_eq!(status.as_str().parse(), Ok(status));
+        }
+        for priority in Priority::ALL {
+            assert_eq!(priority.as_str().parse(), Ok(priority));
+        }
+        assert_eq!(
+            "InProgress".parse::<Status>(),
+            Err(UnknownValue("InProgress".into()))
+        );
+    }
 }

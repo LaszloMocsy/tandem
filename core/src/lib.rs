@@ -2,4 +2,5 @@
 //! SQLite and serializes every change. Has no Tauri dependency.
 
 pub mod graph;
+pub mod index;
 pub mod store;
