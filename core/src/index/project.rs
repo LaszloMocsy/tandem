@@ -13,8 +13,8 @@ use super::sql::{Json, date};
 use super::{IndexError, io_error, is_valid_project_id, schema, timestamp_text};
 use crate::graph::Graph;
 use crate::store::{
-    self, Access, Date, Priority, Status, TASK_DIR, TaskId, list_task_files, parse_task_file,
-    task_path,
+    self, Access, Date, Priority, Status, StoreError, TASK_DIR, TaskId, list_task_files,
+    parse_task_file, task_path,
 };
 
 /// How long working-log rows of a task whose file is gone are kept.
@@ -230,7 +230,13 @@ impl ProjectIndex {
 /// [`ProjectIndex::rescan`] inside a transaction, without the working-log
 /// pruning.
 pub(crate) fn rescan_in(tx: &Transaction<'_>, dir: &Path) -> Result<Changes, IndexError> {
-    let files = list_task_files(dir)?;
+    // A folder that is gone, or a dangling `.tandem` link, holds no tasks.
+    let files = match list_task_files(dir) {
+        Err(StoreError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            Vec::new()
+        }
+        files => files?,
+    };
     let known = file_states(tx, None)?;
     let mut changes = Changes::default();
     let mut present = HashSet::with_capacity(files.len());

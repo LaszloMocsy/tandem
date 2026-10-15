@@ -38,6 +38,11 @@ pub enum ReadOnly {
     /// overwritten.
     #[error("{CONFIG_FILE} is invalid: {0}")]
     InvalidConfig(String),
+    /// `.tandem` is a symbolic link. Following it could write task files
+    /// outside the repo, such as wherever a cloned repo's link points, so
+    /// the app only reads through it.
+    #[error("{TASK_DIR} is a symbolic link; make it a real folder in the repo to edit tasks")]
+    SymlinkedFolder,
 }
 
 #[derive(Deserialize)]
@@ -52,8 +57,16 @@ struct Config {
 /// - If `config.toml` is missing, treats the folder as version 1 and writes it.
 /// - If the version is newer than [`FORMAT_VERSION`], or the file cannot be
 ///   read, the project opens read-only and the file is left as it is.
+/// - If `.tandem` is a symbolic link, the project opens read-only and
+///   nothing is written through it.
 pub fn prepare_folder(repo: &Path) -> Result<Access, StoreError> {
     let dir = repo.join(TASK_DIR);
+    match fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Ok(Access::ReadOnly(ReadOnly::SymlinkedFolder));
+        }
+        _ => {}
+    }
     match fs::metadata(&dir) {
         Ok(meta) if meta.is_dir() => {}
         Ok(_) => {

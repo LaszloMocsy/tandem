@@ -956,3 +956,25 @@ fn next_task_picks_the_highest_priority_ready_task() {
     assert_eq!(found.iter().map(|t| t.id).collect::<Vec<_>>(), [medium]);
     assert_eq!(env.summary(high).lease.unwrap().agent_id, "agent-a");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_tandem_folder_refuses_file_writes() {
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let elsewhere = TempDir::new().unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), repo.path().join(".tandem")).unwrap();
+    let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
+    assert_eq!(service.read_only(), Some(&ReadOnly::SymlinkedFolder));
+    let err = service
+        .create_task(
+            &Actor::User,
+            NewTask {
+                title: "x".into(),
+                ..NewTask::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code(), "read_only");
+    assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+}

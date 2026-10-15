@@ -661,3 +661,31 @@ fn the_app_database_lists_projects() {
     assert_eq!(app.project("my-repo").unwrap(), None);
     assert!(repo.is_dir());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_tandem_folder_opens_read_only_and_is_never_written() {
+    let env = Env::new();
+    let elsewhere = TempDir::new().unwrap();
+    fs::remove_dir(env.dir()).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), env.dir()).unwrap();
+    fs::write(
+        elsewhere.path().join(format!("{A}.md")),
+        task(A, "Elsewhere", "todo", ""),
+    )
+    .unwrap();
+
+    let index = env.open();
+    assert_eq!(index.access(), &Access::ReadOnly(ReadOnly::SymlinkedFolder));
+    // No config.toml or README.md is written through the link.
+    assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 1);
+    assert_eq!(titles(&index), [(id(A), "Elsewhere".into())]);
+
+    // A dangling link is refused too, rather than created through.
+    let gone = elsewhere.path().join("gone");
+    fs::remove_file(env.dir()).unwrap();
+    std::os::unix::fs::symlink(&gone, env.dir()).unwrap();
+    let index = env.open();
+    assert_eq!(index.access(), &Access::ReadOnly(ReadOnly::SymlinkedFolder));
+    assert!(!gone.exists());
+}
