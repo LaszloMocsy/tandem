@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use rmcp::transport::StreamableHttpClientTransport;
 use serde_json::{Value, json};
 use tandem_board_core::service::{Actor, Config, NewTask, Service};
 use tandem_board_core::store::{Status, TaskId};
-use tandem_board_mcp::{McpServer, ServeError, endpoint_path};
+use tandem_board_mcp::{Endpoints, McpServer, ServeError, endpoint_path};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -32,6 +32,7 @@ struct Env {
     _data: TempDir,
     _repo: TempDir,
     service: Arc<Service>,
+    endpoints: Endpoints,
     addr: SocketAddr,
     cancel: CancellationToken,
 }
@@ -42,17 +43,23 @@ impl Env {
         let repo = TempDir::new().unwrap();
         let service =
             Arc::new(Service::open(data.path(), "demo", repo.path(), Config::default()).unwrap());
-        let projects = BTreeMap::from([("demo".to_owned(), Arc::clone(&service))]);
         let cancel = CancellationToken::new();
-        let server = McpServer::bind("127.0.0.1:0".parse().unwrap(), &projects, cancel.clone())
-            .await
-            .unwrap();
+        let endpoints = Endpoints::new(&cancel);
+        endpoints.insert("demo", Arc::clone(&service));
+        let server = McpServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            endpoints.clone(),
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
         let addr = server.local_addr().unwrap();
         tokio::spawn(server.run());
         Self {
             _data: data,
             _repo: repo,
             service,
+            endpoints,
             addr,
             cancel,
         }
@@ -609,11 +616,71 @@ async fn only_project_endpoints_on_localhost_answer() {
 }
 
 #[tokio::test]
+async fn projects_can_be_added_and_removed_while_serving() {
+    let env = Env::new().await;
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let other =
+        Arc::new(Service::open(data.path(), "other", repo.path(), Config::default()).unwrap());
+    let other_url = format!("http://{}{}", env.addr, endpoint_path("other"));
+    let ping = |url: String| async move {
+        reqwest::Client::new()
+            .post(url)
+            .header("Accept", "application/json, text/event-stream")
+            .header("Content-Type", "application/json")
+            .body(
+                json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": { "name": "curl", "version": "1" },
+                    },
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap()
+            .status()
+    };
+    assert_eq!(ping(other_url.clone()).await, 404);
+
+    env.endpoints.insert("other", Arc::clone(&other));
+    assert_eq!(env.endpoints.project_ids(), ["demo", "other"]);
+    let client = {
+        let transport = StreamableHttpClientTransport::from_uri(other_url.clone());
+        ClientConfig::new(
+            ClientCapabilities::default(),
+            Implementation::new("curl", "1.0"),
+        )
+        .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
+        .await
+        .unwrap()
+    };
+    let created = call(
+        &client,
+        "create_task",
+        json!({ "title": "In the other project", "description": "", "acceptance_criteria": [] }),
+    )
+    .await
+    .unwrap();
+    let id: TaskId = created["id"].as_str().unwrap().parse().unwrap();
+    assert!(other.task_dir().join(id.file_name()).exists());
+    assert!(!env.service.task_dir().join(id.file_name()).exists());
+
+    assert!(env.endpoints.remove("other"));
+    assert!(!env.endpoints.remove("other"));
+    assert_eq!(ping(other_url).await, 404);
+    assert!(ping(env.url()).await.is_success());
+}
+
+#[tokio::test]
 async fn the_server_only_listens_on_localhost() {
-    let projects = BTreeMap::new();
+    let cancel = CancellationToken::new();
     let addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
     assert!(matches!(
-        McpServer::bind(addr, &projects, CancellationToken::new()).await,
+        McpServer::bind(addr, Endpoints::new(&cancel), cancel).await,
         Err(ServeError::NotLoopback(_))
     ));
     assert_eq!(tandem_board_mcp::DEFAULT_ADDR.to_string(), "127.0.0.1:4317");
