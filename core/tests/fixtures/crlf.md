@@ -11,5 +11,5 @@ Every line in this file ends in CRLF.
 
 ## Changelog
 
-### 2026-10-13 · laszlo · created
+### 2026-10-13 · sam · created
 Created in Notepad.

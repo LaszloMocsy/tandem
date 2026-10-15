@@ -355,7 +355,7 @@ mod tests {
     fn reads_entry_headings() {
         let body = "\n## Description\n### 2026-01-01 · not · changelog\n\n## Changelog\n\n\
                     ### 2026-10-13 · claude-code · started\nGo.\n### a heading\n\
-                    ```\n### 2026-10-13 · in · code\n```\n### 2026-10-14 · laszlo · reopened\n";
+                    ```\n### 2026-10-13 · in · code\n```\n### 2026-10-14 · sam · reopened\n";
         let found: Vec<(String, String)> = headings(body)
             .into_iter()
             .map(|h| (h.who, h.event))
@@ -364,7 +364,7 @@ mod tests {
             found,
             [
                 ("claude-code".to_owned(), "started".to_owned()),
-                ("laszlo".to_owned(), "reopened".to_owned())
+                ("sam".to_owned(), "reopened".to_owned())
             ]
         );
     }

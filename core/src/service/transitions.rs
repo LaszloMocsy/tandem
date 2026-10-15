@@ -55,13 +55,19 @@ impl Service {
     }
 
     /// Edits the spec: title, sections, priority, parent, labels and
-    /// dependencies. Never changes the status or review, and adds no
-    /// changelog entry.
+    /// dependencies. Never changes the review, and adds no changelog entry
+    /// unless an agent's edit sends the task back to backlog.
     ///
-    /// Agents may edit tasks in backlog or todo, and tasks in progress whose
-    /// lease they hold, but not their acceptance criteria once started, so
-    /// tick or explain can't be dodged by dropping a criterion. You may edit
-    /// any task.
+    /// You may edit any task. Agents are limited, so that nothing they
+    /// change gets worked on before you approve it:
+    ///
+    /// - In backlog, agents may edit anything.
+    /// - After approval, `relevant_files`, `labels` and `priority` stay open.
+    ///   Any other change to a todo task sends it back to backlog, with an
+    ///   `edited` changelog entry, until you approve it again. On a task in
+    ///   progress, only the lease holder may edit, and other changes are
+    ///   refused.
+    /// - Finished and done tasks are closed to agents.
     pub fn update_task(
         &self,
         actor: &Actor,
@@ -72,9 +78,12 @@ impl Service {
         self.call(actor, |call| {
             rescan_in(call.tx, call.dir)?;
             let original = read_file(call.dir, id)?;
-            if let Actor::Agent(_) = actor {
-                check_agent_edit(call, &original, &edit)?;
+            let is_agent = matches!(actor, Actor::Agent(_));
+            if is_agent {
+                check_agent_access(call, &original)?;
             }
+
+            // What the task is and when it can start.
             let mut task = original.clone();
             if let Some(title) = &edit.title {
                 task.title = one_line("title", title)?.to_owned();
@@ -85,15 +94,6 @@ impl Service {
             if let Some(criteria) = &edit.acceptance_criteria {
                 set_section(&mut task, ACCEPTANCE_CRITERIA, &checklist(criteria)?)?;
             }
-            if let Some(files) = &edit.relevant_files {
-                set_section(&mut task, RELEVANT_FILES, &list(files)?)?;
-            }
-            if let Some(priority) = edit.priority {
-                task.priority = Some(priority);
-            }
-            if let Some(labels_) = edit.labels.clone() {
-                task.labels = labels(labels_)?;
-            }
             let graph = graph_in(call.tx)?;
             if let Some(parent) = edit.parent {
                 graph.check_change(id, parent, &[])?;
@@ -103,6 +103,40 @@ impl Service {
                 let depends_on = dedup(depends_on);
                 graph.check_change(id, None, &depends_on)?;
                 task.depends_on = depends_on;
+            }
+            let spec_changed = task != original;
+
+            // Details that change neither.
+            if let Some(files) = &edit.relevant_files {
+                set_section(&mut task, RELEVANT_FILES, &list(files)?)?;
+            }
+            if let Some(priority) = edit.priority {
+                task.priority = Some(priority);
+            }
+            if let Some(labels_) = edit.labels.clone() {
+                task.labels = labels(labels_)?;
+            }
+
+            if is_agent && spec_changed {
+                match original.status {
+                    Status::Backlog => {}
+                    Status::Todo => {
+                        set_status(&mut task, Status::Backlog);
+                        append(
+                            &mut task,
+                            call,
+                            "edited",
+                            "Changed after approval; back in backlog until approved again.",
+                        )?;
+                    }
+                    status => {
+                        return Err(ServiceError::InvalidTransition {
+                            task: id,
+                            action: "change the spec of",
+                            status,
+                        });
+                    }
+                }
             }
             if task == original {
                 return Ok(written(&task));
@@ -408,21 +442,12 @@ fn check_unleased_start(call: &Call<'_>, task: &Task, agent: &str) -> Result<(),
     }
 }
 
-/// The limits on an agent's `update_task`.
-fn check_agent_edit(call: &Call<'_>, task: &Task, edit: &TaskEdit) -> Result<(), ServiceError> {
+/// Which tasks an agent may edit at all: not finished or done ones, and in
+/// progress only with the lease.
+fn check_agent_access(call: &Call<'_>, task: &Task) -> Result<(), ServiceError> {
     match task.status {
         Status::Backlog | Status::Todo => Ok(()),
-        Status::InProgress => {
-            call.check_holder(task.id)?;
-            if edit.acceptance_criteria.is_some() {
-                return Err(ServiceError::InvalidTransition {
-                    task: task.id,
-                    action: "change the acceptance criteria of",
-                    status: task.status,
-                });
-            }
-            Ok(())
-        }
+        Status::InProgress => call.check_holder(task.id),
         status @ (Status::Finished | Status::Done) => Err(ServiceError::InvalidTransition {
             task: task.id,
             action: "update",

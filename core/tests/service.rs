@@ -109,7 +109,7 @@ fn open(
     let clock = Arc::clone(now);
     let config = Config {
         lease_duration: lease,
-        user_name: "laszlo".into(),
+        user_name: "sam".into(),
         clock: Arc::new(move || *clock.lock().unwrap()),
         time_zone: TimeZone::UTC,
     };
@@ -167,8 +167,12 @@ fn agent_tasks_start_in_backlog_and_yours_in_todo() {
             status: Status::Backlog,
         }
     );
+    // Ids are random, and one YAML would read as a number is quoted.
+    let file = env
+        .file(id)
+        .replacen(&format!("id: \"{id}\"\n"), &format!("id: {id}\n"), 1);
     assert_eq!(
-        env.file(id),
+        file,
         format!(
             "---\nid: {id}\ntitle: Fix token refresh race\nstatus: backlog\npriority: high\n\
              labels: [auth, backend]\ncreated: 2026-10-15\n---\n\n\
@@ -182,10 +186,7 @@ fn agent_tasks_start_in_backlog_and_yours_in_todo() {
 
     let mine = env.todo("Mine");
     assert_eq!(env.summary(mine).status, Status::Todo);
-    assert!(
-        env.file(mine)
-            .contains("### 2026-10-15 · laszlo · created\n")
-    );
+    assert!(env.file(mine).contains("### 2026-10-15 · sam · created\n"));
 }
 
 #[test]
@@ -210,7 +211,7 @@ fn start_task_is_refused_on_a_backlog_task_until_approved() {
         &approved,
         "backlog",
         "todo",
-        "\n### 2026-10-15 · laszlo · approved\n",
+        "\n### 2026-10-15 · sam · approved\n",
     );
     env.service.start_task(&a, id).unwrap();
     assert_eq!(env.summary(id).status, Status::InProgress);
@@ -316,7 +317,7 @@ fn every_transition_writes_exactly_its_changes() {
         &reopened,
         "finished",
         "in_progress",
-        "\n### 2026-10-15 · laszlo · reopened\nAlso handle 403.\n",
+        "\n### 2026-10-15 · sam · reopened\nAlso handle 403.\n",
     );
     let detail = env.service.get_task(&b, id).unwrap();
     assert_eq!(detail.review_feedback.as_deref(), Some("Also handle 403."));
@@ -490,10 +491,7 @@ fn only_the_holder_or_you_may_act_on_a_task_in_progress() {
         .log_progress(&Actor::User, id, "Note from you.")
         .unwrap();
     env.service.release_task(&Actor::User, id, "").unwrap();
-    assert!(
-        env.file(id)
-            .ends_with("### 2026-10-15 · laszlo · released\n")
-    );
+    assert!(env.file(id).ends_with("### 2026-10-15 · sam · released\n"));
     assert_eq!(env.lease(id), None);
     // No lease, so no agent holds it.
     let err = env.service.log_progress(&a, id, "x").unwrap_err();
@@ -782,9 +780,10 @@ fn update_task_edits_the_spec_and_nothing_else() {
     env.service.start_task(&a, id).unwrap();
     let before = env.file(id);
 
+    // You may change the spec of a task in progress; it stays in progress.
     env.service
         .update_task(
-            &a,
+            &Actor::User,
             id,
             TaskEdit {
                 title: Some("Better title".into()),
@@ -980,46 +979,118 @@ fn a_symlinked_tandem_folder_refuses_file_writes() {
 }
 
 #[test]
-fn agents_edit_only_tasks_they_may_work_on() {
+fn agents_edit_backlog_freely_and_only_details_after_approval() {
     let env = Env::new();
     let (a, b) = (agent("agent-a"), agent("agent-b"));
-    let criteria = |items: &[&str]| TaskEdit {
-        acceptance_criteria: Some(items.iter().map(|c| c.to_string()).collect()),
-        ..TaskEdit::default()
-    };
     let title = |t: &str| TaskEdit {
         title: Some(t.into()),
         ..TaskEdit::default()
     };
+    let details = TaskEdit {
+        relevant_files: Some(vec!["src/a.rs".into()]),
+        labels: Some(vec!["ui".into()]),
+        priority: Some(Priority::High),
+        ..TaskEdit::default()
+    };
 
-    // Backlog and todo tasks are open to every agent.
+    // Backlog: anything goes, and it stays in backlog.
     let proposed = env.create(&b, "Proposed", &["One"]);
-    env.service
-        .update_task(&a, proposed, criteria(&["Two"]))
-        .unwrap();
-    let id = env.create(&Actor::User, "Task", &["One", "Two"]);
-    env.service.update_task(&b, id, title("Renamed")).unwrap();
+    let edit = TaskEdit {
+        acceptance_criteria: Some(vec!["Two".into()]),
+        ..title("Proposed, better")
+    };
+    env.service.update_task(&a, proposed, edit).unwrap();
+    assert_eq!(env.summary(proposed).status, Status::Backlog);
+    assert!(!env.file(proposed).contains("· edited"));
 
-    // In progress: only the holder, and never the criteria.
+    // Todo: details keep it approved.
+    let dep = env.todo("Dependency");
+    let id = env
+        .service
+        .create_task(
+            &Actor::User,
+            NewTask {
+                title: "Task".into(),
+                description: "Do it.".into(),
+                acceptance_criteria: vec!["One".into()],
+                depends_on: vec![dep],
+                ..NewTask::default()
+            },
+        )
+        .unwrap()
+        .id;
+    env.service.update_task(&b, id, details.clone()).unwrap();
+    assert_eq!(env.summary(id).status, Status::Todo);
+    assert!(!env.file(id).contains("· edited"));
+
+    // Any other change sends it back to backlog for approval. Dropping a
+    // dependency can't be used to start early.
+    for edit in [
+        title("Something else"),
+        TaskEdit {
+            description: Some("Do something else.".into()),
+            ..TaskEdit::default()
+        },
+        TaskEdit {
+            acceptance_criteria: Some(vec![]),
+            ..TaskEdit::default()
+        },
+        TaskEdit {
+            depends_on: Some(vec![]),
+            ..TaskEdit::default()
+        },
+        TaskEdit {
+            parent: Some(Some(dep)),
+            ..TaskEdit::default()
+        },
+    ] {
+        let before = env.file(id);
+        let written = env.service.update_task(&b, id, edit.clone()).unwrap();
+        assert_eq!(written.status, Status::Backlog, "{edit:?}");
+        assert!(
+            env.file(id).ends_with(
+                "\n### 2026-10-15 · agent-b · edited\n\
+                 Changed after approval; back in backlog until approved again.\n"
+            ),
+            "{edit:?}"
+        );
+        assert_eq!(code(env.service.start_task(&a, id)), "invalid_transition");
+        // You approve it again; your own edits never send it back.
+        env.service.approve(id).unwrap();
+        env.service
+            .update_task(&Actor::User, id, title("Task"))
+            .unwrap();
+        assert_eq!(env.summary(id).status, Status::Todo);
+        assert_ne!(env.file(id), before);
+    }
+
+    // In progress: only the holder, and only details.
+    let id = env.create(&Actor::User, "Started", &["One"]);
     env.service.start_task(&a, id).unwrap();
     assert_eq!(
-        code(env.service.update_task(&b, id, title("Mine now"))),
+        code(env.service.update_task(&b, id, details.clone())),
         "not_holder"
     );
     let before = env.file(id);
-    let err = env.service.update_task(&a, id, criteria(&[])).unwrap_err();
-    assert_eq!(err.code(), "invalid_transition");
-    assert_eq!(
-        err.to_string(),
-        format!("cannot change the acceptance criteria of task `{id}` while it is in_progress")
-    );
+    for edit in [
+        title("Mine now"),
+        TaskEdit {
+            acceptance_criteria: Some(vec![]),
+            ..TaskEdit::default()
+        },
+        TaskEdit {
+            depends_on: Some(vec![dep]),
+            ..TaskEdit::default()
+        },
+    ] {
+        let err = env.service.update_task(&a, id, edit.clone()).unwrap_err();
+        assert_eq!(err.code(), "invalid_transition", "{edit:?}");
+    }
     assert_eq!(env.file(id), before);
+    env.service.update_task(&a, id, details.clone()).unwrap();
+    assert_eq!(env.summary(id).status, Status::InProgress);
     env.service
-        .update_task(&a, id, title("Holder's title"))
-        .unwrap();
-    // You may still change them.
-    env.service
-        .update_task(&Actor::User, id, criteria(&["One"]))
+        .update_task(&Actor::User, id, title("Yours to change"))
         .unwrap();
 
     // Finished and done tasks are closed to agents.
@@ -1034,12 +1105,12 @@ fn agents_edit_only_tasks_they_may_work_on() {
         )
         .unwrap();
     assert_eq!(
-        code(env.service.update_task(&a, id, title("Late"))),
+        code(env.service.update_task(&a, id, details.clone())),
         "invalid_transition"
     );
     env.service.mark_reviewed(id).unwrap();
     assert_eq!(
-        code(env.service.update_task(&b, id, title("Late"))),
+        code(env.service.update_task(&b, id, details)),
         "invalid_transition"
     );
     env.service
@@ -1054,7 +1125,7 @@ fn agents_cannot_take_a_task_you_started() {
     env.service.start_task(&Actor::User, id).unwrap();
     let err = env.service.start_task(&agent("agent-a"), id).unwrap_err();
     assert_eq!(err.code(), "claimed_by_other");
-    assert_eq!(err.to_string(), format!("task `{id}` is held by `laszlo`"));
+    assert_eq!(err.to_string(), format!("task `{id}` is held by `sam`"));
 }
 
 #[test]
@@ -1101,14 +1172,27 @@ fn summaries_cannot_fake_entry_lines_or_open_a_fence() {
 }
 
 #[test]
-fn agents_cannot_use_your_name() {
+fn agent_ids_cannot_pass_for_you() {
     let env = Env::new();
     let id = env.todo("Task");
-    for name in ["laszlo", "Laszlo"] {
+    for name in [
+        "sam",
+        "SAM",
+        "Sam",
+        "sam\u{200b}",
+        "s\u{0430}m",
+        "sam ",
+        "a · b",
+        "",
+        &"a".repeat(65),
+    ] {
         let err = env.service.start_task(&agent(name), id).unwrap_err();
-        assert_eq!(err.code(), "invalid_argument", "{name}");
+        assert_eq!(err.code(), "invalid_argument", "{name:?}");
     }
     assert_eq!(env.summary(id).status, Status::Todo);
+    env.service
+        .start_task(&agent("claude_code.7f2a-1"), id)
+        .unwrap();
 }
 
 #[cfg(unix)]

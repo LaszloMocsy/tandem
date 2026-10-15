@@ -499,15 +499,19 @@ fn leases(conn: &Connection, now: Timestamp) -> Result<HashMap<TaskId, Lease>, S
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// Agent ids appear in changelog headings, so they must be one line without
-/// the ` · ` separator, and must not pass for you.
+/// Agent ids appear in changelog headings next to your name, so they are
+/// limited to ASCII letters, digits, `-`, `_` and `.`, up to 64 characters,
+/// which rules out lookalike letters and invisible characters, and must not
+/// be your name in any case.
 fn check_agent_id(id: &str, user_name: &str) -> Result<(), ServiceError> {
-    if id.trim().is_empty() || id.trim() != id || id.contains(['\n', '\r']) || id.contains(" · ") {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    if !(1..=64).contains(&id.len()) || !id.chars().all(allowed) {
         return Err(ServiceError::InvalidArgument(format!(
-            "`{id}` is not a valid agent id"
+            "`{}` is not a valid agent id: use 1 to 64 ASCII letters, digits, `-`, `_` or `.`",
+            id.escape_debug()
         )));
     }
-    if id.eq_ignore_ascii_case(user_name.trim()) {
+    if id.to_lowercase() == user_name.trim().to_lowercase() {
         return Err(ServiceError::InvalidArgument(format!(
             "the agent id `{id}` is the user's name"
         )));

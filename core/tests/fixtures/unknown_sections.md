@@ -36,7 +36,7 @@ echo "keep me"
 
 ## Changelog
 
-### 2026-10-12 · laszlo · created
+### 2026-10-12 · sam · created
 Created on the board.
 
 ### 2026-10-13 · codex-91ab · finished
