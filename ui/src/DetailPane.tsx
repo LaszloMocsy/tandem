@@ -11,6 +11,7 @@ import {
 } from './api.ts'
 import { COLUMNS } from './columns.ts'
 import { errorMessage, formatTime, parseLines, sameList, taskName, taskOptions } from './edit.ts'
+import { ReviewBar } from './ReviewBar.tsx'
 
 export type Field =
   | 'title'
@@ -27,6 +28,18 @@ export type FieldErrors = Partial<Record<Field, string>>
 
 /** Saves an edit; resolves to whether it was written. */
 type Save = (field: Field, edit: TaskEdit) => Promise<boolean>
+
+/** The commands the pane uses. */
+export type PaneApi = Pick<
+  Api,
+  | 'getTask'
+  | 'updateTask'
+  | 'approve'
+  | 'markReviewed'
+  | 'reopen'
+  | 'hasUncommittedChanges'
+  | 'commitReview'
+>
 
 /**
  * The pane that slides in from the right for one task. It refetches the
@@ -47,12 +60,17 @@ export function DetailPane({
   tasks: readonly TaskSummary[]
   readOnly: boolean
   onClose: () => void
-  api?: Pick<Api, 'getTask' | 'updateTask'>
+  api?: PaneApi
 }) {
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [errors, setErrors] = useState<FieldErrors>({})
   const [saves, setSaves] = useState(0)
+  const [uncommitted, setUncommitted] = useState(false)
+  const [committed, setCommitted] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const isDone = detail?.summary.status === 'done'
 
   useEffect(() => {
     let current = true
@@ -70,6 +88,30 @@ export function DetailPane({
       current = false
     }
   }, [api, project, id, tasks, saves])
+
+  // Whether Commit review applies. A commit made outside the app changes
+  // no task file, so no event announces it; check again on window focus.
+  useEffect(() => {
+    if (!isDone) return
+    let current = true
+    const check = () =>
+      api.hasUncommittedChanges(project, id).then(
+        (changed) => {
+          if (current) setUncommitted(changed)
+        },
+        // Not a git repo, or no git on PATH: nothing to commit from here.
+        () => {
+          if (current) setUncommitted(false)
+        },
+      )
+    void check()
+    const onFocus = () => void check()
+    window.addEventListener('focus', onFocus)
+    return () => {
+      current = false
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [api, project, id, isDone, detail])
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -94,6 +136,22 @@ export function DetailPane({
     }
   }
 
+  /** Runs a review action; resolves to whether it succeeded. */
+  async function act(action: () => Promise<unknown>): Promise<boolean> {
+    setBusy(true)
+    setActionError(null)
+    try {
+      await action()
+      setSaves((n) => n + 1)
+      return true
+    } catch (error) {
+      setActionError(errorMessage(error))
+      return false
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <aside className="detail" aria-label="Task detail">
       <button type="button" className="close" aria-label="Close" onClick={onClose}>
@@ -112,6 +170,25 @@ export function DetailPane({
           errors={errors}
           onSave={save}
           onClearError={clearError}
+          actions={
+            <ReviewBar
+              status={detail.summary.status}
+              disabled={readOnly || detail.content === null}
+              uncommitted={uncommitted}
+              committed={committed}
+              busy={busy}
+              error={actionError}
+              onApprove={() => void act(() => api.approve(project, id))}
+              onMarkReviewed={() => void act(() => api.markReviewed(project, id))}
+              onReopen={(feedback) => act(() => api.reopen(project, id, feedback))}
+              onCommit={() =>
+                void act(async () => {
+                  setCommitted(await api.commitReview(project, id))
+                  setUncommitted(false)
+                })
+              }
+            />
+          }
         />
       ) : (
         !loadError && <p className="empty">Loading…</p>
@@ -128,6 +205,7 @@ export function TaskView({
   errors,
   onSave,
   onClearError,
+  actions,
 }: {
   detail: TaskDetail
   tasks: readonly TaskSummary[]
@@ -135,6 +213,8 @@ export function TaskView({
   errors: FieldErrors
   onSave: Save
   onClearError: (field: Field) => void
+  /** Your actions on the task, under the title. */
+  actions?: ReactNode
 }) {
   const { summary, content } = detail
   // An unreadable file is never written, so nothing is editable.
@@ -170,6 +250,8 @@ export function TaskView({
           <strong>Invalid.</strong> {summary.problem.message}
         </p>
       )}
+
+      {actions}
 
       {content === null ? (
         <Section title="File">

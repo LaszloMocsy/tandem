@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { Api } from './api.ts'
 import { Board } from './Board.tsx'
 import { buildColumns } from './columns.ts'
-import { DetailPane } from './DetailPane.tsx'
+import { DetailPane, type PaneApi } from './DetailPane.tsx'
 import { board, useBoard, type BoardStore } from './store.ts'
 import { useNow } from './useNow.ts'
 
@@ -15,7 +14,7 @@ function App({
 }: {
   store?: BoardStore
   /** For the detail pane; the desktop app's commands by default. */
-  api?: Pick<Api, 'getTask' | 'updateTask'>
+  api?: PaneApi
 }) {
   const { projects, project, tasks, loading, error } = useBoard((state) => state, store)
   const now = useNow(LEASE_TICK_MS)

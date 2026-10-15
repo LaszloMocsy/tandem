@@ -182,7 +182,7 @@ export const TASKS_CHANGED = 'tasks-changed'
 /**
  * A refused command. `code` is one of the spec's error codes, such as
  * `invalid_transition` or `cycle_detected`, or `project_not_found`,
- * `invalid_argument`, `read_only` or `internal`.
+ * `invalid_argument`, `read_only`, `git_failed` or `internal`.
  */
 export class CommandError extends Error {
   readonly code: string
@@ -255,6 +255,12 @@ export const api = {
   /** Review → In progress, with feedback for the next agent. */
   reopen: (project: string, id: string, feedback: string) =>
     call<Written>('reopen_task', { project, id, feedback }),
+  /** Whether the task file has changes git hasn't committed. */
+  hasUncommittedChanges: (project: string, id: string) =>
+    call<boolean>('has_uncommitted_changes', { project, id }),
+  /** Commits a Done task's file and nothing else; returns the commit hash. */
+  commitReview: (project: string, id: string) =>
+    call<string>('commit_review', { project, id }),
 
   /** Sets the blocked flag, or clears it when `reason` is blank. */
   setBlocked: (project: string, id: string, reason: string) =>
