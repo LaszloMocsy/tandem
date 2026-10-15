@@ -50,6 +50,8 @@ pub fn run() {
             commands::release_task,
             commands::mark_reviewed,
             commands::reopen_task,
+            commands::has_uncommitted_changes,
+            commands::commit_review,
             commands::set_blocked,
             commands::log_progress,
             commands::add_changelog_entry,

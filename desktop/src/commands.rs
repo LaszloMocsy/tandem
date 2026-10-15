@@ -209,6 +209,33 @@ pub async fn reopen_task(
     .await
 }
 
+/// Whether the task file has changes git hasn't committed, for the Commit
+/// review button.
+#[tauri::command]
+pub async fn has_uncommitted_changes(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+    id: TaskId,
+) -> Result<bool> {
+    with_service(projects, project, move |service| {
+        Ok(service.has_uncommitted_changes(id)?)
+    })
+    .await
+}
+
+/// Commits a Done task's file alone. Returns the commit hash.
+#[tauri::command]
+pub async fn commit_review(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+    id: TaskId,
+) -> Result<String> {
+    with_service(projects, project, move |service| {
+        Ok(service.commit_review(id)?)
+    })
+    .await
+}
+
 /// Sets the blocked flag, or clears it when `reason` is blank.
 #[tauri::command]
 pub async fn set_blocked(
