@@ -202,5 +202,6 @@ export function useBoard<T>(
   select: (state: BoardState) => T = (state) => state as T,
   store: BoardStore = board,
 ): T {
-  return useSyncExternalStore(store.subscribe, () => select(store.getState()))
+  const snapshot = () => select(store.getState())
+  return useSyncExternalStore(store.subscribe, snapshot, snapshot)
 }
