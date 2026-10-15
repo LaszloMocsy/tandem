@@ -458,8 +458,9 @@ async fn holder_tools_need_the_issued_agent_id() {
     .unwrap();
     assert_eq!(
         env.service
-            .list_tasks(&Actor::User, &Default::default())
-            .unwrap()[0]
+            .get_task(&Actor::User, id)
+            .unwrap()
+            .summary
             .status,
         Status::Todo
     );
