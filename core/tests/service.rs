@@ -1445,3 +1445,59 @@ fn get_task_reads_the_sections_and_changelog() {
     );
     assert_eq!(content.reviewed_at, None);
 }
+
+#[test]
+fn update_task_keeps_the_ticks_of_unchanged_criteria() {
+    let env = Env::new();
+    let a = agent("agent-a");
+    let id = env.create(&Actor::User, "Task", &["One", "Two", "Two", "Three"]);
+    env.service.start_task(&a, id).unwrap();
+    env.service
+        .finish_task(
+            &a,
+            id,
+            Finish {
+                summary: "Done.".into(),
+                met: vec![1, 2],
+                unmet: vec![
+                    Unmet {
+                        criterion: 3,
+                        reason: "later".into(),
+                    },
+                    Unmet {
+                        criterion: 4,
+                        reason: "later".into(),
+                    },
+                ],
+                ..Finish::default()
+            },
+        )
+        .unwrap();
+    let criteria = |list: &[&str]| TaskEdit {
+        acceptance_criteria: Some(list.iter().map(|c| c.to_string()).collect()),
+        ..TaskEdit::default()
+    };
+
+    // The same list writes nothing.
+    let before = env.file(id);
+    env.service
+        .update_task(&Actor::User, id, criteria(&["One", "Two", "Two", "Three"]))
+        .unwrap();
+    assert_eq!(env.file(id), before);
+
+    // Reordered and reworded: each ticked text keeps one tick.
+    env.service
+        .update_task(
+            &Actor::User,
+            id,
+            criteria(&["Two", " One ", "Two", "Three, reworded", "Four"]),
+        )
+        .unwrap();
+    assert_eq!(
+        env.file(id),
+        before.replace(
+            "- [x] One\n- [x] Two\n- [ ] Two\n- [ ] Three\n",
+            "- [x] Two\n- [x] One\n- [ ] Two\n- [ ] Three, reworded\n- [ ] Four\n"
+        )
+    );
+}

@@ -11,8 +11,8 @@ use super::{
 };
 use crate::index::{graph_in, timestamp_text};
 use crate::store::{
-    ACCEPTANCE_CRITERIA, ChangelogEntry, DESCRIPTION, EntryHeading, RELEVANT_FILES, Status, Task,
-    TaskId, create_task, unused_id,
+    ACCEPTANCE_CRITERIA, ChangelogEntry, Criterion, DESCRIPTION, EntryHeading, RELEVANT_FILES,
+    Status, Task, TaskId, create_task, unused_id,
 };
 
 impl Service {
@@ -23,7 +23,7 @@ impl Service {
         self.check_writable()?;
         let title = one_line("title", &new.title)?.to_owned();
         let labels = labels(new.labels)?;
-        let criteria = checklist(&new.acceptance_criteria)?;
+        let criteria = checklist(&new.acceptance_criteria, &[])?;
         let depends_on = dedup(new.depends_on);
         self.call(actor, |call| {
             // A full stat scan first, so the graph check sees every file.
@@ -92,7 +92,8 @@ impl Service {
                 set_section(&mut task, DESCRIPTION, description)?;
             }
             if let Some(criteria) = &edit.acceptance_criteria {
-                set_section(&mut task, ACCEPTANCE_CRITERIA, &checklist(criteria)?)?;
+                let criteria = checklist(criteria, &task.criteria())?;
+                set_section(&mut task, ACCEPTANCE_CRITERIA, &criteria)?;
             }
             let graph = graph_in(call.tx)?;
             if let Some(parent) = edit.parent {
@@ -551,15 +552,27 @@ fn labels(labels: Vec<String>) -> Result<Vec<String>, ServiceError> {
     Ok(out)
 }
 
-/// Acceptance criteria as unticked checkboxes.
-fn checklist(items: &[String]) -> Result<String, ServiceError> {
+/// Acceptance criteria as checkboxes. An item with the same text as a
+/// ticked criterion in `existing` stays ticked, each one matched at most
+/// once; new or reworded items start unticked.
+fn checklist(items: &[String], existing: &[Criterion]) -> Result<String, ServiceError> {
+    let mut ticked: Vec<&str> = existing
+        .iter()
+        .filter(|c| c.met)
+        .map(|c| c.text.as_str())
+        .collect();
     items
         .iter()
         .map(|item| {
-            Ok(format!(
-                "- [ ] {}\n",
-                one_line("acceptance criterion", item)?
-            ))
+            let text = one_line("acceptance criterion", item)?;
+            let met = match ticked.iter().position(|&t| t == text) {
+                Some(i) => {
+                    ticked.swap_remove(i);
+                    'x'
+                }
+                None => ' ',
+            };
+            Ok(format!("- [{met}] {text}\n"))
         })
         .collect()
 }

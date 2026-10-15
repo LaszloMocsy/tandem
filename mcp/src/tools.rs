@@ -541,7 +541,8 @@ pub struct UpdateTaskArgs {
     pub title: Option<String>,
     /// Markdown for the Description section; blank removes it.
     pub description: Option<String>,
-    /// Replaces every criterion, unticked; an empty list removes them.
+    /// Replaces every criterion; unchanged ticked ones stay ticked, new or
+    /// reworded ones start unticked. An empty list removes them.
     pub acceptance_criteria: Option<Vec<String>>,
     pub relevant_files: Option<Vec<String>>,
     pub priority: Option<PriorityArg>,

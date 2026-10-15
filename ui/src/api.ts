@@ -147,7 +147,10 @@ export interface TaskEdit {
   title?: string
   /** A blank value removes the section. */
   description?: string
-  /** Replaces every criterion, unticked. */
+  /**
+   * Replaces every criterion. Unchanged ticked ones stay ticked; new or
+   * reworded ones start unticked.
+   */
   acceptanceCriteria?: string[]
   relevantFiles?: string[]
   priority?: Priority

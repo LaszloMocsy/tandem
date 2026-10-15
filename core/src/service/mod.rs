@@ -235,8 +235,9 @@ pub struct TaskEdit {
     pub title: Option<String>,
     /// A blank value removes the section.
     pub description: Option<String>,
-    /// Replaces every criterion, unticked. An empty list removes the
-    /// section.
+    /// Replaces every criterion. One with the same text as a ticked
+    /// criterion stays ticked; new or reworded ones start unticked. An
+    /// empty list removes the section.
     pub acceptance_criteria: Option<Vec<String>>,
     pub relevant_files: Option<Vec<String>>,
     pub priority: Option<Priority>,
