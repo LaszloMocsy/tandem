@@ -3,4 +3,5 @@
 
 pub mod graph;
 pub mod index;
+pub mod service;
 pub mod store;

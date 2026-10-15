@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use super::changelog::{self, ChangelogEntry, EntryError};
 use super::id::TaskId;
+use super::sections::{self, Criterion, SectionError};
 use super::yaml;
 
 /// A task's status. These are the only statuses written to task files.
@@ -205,6 +206,26 @@ impl Task {
     pub fn append_changelog(&mut self, entry: &ChangelogEntry) -> Result<(), EntryError> {
         let entry = entry.render()?;
         self.body = changelog::append(&normalize_body(&self.body), &entry);
+        Ok(())
+    }
+
+    /// Replaces the content of the Description, Acceptance criteria or
+    /// Relevant files section, adding it in the usual order if missing, or
+    /// removes the section if `content` is blank. The rest of the body is
+    /// kept byte for byte.
+    pub fn set_section(&mut self, name: &str, content: &str) -> Result<(), SectionError> {
+        self.body = sections::set(&normalize_body(&self.body), name, content)?;
+        Ok(())
+    }
+
+    /// The checkboxes in the Acceptance criteria section.
+    pub fn criteria(&self) -> Vec<Criterion> {
+        sections::criteria(&self.body)
+    }
+
+    /// Ticks acceptance criteria by number, changing only their checkboxes.
+    pub fn tick_criteria(&mut self, numbers: &[u32]) -> Result<(), SectionError> {
+        self.body = sections::tick(&self.body, numbers)?;
         Ok(())
     }
 }

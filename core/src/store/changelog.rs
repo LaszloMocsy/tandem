@@ -1,5 +1,7 @@
 use jiff::civil::Date;
 
+use super::markdown::{find_section, heading_level};
+
 /// One changelog entry:
 ///
 /// ```text
@@ -147,76 +149,11 @@ pub(crate) fn append(body: &str, entry: &str) -> String {
 /// next heading of level 1 or 2, or the end of the body. `None` if there is
 /// no such section. Headings inside fenced code blocks don't count.
 fn changelog_end(body: &str) -> Option<usize> {
-    let mut in_changelog = false;
-    let mut fence: Option<char> = None;
-    let mut offset = 0;
-    for line in body.split_inclusive('\n') {
-        let start = offset;
-        offset += line.len();
-        let line = line.trim_end_matches('\n');
-        match (fence, fence_marker(line)) {
-            (Some(open), Some(marker)) if marker == open => {
-                fence = None;
-                continue;
-            }
-            (Some(_), _) => continue,
-            (None, Some(marker)) => {
-                fence = Some(marker);
-                continue;
-            }
-            (None, None) => {}
-        }
-        match heading_level(line) {
-            Some(level) if level <= 2 && in_changelog => return Some(start),
-            Some(2) => in_changelog = heading_text(line) == "Changelog",
-            Some(1) => in_changelog = false,
-            _ => {}
-        }
-    }
-    in_changelog.then_some(body.len())
-}
-
-/// The fence character (backtick or tilde) if the line opens or closes a
-/// fenced code block: up to three spaces of indent, then three or more of
-/// the same character.
-fn fence_marker(line: &str) -> Option<char> {
-    let indented = line.trim_start_matches(' ');
-    if line.len() - indented.len() > 3 {
-        return None;
-    }
-    ['`', '~']
-        .into_iter()
-        .find(|&c| indented.chars().take(3).filter(|&x| x == c).count() == 3)
+    find_section(body, "Changelog").map(|section| section.end)
 }
 
 fn is_heading(line: &str) -> bool {
     heading_level(line).is_some()
-}
-
-/// The level of an ATX heading line (`## Title` is 2), following CommonMark:
-/// up to three spaces of indent, one to six `#`, then a space, tab or end of
-/// line.
-fn heading_level(line: &str) -> Option<usize> {
-    let indented = line.trim_start_matches(' ');
-    if line.len() - indented.len() > 3 {
-        return None;
-    }
-    let level = indented.len() - indented.trim_start_matches('#').len();
-    let rest = &indented[level..];
-    ((1..=6).contains(&level) && (rest.is_empty() || rest.starts_with([' ', '\t'])))
-        .then_some(level)
-}
-
-/// A heading's text without the `#` markers, surrounding whitespace or an
-/// optional closing run of `#`.
-fn heading_text(line: &str) -> &str {
-    let text = line.trim().trim_start_matches('#').trim();
-    let without_closing = text.trim_end_matches('#');
-    if without_closing.is_empty() || without_closing.ends_with([' ', '\t']) {
-        without_closing.trim_end()
-    } else {
-        text
-    }
 }
 
 #[cfg(test)]
@@ -391,17 +328,5 @@ mod tests {
         assert_eq!(append(body, "### new\n"), format!("{body}\n### new\n"));
         let body = "## Notes\n~~~md\n## Changelog\n~~~\n";
         assert_eq!(changelog_end(body), None);
-    }
-
-    #[test]
-    fn heading_levels() {
-        assert_eq!(heading_level("## Changelog"), Some(2));
-        assert_eq!(heading_level("   # Title"), Some(1));
-        assert_eq!(heading_level("#"), Some(1));
-        assert_eq!(heading_level("    ## indented code"), None);
-        assert_eq!(heading_level("#hashtag"), None);
-        assert_eq!(heading_level("####### seven"), None);
-        assert_eq!(heading_text("## Changelog ##"), "Changelog");
-        assert_eq!(heading_text("##  Changelog  "), "Changelog");
     }
 }

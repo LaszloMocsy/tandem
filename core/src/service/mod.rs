@@ -1,0 +1,488 @@
+//! The task service: the one entry point for every change, used by both the
+//! board and the MCP server. There is one instance per project, and every
+//! call holds the project's lock, so writes are serialized.
+//!
+//! Transitions follow "State model" in the spec. Each one reads the task
+//! file inside a `BEGIN IMMEDIATE` transaction, so the file and the leases
+//! are checked and changed together even if another process shares the
+//! database. Files are written before the transaction commits; if the
+//! commit fails, the next rescan brings the index back in line.
+
+mod error;
+mod read;
+mod transitions;
+
+use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Timestamp};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+
+use crate::index::{Changes, Problem, ProjectIndex, rescan_task_in, timestamp_text};
+use crate::store::{
+    Access, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR, Task, TaskId, Unmet,
+    parse_task_file, task_path,
+};
+
+pub use error::ServiceError;
+
+/// The default lease length.
+pub const LEASE_DURATION: SignedDuration = SignedDuration::from_mins(15);
+
+/// Where the service gets the current time from.
+pub type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
+
+/// Settings for a [`Service`].
+#[derive(Clone)]
+pub struct Config {
+    /// How long a lease lasts after the holder's latest call.
+    pub lease_duration: SignedDuration,
+    /// The name changelog entries use for you, such as your git user name.
+    pub user_name: String,
+    pub clock: Clock,
+    /// The time zone that decides today's date for changelogs, `created`
+    /// and `reviewed_at`.
+    pub time_zone: TimeZone,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            lease_duration: LEASE_DURATION,
+            user_name: "user".to_owned(),
+            clock: Arc::new(Timestamp::now),
+            time_zone: TimeZone::system(),
+        }
+    }
+}
+
+/// Who is making a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Actor {
+    /// You, from the board.
+    User,
+    /// An agent, through MCP.
+    Agent(Agent),
+}
+
+impl Actor {
+    /// An agent with this id and no client name.
+    pub fn agent(id: impl Into<String>) -> Self {
+        Self::Agent(Agent {
+            id: id.into(),
+            client_name: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Agent {
+    /// Such as `claude-code-7f2a`. Shown in changelog headings.
+    pub id: String,
+    /// From MCP `clientInfo`, such as `claude-code`.
+    pub client_name: Option<String>,
+}
+
+/// A task's lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lease {
+    pub agent_id: String,
+    /// In [`timestamp_text`] form, like `expires_at`.
+    pub claimed_at: String,
+    pub expires_at: String,
+    /// `false` once the lease has expired: it is stale, and another agent
+    /// can take the task over.
+    pub live: bool,
+}
+
+/// A task as `list_tasks` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSummary {
+    pub id: TaskId,
+    pub title: String,
+    pub status: Status,
+    pub priority: Priority,
+    pub parent: Option<TaskId>,
+    pub labels: Vec<String>,
+    pub depends_on: Vec<TaskId>,
+    pub lease: Option<Lease>,
+    pub blocked: Option<String>,
+    pub problem: Option<Problem>,
+}
+
+/// A task as `get_task` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDetail {
+    pub summary: TaskSummary,
+    /// The task file, as it is on disk.
+    pub markdown: String,
+    pub parent: Option<TaskSummary>,
+    pub children: Vec<TaskSummary>,
+    /// Oldest first.
+    pub work_log: Vec<LogEntry>,
+    /// Your latest reopen feedback, for the next agent.
+    pub review_feedback: Option<String>,
+}
+
+/// One working-log row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    /// `None` means you.
+    pub agent_id: Option<String>,
+    pub kind: LogKind,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogKind {
+    Note,
+    Blocked,
+    Unblocked,
+    Feedback,
+    Event,
+}
+
+impl LogKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Note => "note",
+            Self::Blocked => "blocked",
+            Self::Unblocked => "unblocked",
+            Self::Feedback => "feedback",
+            Self::Event => "event",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        [
+            Self::Note,
+            Self::Blocked,
+            Self::Unblocked,
+            Self::Feedback,
+            Self::Event,
+        ]
+        .into_iter()
+        .find(|kind| kind.as_str() == s)
+    }
+}
+
+/// Filters for `list_tasks`. Every filter that is set must match.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskFilter {
+    pub status: Option<Status>,
+    pub label: Option<String>,
+    pub parent: Option<TaskId>,
+    /// Matches the id, title, labels or body, ignoring case.
+    pub query: Option<String>,
+    /// Only tasks `start_task` would accept: in todo, every dependency
+    /// done, and no live lease.
+    pub ready_only: bool,
+}
+
+/// A new task for `create_task`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewTask {
+    pub title: String,
+    pub description: String,
+    pub acceptance_criteria: Vec<String>,
+    pub priority: Option<Priority>,
+    pub parent: Option<TaskId>,
+    pub labels: Vec<String>,
+    pub depends_on: Vec<TaskId>,
+}
+
+/// The fields `update_task` changes; `None` leaves a field as it is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TaskEdit {
+    pub title: Option<String>,
+    /// A blank value removes the section.
+    pub description: Option<String>,
+    /// Replaces every criterion, unticked. An empty list removes the
+    /// section.
+    pub acceptance_criteria: Option<Vec<String>>,
+    pub relevant_files: Option<Vec<String>>,
+    pub priority: Option<Priority>,
+    /// `Some(None)` moves the task to the top level.
+    pub parent: Option<Option<TaskId>>,
+    pub labels: Option<Vec<String>>,
+    pub depends_on: Option<Vec<TaskId>>,
+}
+
+/// The arguments of `finish_task`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Finish {
+    pub summary: String,
+    pub files_changed: Vec<String>,
+    pub follow_ups: Option<String>,
+    /// Acceptance criteria met, by number; the app ticks them.
+    pub met: Vec<u32>,
+    /// Every criterion still unticked, with the reason.
+    pub unmet: Vec<Unmet>,
+}
+
+/// The file a write changed. Every file-writing call returns it, so agents
+/// know to include it in their next commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Written {
+    pub id: TaskId,
+    /// Relative to the repo root, such as `.tandem/k3f9x2m.md`.
+    pub path: String,
+    pub status: Status,
+}
+
+/// The task service for one project.
+pub struct Service {
+    index: Mutex<ProjectIndex>,
+    dir: PathBuf,
+    read_only: Option<ReadOnly>,
+    config: Config,
+}
+
+impl Service {
+    /// Opens the project and its index; see [`ProjectIndex::open`].
+    pub fn open(
+        data_dir: &Path,
+        project_id: &str,
+        repo: &Path,
+        config: Config,
+    ) -> Result<Self, ServiceError> {
+        Ok(Self::new(
+            ProjectIndex::open(data_dir, project_id, repo)?,
+            config,
+        ))
+    }
+
+    pub fn new(index: ProjectIndex, config: Config) -> Self {
+        let read_only = match index.access() {
+            Access::ReadWrite => None,
+            Access::ReadOnly(reason) => Some(reason.clone()),
+        };
+        Self {
+            dir: index.task_dir().to_owned(),
+            index: Mutex::new(index),
+            read_only,
+            config,
+        }
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Why the project is read-only, if it is.
+    pub fn read_only(&self) -> Option<&ReadOnly> {
+        self.read_only.as_ref()
+    }
+
+    /// A full rescan, for a burst of watcher events or the periodic sweep.
+    pub fn rescan(&self) -> Result<Changes, ServiceError> {
+        Ok(self.lock().rescan()?)
+    }
+
+    /// Re-reads one task's file, for a watcher event. An event for a file
+    /// the service just wrote finds the same hash and changes nothing.
+    pub fn rescan_task(&self, id: TaskId) -> Result<Changes, ServiceError> {
+        Ok(self.lock().rescan_task(id)?)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ProjectIndex> {
+        // A panic mid-call rolls its transaction back, so the index is
+        // still consistent.
+        self.index.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Runs `f` under the project lock: records the call (which extends the
+    /// caller's leases), then runs `f` in a `BEGIN IMMEDIATE` transaction
+    /// that commits if `f` succeeds.
+    fn call<T>(
+        &self,
+        actor: &Actor,
+        f: impl FnOnce(&Call<'_>) -> Result<T, ServiceError>,
+    ) -> Result<T, ServiceError> {
+        let mut index = self.lock();
+        let now = (self.config.clock)();
+        // Outside the transaction, so even a refused call extends leases.
+        self.touch(index.connection(), actor, now)?;
+        let tx = index.begin()?;
+        let call = Call {
+            tx: &tx,
+            dir: &self.dir,
+            actor,
+            now,
+            today: now.to_zoned(self.config.time_zone.clone()).date(),
+            config: &self.config,
+        };
+        let out = f(&call)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Records an agent's call: updates `agents` and extends every lease the
+    /// agent holds, as "any tool call by the lease holder" does.
+    fn touch(&self, conn: &Connection, actor: &Actor, now: Timestamp) -> Result<(), ServiceError> {
+        let Actor::Agent(agent) = actor else {
+            return Ok(());
+        };
+        check_agent_id(&agent.id)?;
+        conn.execute(
+            "INSERT INTO agents (agent_id, client_name, last_seen_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (agent_id) DO UPDATE SET
+               client_name = coalesce(excluded.client_name, client_name),
+               last_seen_at = excluded.last_seen_at",
+            params![agent.id, agent.client_name, timestamp_text(now)],
+        )?;
+        conn.execute(
+            "UPDATE leases SET expires_at = ?2 WHERE agent_id = ?1",
+            params![agent.id, timestamp_text(now + self.config.lease_duration)],
+        )?;
+        Ok(())
+    }
+
+    fn check_writable(&self) -> Result<(), ServiceError> {
+        match &self.read_only {
+            Some(reason) => Err(ServiceError::ReadOnly(reason.clone())),
+            None => Ok(()),
+        }
+    }
+}
+
+/// One call's view of the project, inside its transaction.
+struct Call<'a> {
+    tx: &'a Transaction<'a>,
+    dir: &'a Path,
+    actor: &'a Actor,
+    now: Timestamp,
+    today: Date,
+    config: &'a Config,
+}
+
+impl Call<'_> {
+    /// Re-indexes the task, then reads and parses its file.
+    fn read(&self, id: TaskId) -> Result<Task, ServiceError> {
+        rescan_task_in(self.tx, self.dir, id)?;
+        read_file(self.dir, id)
+    }
+
+    /// Writes the task file and indexes it, so the watcher event for this
+    /// write finds the same hash and changes nothing.
+    fn write(&self, task: &Task) -> Result<Written, ServiceError> {
+        crate::store::write_task(self.dir, task)?;
+        rescan_task_in(self.tx, self.dir, task.id)?;
+        Ok(written(task))
+    }
+
+    fn lease(&self, id: TaskId) -> Result<Option<Lease>, ServiceError> {
+        Ok(self
+            .tx
+            .query_row(
+                "SELECT agent_id, claimed_at, expires_at FROM leases WHERE task_id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .map(|(agent_id, claimed_at, expires_at)| {
+                lease(agent_id, claimed_at, expires_at, self.now)
+            }))
+    }
+
+    /// Checks that an agent holds the task's lease. You may always act.
+    fn check_holder(&self, id: TaskId) -> Result<(), ServiceError> {
+        let Actor::Agent(agent) = self.actor else {
+            return Ok(());
+        };
+        match self.lease(id)? {
+            Some(lease) if lease.agent_id == agent.id => Ok(()),
+            other => Err(ServiceError::NotHolder {
+                task: id,
+                holder: other.map(|lease| lease.agent_id),
+            }),
+        }
+    }
+
+    /// The name changelog entries use for the caller.
+    fn who(&self) -> &str {
+        match self.actor {
+            Actor::User => &self.config.user_name,
+            Actor::Agent(agent) => &agent.id,
+        }
+    }
+
+    fn agent_id(&self) -> Option<&str> {
+        match self.actor {
+            Actor::User => None,
+            Actor::Agent(agent) => Some(&agent.id),
+        }
+    }
+
+    fn log(&self, id: TaskId, kind: LogKind, message: &str) -> Result<(), ServiceError> {
+        self.tx.execute(
+            "INSERT INTO work_log (task_id, agent_id, kind, message, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                id,
+                self.agent_id(),
+                kind.as_str(),
+                message,
+                timestamp_text(self.now)
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+fn read_file(dir: &Path, id: TaskId) -> Result<Task, ServiceError> {
+    let path = task_path(dir, id);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ServiceError::NotFound(id)),
+        Err(source) => return Err(StoreError::Io { path, source }.into()),
+    };
+    parse_task_file(id, &bytes).map_err(|e| ServiceError::InvalidFile {
+        task: id,
+        message: e.to_string(),
+    })
+}
+
+fn written(task: &Task) -> Written {
+    Written {
+        id: task.id,
+        path: format!("{TASK_DIR}/{}", task.id.file_name()),
+        status: task.status,
+    }
+}
+
+fn lease(agent_id: String, claimed_at: String, expires_at: String, now: Timestamp) -> Lease {
+    let live = expires_at > timestamp_text(now);
+    Lease {
+        agent_id,
+        claimed_at,
+        expires_at,
+        live,
+    }
+}
+
+/// Every lease, by task.
+fn leases(conn: &Connection, now: Timestamp) -> Result<HashMap<TaskId, Lease>, ServiceError> {
+    let mut stmt = conn.prepare("SELECT task_id, agent_id, claimed_at, expires_at FROM leases")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, TaskId>(0)?,
+            lease(row.get(1)?, row.get(2)?, row.get(3)?, now),
+        ))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn check_agent_id(id: &str) -> Result<(), ServiceError> {
+    if id.trim().is_empty() || id.trim() != id || id.contains(['\n', '\r']) || id.contains(" · ") {
+        return Err(ServiceError::InvalidArgument(format!(
+            "`{id}` is not a valid agent id"
+        )));
+    }
+    Ok(())
+}

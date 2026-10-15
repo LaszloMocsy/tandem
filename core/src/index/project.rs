@@ -181,32 +181,10 @@ impl ProjectIndex {
     /// size changed, deletes rows whose file is gone, and prunes old working
     /// logs of missing tasks.
     pub fn rescan(&mut self) -> Result<Changes, IndexError> {
-        let files = list_task_files(&self.dir)?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let known = file_states(&tx, None)?;
-        let mut changes = Changes::default();
-        let mut present = HashSet::with_capacity(files.len());
-        for (id, path) in files {
-            match index_file(&tx, id, &path, known.get(&id))? {
-                Outcome::Gone => {}
-                Outcome::Unchanged => {
-                    present.insert(id);
-                }
-                Outcome::Changed => {
-                    present.insert(id);
-                    changes.changed.insert(id);
-                }
-            }
-        }
-        for &id in known.keys() {
-            if !present.contains(&id) {
-                tx.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
-                changes.removed.insert(id);
-            }
-        }
-        after_scan(&tx, &mut changes)?;
+        let changes = rescan_in(&tx, &self.dir)?;
         prune_work_log(&tx, Timestamp::now())?;
         tx.commit()?;
         Ok(changes)
@@ -216,58 +194,28 @@ impl ProjectIndex {
     /// it. Uses the same stat and hash checks as [`rescan`](Self::rescan),
     /// so an event for a file the app just wrote and indexed changes nothing.
     pub fn rescan_task(&mut self, id: TaskId) -> Result<Changes, IndexError> {
-        let path = task_path(&self.dir, id);
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let known = file_states(&tx, Some(id))?;
-        let is_file = match fs::symlink_metadata(&path) {
-            Ok(meta) => meta.is_file(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => false,
-            Err(e) => return Err(io_error(&path)(e)),
-        };
-        let outcome = if is_file {
-            index_file(&tx, id, &path, known.get(&id))?
-        } else {
-            Outcome::Gone
-        };
-        let mut changes = Changes::default();
-        match outcome {
-            Outcome::Unchanged => {}
-            Outcome::Changed => {
-                changes.changed.insert(id);
-            }
-            Outcome::Gone => {
-                if tx.execute("DELETE FROM tasks WHERE id = ?1", [id])? > 0 {
-                    changes.removed.insert(id);
-                }
-            }
-        }
-        after_scan(&tx, &mut changes)?;
+        let changes = rescan_task_in(&tx, &self.dir, id)?;
         tx.commit()?;
         Ok(changes)
     }
 
+    /// A `BEGIN IMMEDIATE` transaction, which takes the write lock up front.
+    pub(crate) fn begin(&mut self) -> Result<Transaction<'_>, IndexError> {
+        Ok(self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?)
+    }
+
     /// Every indexed task, sorted by id.
     pub fn tasks(&self) -> Result<Vec<IndexedTask>, IndexError> {
-        let mut stmt = self
-            .conn
-            .prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY id"))?;
-        let tasks = stmt
-            .query_map([], task_from_row)?
-            .collect::<Result<_, _>>()?;
-        Ok(tasks)
+        tasks_in(&self.conn)
     }
 
     pub fn task(&self, id: TaskId) -> Result<Option<IndexedTask>, IndexError> {
-        Ok(self
-            .conn
-            .query_row(
-                &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
-                [id],
-                task_from_row,
-            )
-            .optional()?)
+        task_in(&self.conn, id)
     }
 
     /// Deletes the working logs of tasks whose file is gone, once their
@@ -277,6 +225,116 @@ impl ProjectIndex {
     pub fn prune_work_log(&self, now: Timestamp) -> Result<usize, IndexError> {
         prune_work_log(&self.conn, now)
     }
+}
+
+/// [`ProjectIndex::rescan`] inside a transaction, without the working-log
+/// pruning.
+pub(crate) fn rescan_in(tx: &Transaction<'_>, dir: &Path) -> Result<Changes, IndexError> {
+    let files = list_task_files(dir)?;
+    let known = file_states(tx, None)?;
+    let mut changes = Changes::default();
+    let mut present = HashSet::with_capacity(files.len());
+    for (id, path) in files {
+        match index_file(tx, id, &path, known.get(&id))? {
+            Outcome::Gone => {}
+            Outcome::Unchanged => {
+                present.insert(id);
+            }
+            Outcome::Changed => {
+                present.insert(id);
+                changes.changed.insert(id);
+            }
+        }
+    }
+    for &id in known.keys() {
+        if !present.contains(&id) {
+            tx.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+            changes.removed.insert(id);
+        }
+    }
+    after_scan(tx, &mut changes)?;
+    Ok(changes)
+}
+
+/// [`ProjectIndex::rescan_task`] inside a transaction.
+pub(crate) fn rescan_task_in(
+    tx: &Transaction<'_>,
+    dir: &Path,
+    id: TaskId,
+) -> Result<Changes, IndexError> {
+    let path = task_path(dir, id);
+    let known = file_states(tx, Some(id))?;
+    let is_file = match fs::symlink_metadata(&path) {
+        Ok(meta) => meta.is_file(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+        Err(e) => return Err(io_error(&path)(e)),
+    };
+    let outcome = if is_file {
+        index_file(tx, id, &path, known.get(&id))?
+    } else {
+        Outcome::Gone
+    };
+    let mut changes = Changes::default();
+    match outcome {
+        Outcome::Unchanged => {}
+        Outcome::Changed => {
+            changes.changed.insert(id);
+        }
+        Outcome::Gone => {
+            if tx.execute("DELETE FROM tasks WHERE id = ?1", [id])? > 0 {
+                changes.removed.insert(id);
+            }
+        }
+    }
+    after_scan(tx, &mut changes)?;
+    Ok(changes)
+}
+
+/// The parent and dependency graph of every indexed task.
+pub(crate) fn graph_in(conn: &Connection) -> Result<Graph, IndexError> {
+    Ok(graph_rows(conn)?.0)
+}
+
+/// The graph, plus each task with a valid file and its stored graph problem.
+#[allow(clippy::type_complexity)]
+fn graph_rows(conn: &Connection) -> Result<(Graph, Vec<(TaskId, Option<String>)>), IndexError> {
+    let mut graph = Graph::new();
+    let mut valid = Vec::new();
+    let mut stmt =
+        conn.prepare("SELECT id, parent, depends_on, created = '', parse_error FROM tasks")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: TaskId = row.get(0)?;
+        if row.get(3)? {
+            // An invalid file has no edges, but still exists as a parent.
+            graph.insert(id, None, Vec::new());
+            continue;
+        }
+        let Json(depends_on) = row.get(2)?;
+        graph.insert(id, row.get(1)?, depends_on);
+        valid.push((id, row.get::<_, Option<String>>(4)?));
+    }
+    Ok((graph, valid))
+}
+
+/// [`ProjectIndex::tasks`] on any connection or transaction.
+pub(crate) fn tasks_in(conn: &Connection) -> Result<Vec<IndexedTask>, IndexError> {
+    let mut stmt = conn.prepare(&format!("SELECT {TASK_COLUMNS} FROM tasks ORDER BY id"))?;
+    let tasks = stmt
+        .query_map([], task_from_row)?
+        .collect::<Result<_, _>>()?;
+    Ok(tasks)
+}
+
+/// [`ProjectIndex::task`] on any connection or transaction.
+pub(crate) fn task_in(conn: &Connection, id: TaskId) -> Result<Option<IndexedTask>, IndexError> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = ?1"),
+            [id],
+            task_from_row,
+        )
+        .optional()?)
 }
 
 /// The stored stat and hash of every row, or of one task.
@@ -420,24 +478,7 @@ fn after_scan(tx: &Transaction<'_>, changes: &mut Changes) -> Result<(), IndexEr
 
 /// The full-graph pass, linear in the number of tasks and edges.
 fn check_graph(tx: &Transaction<'_>, changes: &mut Changes) -> Result<(), IndexError> {
-    let mut graph = Graph::new();
-    let mut valid = Vec::new();
-    {
-        let mut stmt =
-            tx.prepare("SELECT id, parent, depends_on, created = '', parse_error FROM tasks")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let id: TaskId = row.get(0)?;
-            if row.get(3)? {
-                // An invalid file has no edges, but still exists as a parent.
-                graph.insert(id, None, Vec::new());
-                continue;
-            }
-            let Json(depends_on) = row.get(2)?;
-            graph.insert(id, row.get(1)?, depends_on);
-            valid.push((id, row.get::<_, Option<String>>(4)?));
-        }
-    }
+    let (graph, valid) = graph_rows(tx)?;
     let invalid = graph.validate();
     let mut update = tx.prepare("UPDATE tasks SET parse_error = ?2 WHERE id = ?1")?;
     for (id, old) in valid {

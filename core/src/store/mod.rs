@@ -9,6 +9,8 @@ mod changelog;
 mod folder;
 mod fs;
 mod id;
+mod markdown;
+mod sections;
 mod task;
 mod yaml;
 
@@ -20,4 +22,7 @@ pub use fs::{
 };
 pub use id::{ID_ALPHABET, ID_LEN, InvalidId, TaskId};
 pub use jiff::civil::Date;
+pub use sections::{
+    ACCEPTANCE_CRITERIA, CHANGELOG, Criterion, DESCRIPTION, RELEVANT_FILES, SectionError,
+};
 pub use task::{ParseError, Priority, Status, Task, UnknownValue};
