@@ -328,7 +328,7 @@ impl Service {
         let Actor::Agent(agent) = actor else {
             return Ok(());
         };
-        check_agent_id(&agent.id)?;
+        check_agent_id(&agent.id, &self.config.user_name)?;
         conn.execute(
             "INSERT INTO agents (agent_id, client_name, last_seen_at) VALUES (?1, ?2, ?3)
              ON CONFLICT (agent_id) DO UPDATE SET
@@ -346,7 +346,7 @@ impl Service {
     fn check_writable(&self) -> Result<(), ServiceError> {
         match &self.read_only {
             Some(reason) => Err(ServiceError::ReadOnly(reason.clone())),
-            None => Ok(()),
+            None => check_folder(&self.dir),
         }
     }
 }
@@ -371,6 +371,7 @@ impl Call<'_> {
     /// Writes the task file and indexes it, so the watcher event for this
     /// write finds the same hash and changes nothing.
     fn write(&self, task: &Task) -> Result<Written, ServiceError> {
+        check_folder(self.dir)?;
         crate::store::write_task(self.dir, task)?;
         rescan_task_in(self.tx, self.dir, task.id)?;
         Ok(written(task))
@@ -435,8 +436,12 @@ impl Call<'_> {
     }
 }
 
+/// Reads and parses a task file. A symlink or anything else that isn't a
+/// regular file is invalid and never followed, since it could point
+/// outside the repo.
 fn read_file(dir: &Path, id: TaskId) -> Result<Task, ServiceError> {
     let path = task_path(dir, id);
+    check_regular_file(&path, id)?;
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ServiceError::NotFound(id)),
@@ -446,6 +451,22 @@ fn read_file(dir: &Path, id: TaskId) -> Result<Task, ServiceError> {
         task: id,
         message: e.to_string(),
     })
+}
+
+fn check_regular_file(path: &Path, id: TaskId) -> Result<(), ServiceError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Ok(_) => Err(ServiceError::InvalidFile {
+            task: id,
+            message: "the file is a symbolic link or not a regular file".into(),
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ServiceError::NotFound(id)),
+        Err(source) => Err(StoreError::Io {
+            path: path.to_owned(),
+            source,
+        }
+        .into()),
+    }
 }
 
 fn written(task: &Task) -> Written {
@@ -478,11 +499,39 @@ fn leases(conn: &Connection, now: Timestamp) -> Result<HashMap<TaskId, Lease>, S
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn check_agent_id(id: &str) -> Result<(), ServiceError> {
+/// Agent ids appear in changelog headings, so they must be one line without
+/// the ` · ` separator, and must not pass for you.
+fn check_agent_id(id: &str, user_name: &str) -> Result<(), ServiceError> {
     if id.trim().is_empty() || id.trim() != id || id.contains(['\n', '\r']) || id.contains(" · ") {
         return Err(ServiceError::InvalidArgument(format!(
             "`{id}` is not a valid agent id"
         )));
     }
+    if id.eq_ignore_ascii_case(user_name.trim()) {
+        return Err(ServiceError::InvalidArgument(format!(
+            "the agent id `{id}` is the user's name"
+        )));
+    }
     Ok(())
+}
+
+/// Checks that `.tandem` is still a real folder before writing to it: it
+/// may have been replaced by a symlink since the project was opened.
+fn check_folder(dir: &Path) -> Result<(), ServiceError> {
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(ServiceError::ReadOnly(ReadOnly::SymlinkedFolder))
+        }
+        Ok(meta) if !meta.is_dir() => Err(StoreError::Io {
+            path: dir.to_owned(),
+            source: io::Error::new(io::ErrorKind::NotADirectory, "not a directory"),
+        }
+        .into()),
+        Ok(_) => Ok(()),
+        Err(source) => Err(StoreError::Io {
+            path: dir.to_owned(),
+            source,
+        }
+        .into()),
+    }
 }

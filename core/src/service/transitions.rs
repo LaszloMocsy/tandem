@@ -57,6 +57,11 @@ impl Service {
     /// Edits the spec: title, sections, priority, parent, labels and
     /// dependencies. Never changes the status or review, and adds no
     /// changelog entry.
+    ///
+    /// Agents may edit tasks in backlog or todo, and tasks in progress whose
+    /// lease they hold, but not their acceptance criteria once started, so
+    /// tick or explain can't be dodged by dropping a criterion. You may edit
+    /// any task.
     pub fn update_task(
         &self,
         actor: &Actor,
@@ -67,6 +72,9 @@ impl Service {
         self.call(actor, |call| {
             rescan_in(call.tx, call.dir)?;
             let original = read_file(call.dir, id)?;
+            if let Actor::Agent(_) = actor {
+                check_agent_edit(call, &original, &edit)?;
+            }
             let mut task = original.clone();
             if let Some(title) = &edit.title {
                 task.title = one_line("title", title)?.to_owned();
@@ -122,8 +130,10 @@ impl Service {
     ///
     /// An agent may also start a task that is already in progress if no live
     /// lease is held on it: a stale lease is taken over, which the changelog
-    /// notes, and a task reopened by you or started from the board gets its
-    /// lease. Calling it again while holding the lease only extends it.
+    /// notes. Without any lease, an agent may pick up a task you reopened,
+    /// or resume one it started itself before the database was rebuilt; a
+    /// task you started from the board stays yours. Calling it again while
+    /// holding the lease only extends it.
     pub fn start_task(&self, actor: &Actor, id: TaskId) -> Result<Written, ServiceError> {
         self.check_writable()?;
         self.call(actor, |call| {
@@ -137,14 +147,14 @@ impl Service {
                         return Err(ServiceError::ClaimedByOther {
                             task: id,
                             holder: lease.agent_id,
-                            expires_at: lease.expires_at,
+                            expires_at: Some(lease.expires_at),
                         });
                     }
                     Some(lease) => {
                         summary =
                             format!("Took over from {} after its lease expired.", lease.agent_id);
                     }
-                    None => {}
+                    None => check_unleased_start(call, &task, &agent.id)?,
                 },
                 (_, status) => {
                     return Err(ServiceError::InvalidTransition {
@@ -370,6 +380,54 @@ impl Service {
                 .execute("DELETE FROM leases WHERE task_id = ?1", [id])?;
             Ok(out)
         })
+    }
+}
+
+/// Whether an agent may start an in-progress task that has no lease: only
+/// if you reopened it last, or the agent itself started it last.
+fn check_unleased_start(call: &Call<'_>, task: &Task, agent: &str) -> Result<(), ServiceError> {
+    let changelog = task.changelog();
+    if changelog
+        .last()
+        .is_some_and(|entry| entry.event == "reopened")
+    {
+        return Ok(());
+    }
+    let starter = changelog
+        .iter()
+        .rev()
+        .find(|entry| entry.event == "started")
+        .map(|entry| entry.who.as_str());
+    match starter {
+        Some(starter) if starter == agent => Ok(()),
+        starter => Err(ServiceError::ClaimedByOther {
+            task: task.id,
+            holder: starter.unwrap_or(&call.config.user_name).to_owned(),
+            expires_at: None,
+        }),
+    }
+}
+
+/// The limits on an agent's `update_task`.
+fn check_agent_edit(call: &Call<'_>, task: &Task, edit: &TaskEdit) -> Result<(), ServiceError> {
+    match task.status {
+        Status::Backlog | Status::Todo => Ok(()),
+        Status::InProgress => {
+            call.check_holder(task.id)?;
+            if edit.acceptance_criteria.is_some() {
+                return Err(ServiceError::InvalidTransition {
+                    task: task.id,
+                    action: "change the acceptance criteria of",
+                    status: task.status,
+                });
+            }
+            Ok(())
+        }
+        status @ (Status::Finished | Status::Done) => Err(ServiceError::InvalidTransition {
+            task: task.id,
+            action: "update",
+            status,
+        }),
     }
 }
 

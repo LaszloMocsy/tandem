@@ -8,11 +8,12 @@ use crate::store::{ReadOnly, Status, StoreError, TaskId};
 pub enum ServiceError {
     #[error("task `{0}` does not exist")]
     NotFound(TaskId),
-    #[error("task `{task}` is held by `{holder}` until {expires_at}")]
+    #[error("task `{task}` is held by `{holder}`{}", until(.expires_at))]
     ClaimedByOther {
         task: TaskId,
         holder: String,
-        expires_at: String,
+        /// `None` when you hold it, or an agent did before a rebuild.
+        expires_at: Option<String>,
     },
     #[error("task `{task}` depends on tasks that are not done: {}", list(.pending))]
     DepsNotDone { task: TaskId, pending: Vec<TaskId> },
@@ -65,7 +66,14 @@ impl ServiceError {
             Self::CriteriaUnmet { .. } => "criteria_unmet",
             Self::InvalidArgument(_) => "invalid_argument",
             Self::ReadOnly(_) => "read_only",
-            Self::Store(e) if matches!(**e, StoreError::Invalid { .. }) => "invalid_file",
+            Self::Store(e)
+                if matches!(
+                    **e,
+                    StoreError::Invalid { .. } | StoreError::NotRegularFile { .. }
+                ) =>
+            {
+                "invalid_file"
+            }
             Self::Index(_) | Self::Store(_) => "internal",
         }
     }
@@ -92,6 +100,13 @@ impl From<rusqlite::Error> for ServiceError {
 fn list<T: std::fmt::Display>(items: &[T]) -> String {
     let items: Vec<String> = items.iter().map(ToString::to_string).collect();
     items.join(", ")
+}
+
+fn until(expires_at: &Option<String>) -> String {
+    expires_at
+        .as_ref()
+        .map(|at| format!(" until {at}"))
+        .unwrap_or_default()
 }
 
 fn holder_text(task: TaskId, holder: &Option<String>) -> String {

@@ -1,6 +1,6 @@
 use jiff::civil::Date;
 
-use super::markdown::{find_section, heading_level};
+use super::markdown::{find_section, has_unclosed_fence, heading_level, lines};
 
 /// One changelog entry:
 ///
@@ -49,6 +49,21 @@ pub enum EntryError {
     Separator(&'static str),
     #[error("the summary must not contain Markdown headings")]
     Heading,
+    #[error("the summary has an unclosed code fence")]
+    UnclosedFence,
+    #[error("summary lines must not start with `{0}`, which the entry writes itself")]
+    ReservedLine(&'static str),
+}
+
+/// The lines an entry writes after its summary.
+const RESERVED: [&str; 3] = ["Files:", "Follow-ups:", "Unmet:"];
+
+/// The heading of a changelog entry: `### <date> · <who> · <event>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryHeading {
+    pub date: String,
+    pub who: String,
+    pub event: String,
 }
 
 impl ChangelogEntry {
@@ -62,6 +77,18 @@ impl ChangelogEntry {
         let summary = summary.trim();
         if summary.lines().any(is_heading) {
             return Err(EntryError::Heading);
+        }
+        // An open fence would turn the rest of the file into code, and a
+        // fake `Unmet:` line would change what the Review card shows.
+        if has_unclosed_fence(summary) {
+            return Err(EntryError::UnclosedFence);
+        }
+        if let Some(prefix) = summary.lines().find_map(|line| {
+            RESERVED
+                .into_iter()
+                .find(|prefix| line.trim_start().starts_with(prefix))
+        }) {
+            return Err(EntryError::ReservedLine(prefix));
         }
         if !summary.is_empty() {
             out.push_str(summary);
@@ -116,6 +143,28 @@ fn heading_part<'a>(field: &'static str, value: &'a str) -> Result<&'a str, Entr
     } else {
         Ok(value)
     }
+}
+
+/// The headings of the entries in the Changelog section, oldest first.
+/// Headings that don't have three ` · `-separated parts are skipped.
+pub(crate) fn headings(body: &str) -> Vec<EntryHeading> {
+    let Some(section) = find_section(body, "Changelog") else {
+        return Vec::new();
+    };
+    lines(&body[section.content..section.end])
+        .into_iter()
+        .filter(|line| line.heading == Some(3))
+        .filter_map(|line| {
+            let text = line.text.trim_start().strip_prefix("###")?.trim();
+            let mut parts = text.split(" · ");
+            let heading = EntryHeading {
+                date: parts.next()?.trim().to_owned(),
+                who: parts.next()?.trim().to_owned(),
+                event: parts.next()?.trim().to_owned(),
+            };
+            parts.next().is_none().then_some(heading)
+        })
+        .collect()
 }
 
 /// Appends a rendered entry to `body`, which must have LF line endings and
@@ -279,6 +328,45 @@ mod tests {
         for (e, expected) in cases {
             assert_eq!(e.render(), Err(expected));
         }
+    }
+
+    #[test]
+    fn rejects_summaries_that_fake_structure() {
+        for (summary, expected) in [
+            ("ok\n```\ncode", EntryError::UnclosedFence),
+            ("Done.\nUnmet: 1 (fake)", EntryError::ReservedLine("Unmet:")),
+            ("  Files: a.rs", EntryError::ReservedLine("Files:")),
+            ("Follow-ups: none", EntryError::ReservedLine("Follow-ups:")),
+        ] {
+            let e = ChangelogEntry {
+                summary: summary.into(),
+                ..entry()
+            };
+            assert_eq!(e.render(), Err(expected), "{summary:?}");
+        }
+        let e = ChangelogEntry {
+            summary: "Closed fence:\n```\nlet x = 1;\n```\nThe files: a.rs".into(),
+            ..entry()
+        };
+        assert!(e.render().is_ok());
+    }
+
+    #[test]
+    fn reads_entry_headings() {
+        let body = "\n## Description\n### 2026-01-01 · not · changelog\n\n## Changelog\n\n\
+                    ### 2026-10-13 · claude-code · started\nGo.\n### a heading\n\
+                    ```\n### 2026-10-13 · in · code\n```\n### 2026-10-14 · laszlo · reopened\n";
+        let found: Vec<(String, String)> = headings(body)
+            .into_iter()
+            .map(|h| (h.who, h.event))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("claude-code".to_owned(), "started".to_owned()),
+                ("laszlo".to_owned(), "reopened".to_owned())
+            ]
+        );
     }
 
     #[test]

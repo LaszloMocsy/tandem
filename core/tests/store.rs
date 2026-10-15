@@ -479,3 +479,29 @@ fn writes_keep_normal_file_permissions() {
     write_task(dir.path(), &task).unwrap();
     assert_eq!(mode(&path), 0o664);
 }
+
+#[cfg(unix)]
+#[test]
+fn never_writes_through_a_symlinked_task_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("secret.md");
+    let task = Task::parse(&fixture("minimal.md")).unwrap();
+    fs::write(&target, task.to_markdown()).unwrap();
+    let link = task_path(dir.path(), task.id);
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let mut edited = task.clone();
+    edited.title = "Changed".into();
+    assert!(matches!(
+        write_task(dir.path(), &edited),
+        Err(StoreError::NotRegularFile { .. })
+    ));
+    assert_eq!(fs::read_to_string(&target).unwrap(), task.to_markdown());
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}

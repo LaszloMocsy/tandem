@@ -27,6 +27,8 @@ pub enum StoreError {
     NotTaskFile { path: PathBuf },
     #[error("{} already exists", path.display())]
     AlreadyExists { path: PathBuf },
+    #[error("{} is a symbolic link or not a regular file", path.display())]
+    NotRegularFile { path: PathBuf },
 }
 
 pub(super) fn io_error(path: &Path) -> impl FnOnce(io::Error) -> StoreError + '_ {
@@ -72,9 +74,14 @@ pub fn read_task(path: &Path) -> Result<Task, StoreError> {
 
 /// Writes a task to `dir`, creating or replacing its file atomically.
 /// Refuses to replace a file that does not parse, so a broken file is never
-/// overwritten.
+/// overwritten, or anything but a regular file.
 pub fn write_task(dir: &Path, task: &Task) -> Result<PathBuf, StoreError> {
     let path = task_path(dir, task.id);
+    // Never read or replace a symlink, which could point outside the repo.
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.is_file() => return Err(StoreError::NotRegularFile { path }),
+        _ => {}
+    }
     match fs::read(&path) {
         Ok(existing) => {
             parse_task_file(task.id, &existing).map_err(|source| StoreError::Invalid {

@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::{
     Actor, Lease, LogEntry, LogKind, Service, ServiceError, TaskDetail, TaskFilter, TaskSummary,
-    leases,
+    check_regular_file, leases,
 };
 use crate::index::{IndexedTask, Problem, rescan_task_in, tasks_in};
 use crate::store::{Priority, Status, StoreError, TaskId, task_path};
@@ -62,7 +62,10 @@ impl Service {
     pub fn get_task(&self, actor: &Actor, id: TaskId) -> Result<TaskDetail, ServiceError> {
         self.call(actor, |call| {
             rescan_task_in(call.tx, call.dir, id)?;
+            let board = Board::load(call.tx, call.now)?;
+            let task = board.get(id).ok_or(ServiceError::NotFound(id))?;
             let path = task_path(call.dir, id);
+            check_regular_file(&path, id)?;
             let markdown = match fs::read(&path) {
                 Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -70,8 +73,6 @@ impl Service {
                 }
                 Err(source) => return Err(StoreError::Io { path, source }.into()),
             };
-            let board = Board::load(call.tx, call.now)?;
-            let task = board.get(id).ok_or(ServiceError::NotFound(id))?;
             Ok(TaskDetail {
                 summary: board.summary(task),
                 markdown,

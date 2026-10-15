@@ -14,7 +14,7 @@ mod sections;
 mod task;
 mod yaml;
 
-pub use changelog::{ChangelogEntry, EntryError, Unmet};
+pub use changelog::{ChangelogEntry, EntryError, EntryHeading, Unmet};
 pub use folder::{Access, CONFIG_FILE, FORMAT_VERSION, README_FILE, ReadOnly, prepare_folder};
 pub use fs::{
     StoreError, TASK_DIR, create_task, list_task_files, parse_task_file, read_task, task_path,

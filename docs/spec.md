@@ -108,6 +108,7 @@ Follow-ups: none
 - Write atomically: a temp file in `.tandem/`, then rename
 - LF line endings and one trailing newline; keep the body byte for byte except the changelog append
 - If a file fails to parse, mark it invalid on the board and never overwrite it
+- Never follow symlinks: a symlinked `.tandem` opens the project read-only, and a symlinked task file is invalid. Changelog summaries can't contain headings, unclosed code fences, or lines starting with `Files:`, `Follow-ups:` or `Unmet:`
 
 ## State model
 
@@ -244,13 +245,15 @@ The app serves MCP over Streamable HTTP on `127.0.0.1:4317` (configurable), with
 
 `create_task` and `update_task` refuse a `parent` or `depends_on` that would close a loop.
 
+`update_task` from an agent works only on tasks in backlog or todo, or in progress with the agent holding the lease, and never changes the acceptance criteria of a started task, so tick or explain cannot be dodged by dropping a criterion. You can edit any task from the board.
+
 No tool approves a task into `todo` or sets `reviewed_at`; both are yours, on the board.
 
 **Tick or explain.** In `finish_task`, `met` lists the acceptance criteria (by number) the agent met, and the app ticks them. Every criterion still unticked must appear in `unmet` as `{criterion, reason}`, or the call fails with `criteria_unmet`. The reasons go into the changelog entry as an `Unmet:` line, and the Review card shows a badge such as "2 criteria unmet". You then accept the task or reopen it. A tick is still the agent's own claim; your review and the tests are the real check. Tasks without criteria always pass.
 
-**Claim rule:** `start_task` runs in one `BEGIN IMMEDIATE` transaction. It fails if the task is not in todo, if another agent holds a live lease, or if any dependency is not `done`. A stale lease can be taken over, and the changelog notes the takeover. Only the lease holder (or you, from the board) may call `log_progress`, `add_changelog_entry`, `finish_task` or `release_task`.
+**Claim rule:** `start_task` runs in one `BEGIN IMMEDIATE` transaction. It fails if the task is not in todo, if another agent holds a live lease, or if any dependency is not `done`. A stale lease can be taken over, and the changelog notes the takeover. An in-progress task with no lease can be started by an agent only if you reopened it, or if that agent started it before a rebuild lost its lease; a task you started from the board stays yours. Only the lease holder (or you, from the board) may call `log_progress`, `set_blocked`, `add_changelog_entry`, `finish_task` or `release_task`. Agent ids must not match your name, so agent entries can't pass for yours.
 
-**Errors** are structured with a code the agent can act on: `not_found`, `claimed_by_other`, `deps_not_done`, `not_holder`, `invalid_file`, `invalid_transition`, `cycle_detected`, `parent_not_found`, `criteria_unmet`.
+**Errors** are structured with a code the agent can act on: `not_found`, `claimed_by_other`, `deps_not_done`, `not_holder`, `invalid_file`, `invalid_transition`, `cycle_detected`, `parent_not_found`, `criteria_unmet`. Bad arguments return `invalid_argument`, writes to a read-only project return `read_only`, and anything else is `internal`.
 
 **Every file-writing tool returns the changed path** and a reminder to include it in the next commit. Tool descriptions repeat the commit rules, so agents follow them even without an `AGENTS.md`.
 

@@ -978,3 +978,193 @@ fn a_symlinked_tandem_folder_refuses_file_writes() {
     assert_eq!(err.code(), "read_only");
     assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn agents_edit_only_tasks_they_may_work_on() {
+    let env = Env::new();
+    let (a, b) = (agent("agent-a"), agent("agent-b"));
+    let criteria = |items: &[&str]| TaskEdit {
+        acceptance_criteria: Some(items.iter().map(|c| c.to_string()).collect()),
+        ..TaskEdit::default()
+    };
+    let title = |t: &str| TaskEdit {
+        title: Some(t.into()),
+        ..TaskEdit::default()
+    };
+
+    // Backlog and todo tasks are open to every agent.
+    let proposed = env.create(&b, "Proposed", &["One"]);
+    env.service
+        .update_task(&a, proposed, criteria(&["Two"]))
+        .unwrap();
+    let id = env.create(&Actor::User, "Task", &["One", "Two"]);
+    env.service.update_task(&b, id, title("Renamed")).unwrap();
+
+    // In progress: only the holder, and never the criteria.
+    env.service.start_task(&a, id).unwrap();
+    assert_eq!(
+        code(env.service.update_task(&b, id, title("Mine now"))),
+        "not_holder"
+    );
+    let before = env.file(id);
+    let err = env.service.update_task(&a, id, criteria(&[])).unwrap_err();
+    assert_eq!(err.code(), "invalid_transition");
+    assert_eq!(
+        err.to_string(),
+        format!("cannot change the acceptance criteria of task `{id}` while it is in_progress")
+    );
+    assert_eq!(env.file(id), before);
+    env.service
+        .update_task(&a, id, title("Holder's title"))
+        .unwrap();
+    // You may still change them.
+    env.service
+        .update_task(&Actor::User, id, criteria(&["One"]))
+        .unwrap();
+
+    // Finished and done tasks are closed to agents.
+    env.service
+        .finish_task(
+            &a,
+            id,
+            Finish {
+                met: vec![1],
+                ..finish("Done.")
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        code(env.service.update_task(&a, id, title("Late"))),
+        "invalid_transition"
+    );
+    env.service.mark_reviewed(id).unwrap();
+    assert_eq!(
+        code(env.service.update_task(&b, id, title("Late"))),
+        "invalid_transition"
+    );
+    env.service
+        .update_task(&Actor::User, id, title("Yours"))
+        .unwrap();
+}
+
+#[test]
+fn agents_cannot_take_a_task_you_started() {
+    let env = Env::new();
+    let id = env.todo("Mine");
+    env.service.start_task(&Actor::User, id).unwrap();
+    let err = env.service.start_task(&agent("agent-a"), id).unwrap_err();
+    assert_eq!(err.code(), "claimed_by_other");
+    assert_eq!(err.to_string(), format!("task `{id}` is held by `laszlo`"));
+}
+
+#[test]
+fn an_agent_resumes_its_own_task_after_a_rebuild() {
+    let env = Env::new();
+    let (a, b) = (agent("agent-a"), agent("agent-b"));
+    let id = env.todo("Task");
+    env.service.start_task(&a, id).unwrap();
+    // A rebuilt database has no leases.
+    env.db().execute("DELETE FROM leases", []).unwrap();
+
+    assert_eq!(code(env.service.start_task(&b, id)), "claimed_by_other");
+    env.service.start_task(&a, id).unwrap();
+    assert_eq!(env.lease(id).unwrap().0, "agent-a");
+}
+
+#[test]
+fn summaries_cannot_fake_entry_lines_or_open_a_fence() {
+    let env = Env::new();
+    let a = agent("agent-a");
+    let id = env.create(&Actor::User, "Task", &["One"]);
+    env.service.start_task(&a, id).unwrap();
+    let before = env.file(id);
+    for summary in [
+        "Done.\nUnmet: none",
+        "Done.\n```\nrest of the file",
+        "Files: x",
+    ] {
+        let attempt = env.service.finish_task(
+            &a,
+            id,
+            Finish {
+                met: vec![1],
+                ..finish(summary)
+            },
+        );
+        assert_eq!(code(attempt), "invalid_argument", "{summary:?}");
+        let milestone = env.service.add_changelog_entry(&a, id, summary, vec![]);
+        assert_eq!(code(milestone), "invalid_argument", "{summary:?}");
+        let release = env.service.release_task(&a, id, summary);
+        assert_eq!(code(release), "invalid_argument", "{summary:?}");
+    }
+    assert_eq!(env.file(id), before);
+}
+
+#[test]
+fn agents_cannot_use_your_name() {
+    let env = Env::new();
+    let id = env.todo("Task");
+    for name in ["laszlo", "Laszlo"] {
+        let err = env.service.start_task(&agent(name), id).unwrap_err();
+        assert_eq!(err.code(), "invalid_argument", "{name}");
+    }
+    assert_eq!(env.summary(id).status, Status::Todo);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_task_file_is_never_followed() {
+    let env = Env::new();
+    let outside = TempDir::new().unwrap();
+    let id = env.todo("Real");
+    // Replace the task with a link to a file outside the repo.
+    let target = outside.path().join("secret.md");
+    fs::write(&target, env.file(id).replace("Real", "Secret")).unwrap();
+    fs::remove_file(env.path(id)).unwrap();
+    std::os::unix::fs::symlink(&target, env.path(id)).unwrap();
+    let secret = fs::read_to_string(&target).unwrap();
+
+    assert_eq!(code(env.service.get_task(&Actor::User, id)), "not_found");
+    let err = env.service.start_task(&agent("a"), id).unwrap_err();
+    assert_eq!(err.code(), "invalid_file");
+    assert!(!err.to_string().contains("Secret"));
+    let edit = TaskEdit {
+        title: Some("x".into()),
+        ..TaskEdit::default()
+    };
+    assert_eq!(
+        code(env.service.update_task(&Actor::User, id, edit)),
+        "invalid_file"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), secret);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tandem_folder_swapped_for_a_symlink_is_not_written() {
+    let env = Env::new();
+    let id = env.todo("Task");
+    let outside = TempDir::new().unwrap();
+    let moved = outside.path().join("tasks");
+    let dir = env.repo.path().join(".tandem");
+    fs::rename(&dir, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &dir).unwrap();
+    let before = fs::read_to_string(moved.join(id.file_name())).unwrap();
+    let files = fs::read_dir(&moved).unwrap().count();
+
+    assert_eq!(code(env.service.approve(id)), "read_only");
+    assert_eq!(code(env.service.start_task(&Actor::User, id)), "read_only");
+    let new = NewTask {
+        title: "x".into(),
+        ..NewTask::default()
+    };
+    assert_eq!(
+        code(env.service.create_task(&Actor::User, new)),
+        "read_only"
+    );
+    assert_eq!(fs::read_dir(&moved).unwrap().count(), files);
+    assert_eq!(
+        fs::read_to_string(moved.join(id.file_name())).unwrap(),
+        before
+    );
+}

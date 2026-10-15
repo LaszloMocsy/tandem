@@ -3,7 +3,7 @@ use std::str::FromStr;
 use jiff::civil::Date;
 use serde::Deserialize;
 
-use super::changelog::{self, ChangelogEntry, EntryError};
+use super::changelog::{self, ChangelogEntry, EntryError, EntryHeading};
 use super::id::TaskId;
 use super::sections::{self, Criterion, SectionError};
 use super::yaml;
@@ -216,6 +216,11 @@ impl Task {
     pub fn set_section(&mut self, name: &str, content: &str) -> Result<(), SectionError> {
         self.body = sections::set(&normalize_body(&self.body), name, content)?;
         Ok(())
+    }
+
+    /// The headings of the changelog entries, oldest first.
+    pub fn changelog(&self) -> Vec<EntryHeading> {
+        changelog::headings(&self.body)
     }
 
     /// The checkboxes in the Acceptance criteria section.
