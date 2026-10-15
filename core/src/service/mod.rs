@@ -370,6 +370,11 @@ impl Service {
         &self.dir
     }
 
+    /// The repo the `.tandem/` folder is in.
+    fn repo(&self) -> &Path {
+        self.dir.parent().unwrap_or(&self.dir)
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }

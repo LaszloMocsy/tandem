@@ -1,3 +1,4 @@
+use crate::git::GitError;
 use crate::graph::GraphError;
 use crate::index::IndexError;
 use crate::store::{ReadOnly, Status, StoreError, TaskId};
@@ -40,6 +41,8 @@ pub enum ServiceError {
     CriteriaUnmet { task: TaskId, criteria: Vec<u32> },
     #[error("{0}")]
     InvalidArgument(String),
+    #[error(transparent)]
+    Git(#[from] GitError),
     #[error("the project is read-only: {0}")]
     ReadOnly(ReadOnly),
     #[error(transparent)]
@@ -52,8 +55,8 @@ impl ServiceError {
     /// The error code: one of the spec's `not_found`, `claimed_by_other`,
     /// `deps_not_done`, `not_holder`, `invalid_file`, `invalid_transition`,
     /// `cycle_detected`, `parent_not_found` and `criteria_unmet`, or
-    /// `invalid_argument`, `read_only` and `internal`, which the spec
-    /// doesn't name.
+    /// `invalid_argument`, `read_only`, `git_failed` and `internal`, which
+    /// the spec doesn't name.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotFound(_) => "not_found",
@@ -66,6 +69,7 @@ impl ServiceError {
             Self::CriteriaUnmet { .. } => "criteria_unmet",
             Self::InvalidArgument(_) => "invalid_argument",
             Self::ReadOnly(_) => "read_only",
+            Self::Git(_) => "git_failed",
             Self::Store(e)
                 if matches!(
                     **e,

@@ -9,10 +9,11 @@ use super::{
     Actor, Call, Finish, LogKind, NewTask, Service, ServiceError, TaskEdit, Written, read_file,
     written,
 };
+use crate::git;
 use crate::index::{graph_in, timestamp_text};
 use crate::store::{
     ACCEPTANCE_CRITERIA, ChangelogEntry, Criterion, DESCRIPTION, EntryHeading, RELEVANT_FILES,
-    Status, Task, TaskId, create_task, unused_id,
+    Status, TASK_DIR, Task, TaskId, create_task, unused_id,
 };
 
 impl Service {
@@ -393,6 +394,34 @@ impl Service {
             call.log(id, LogKind::Feedback, feedback)?;
             Ok(out)
         })
+    }
+
+    /// Commit review, by you only, for a task in `done`: commits its file
+    /// and nothing else, with the message `Review <id>: <title>` and a
+    /// `Task: <id>` trailer. Anything else you have staged stays staged.
+    /// Returns the new commit's hash.
+    pub fn commit_review(&self, id: TaskId) -> Result<String, ServiceError> {
+        self.check_writable()?;
+        // Under the project lock, so no write lands mid-commit.
+        self.call(&Actor::User, |call| {
+            let task = call.read(id)?;
+            expect_status(&task, Status::Done, "commit the review of")?;
+            let title = task.title.split_whitespace().collect::<Vec<_>>().join(" ");
+            let message = format!("Review {id}: {title}\n\nTask: {id}");
+            Ok(git::commit_file(
+                self.repo(),
+                &written(&task).path,
+                &message,
+            )?)
+        })
+    }
+
+    /// Whether the task's file has changes git hasn't committed: edited,
+    /// staged or not yet tracked. The board offers Commit review while it
+    /// does.
+    pub fn has_uncommitted_changes(&self, id: TaskId) -> Result<bool, ServiceError> {
+        let path = format!("{TASK_DIR}/{}", id.file_name());
+        Ok(git::has_changes(self.repo(), &path)?)
     }
 
     /// In progress → Todo: `status: todo`, changelog `released` with the
