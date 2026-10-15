@@ -12,14 +12,36 @@ function describe(ref: TaskRef): string {
   return ref.title ? `${ref.title} (${ref.id})` : ref.id
 }
 
-/** One task on the board. `now` decides whether its lease is still live. */
-export function Card({ card, now }: { card: CardData; now: number }) {
+/**
+ * One task on the board. `now` decides whether its lease is still live.
+ * Clicking it, or Enter while it has focus, opens it.
+ */
+export function Card({
+  card,
+  now,
+  selected = false,
+  onOpen,
+}: {
+  card: CardData
+  now: number
+  selected?: boolean
+  onOpen: (id: string) => void
+}) {
   const { task, parent, children, waitingOn } = card
   const lease = task.lease && leaseState(task.lease, now)
   const unmet = task.status === 'finished' ? task.unmet : []
 
   return (
-    <article className="card" aria-label={task.title || task.id}>
+    <article
+      className={selected ? 'card selected' : 'card'}
+      aria-label={task.title || task.id}
+      aria-current={selected || undefined}
+      tabIndex={0}
+      onClick={() => onOpen(task.id)}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') onOpen(task.id)
+      }}
+    >
       <div className="card-top">
         <span
           className={`priority priority-${task.priority}`}

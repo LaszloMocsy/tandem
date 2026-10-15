@@ -30,7 +30,7 @@ function card(patch: Partial<TaskSummary> = {}, extra: Partial<CardData> = {}): 
   }
 }
 
-const render = (data: CardData) => renderToStaticMarkup(<Card card={data} now={NOW} />)
+const render = (data: CardData) => renderToStaticMarkup(<Card card={data} now={NOW} onOpen={() => {}} />)
 
 test('shows the id, title, priority and labels', () => {
   const html = render(card({ labels: ['auth', 'backend'] }))
