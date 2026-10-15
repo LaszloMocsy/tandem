@@ -1,12 +1,14 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tandem_board_core::index::Changes;
-use tandem_board_core::service::{Actor, Config, NewTask, Service, TaskFilter};
-use tandem_board_core::store::TaskId;
+use tandem_board_core::service::{Actor, Config, NewTask, Service, TaskFilter, TaskSummary};
+use tandem_board_core::store::{Status, TaskId};
 use tandem_board_core::watcher::{Watcher, WatcherConfig};
 use tempfile::TempDir;
 
@@ -74,14 +76,22 @@ impl Env {
         self.service.task_dir().join(id.file_name())
     }
 
-    fn title(&self, id: TaskId) -> String {
+    fn summary(&self, id: TaskId) -> TaskSummary {
         self.service
             .list_tasks(&Actor::User, &TaskFilter::default())
             .unwrap()
             .into_iter()
             .find(|t| t.id == id)
             .unwrap()
-            .title
+    }
+
+    fn title(&self, id: TaskId) -> String {
+        self.summary(id).title
+    }
+
+    /// The repo: the folder `.tandem/` is in.
+    fn repo(&self) -> &Path {
+        self.service.task_dir().parent().unwrap()
     }
 }
 
@@ -189,4 +199,91 @@ fn a_deleted_file_is_removed() {
             .is_empty()
     );
     assert_eq!(drain(&events), Vec::<Changes>::new());
+}
+
+/// Runs git in `repo`, asserting it succeeds. Signing and hooks from your
+/// own git config are off, through the repo's config.
+fn git(repo: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Waits until `done` holds, or fails after ten seconds.
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !done() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "timed out: {what}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn switching_branches_updates_the_board_and_drops_leases() {
+    let env = Env::new();
+    let repo = env.repo();
+    git(repo, &["init", "--quiet", "--initial-branch=main"]);
+    let hooks = repo.join(".git").join("no-hooks");
+    for (key, value) in [
+        ("user.name", "Sam"),
+        ("user.email", "sam@example.com"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", hooks.to_str().unwrap()),
+    ] {
+        git(repo, &["config", key, value]);
+    }
+
+    // On main an agent holds the task; on review it is finished.
+    let id = env.create("Task");
+    env.service
+        .start_task(&Actor::agent("agent-a"), id)
+        .unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "--quiet", "-m", "Start the task"]);
+    git(repo, &["switch", "--quiet", "-c", "review"]);
+    let path = env.path(id);
+    let text = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        text.replace("status: in_progress", "status: finished"),
+    )
+    .unwrap();
+    git(repo, &["commit", "--quiet", "-am", "Finish the task"]);
+    git(repo, &["switch", "--quiet", "main"]);
+    env.service.rescan().unwrap();
+    assert!(env.summary(id).lease.is_some());
+
+    let _watcher = env.watch();
+    let events = env.service.subscribe();
+    git(repo, &["switch", "--quiet", "review"]);
+    wait_for("the board shows the review branch", || {
+        env.summary(id).status == Status::Finished
+    });
+    assert_eq!(env.summary(id).lease, None);
+    let seen: BTreeSet<TaskId> = drain(&events)
+        .into_iter()
+        .flat_map(|changes| changes.changed)
+        .collect();
+    assert!(seen.contains(&id), "no tasks-changed for {id}");
+
+    // Back on main the task is in progress again, with no lease to return.
+    git(repo, &["switch", "--quiet", "main"]);
+    wait_for("the board shows main again", || {
+        env.summary(id).status == Status::InProgress
+    });
+    assert_eq!(env.summary(id).lease, None);
 }

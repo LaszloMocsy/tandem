@@ -547,6 +547,10 @@ async fn errors_carry_the_specs_codes() {
         code(&client, "start_task", json!({ "id": blocked.as_str() })).await,
         "deps_not_done"
     );
+    // The dependency waits on the task that waits on it: a loop.
+    let edit = json!({ "id": dep.as_str(), "depends_on": [blocked.as_str()] });
+    assert_eq!(code(&client, "update_task", edit).await, "cycle_detected");
+    assert!(!env.file(dep).contains("depends_on"));
 }
 
 #[tokio::test]
@@ -555,7 +559,8 @@ async fn two_agents_racing_for_a_task_have_one_winner() {
     // Two instances of the same client: only issued ids tell them apart.
     let first = env.client("claude-code", Protocol::Latest).await;
     let second = env.client("claude-code", Protocol::Legacy).await;
-    for round in 0..20 {
+    // The spec's Claims row: 100 rounds, exactly one winner each time.
+    for round in 0..100 {
         let id = env.todo(&format!("Task {round}"));
         let args = json!({ "id": id.as_str() });
         let (a, b) = tokio::join!(

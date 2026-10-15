@@ -390,6 +390,25 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_format_opens_read_only_and_says_to_update() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let config = repo.path().join(TASK_DIR).join("config.toml");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, "format_version = 99\n").unwrap();
+
+        let info = project(env.open(repo.path(), false));
+        assert!(info.open);
+        let reason = info.read_only.unwrap();
+        assert!(reason.contains("format version 99"), "{reason}");
+        assert!(reason.contains("update Tandem"), "{reason}");
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "format_version = 99\n"
+        );
+    }
+
+    #[test]
     fn opening_a_missing_folder_fails() {
         let env = Env::new(TempDir::new().unwrap());
         let repo = TempDir::new().unwrap();
