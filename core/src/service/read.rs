@@ -4,14 +4,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use rusqlite::{Connection, OptionalExtension};
 
 use super::{
-    Actor, Lease, LogEntry, LogKind, Service, ServiceError, TaskContent, TaskDetail, TaskFilter,
-    TaskSummary, check_regular_file, leases,
+    Actor, AgentInfo, HeldTask, Lease, LogEntry, LogKind, Service, ServiceError, TaskContent,
+    TaskDetail, TaskFilter, TaskSummary, check_regular_file, leases,
 };
-use crate::index::{IndexedTask, Problem, tasks_in};
+use crate::index::{IndexedTask, Problem, tasks_in, timestamp_text};
 use crate::store::{Priority, Status, StoreError, Task, TaskId, task_path, unmet_criteria};
 
 impl Service {
@@ -30,6 +30,60 @@ impl Service {
                 .map(|task| board.summary(task))
                 .collect())
         })
+    }
+
+    /// The agents seen within `seen_within`, and any that still hold a
+    /// lease, the most recently seen first, each with the tasks it holds.
+    /// Every `start_task` issues a new agent id, so older ones drop off.
+    pub fn list_agents(&self, seen_within: SignedDuration) -> Result<Vec<AgentInfo>, ServiceError> {
+        let index = self.lock();
+        let conn = index.connection();
+        let now = (self.config.clock)();
+
+        let mut held: HashMap<String, Vec<HeldTask>> = HashMap::new();
+        let mut stmt = conn.prepare(
+            "SELECT l.agent_id, l.task_id, l.expires_at, coalesce(t.title, '')
+             FROM leases l LEFT JOIN tasks t ON t.id = l.task_id
+             ORDER BY l.task_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, TaskId>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        let now_text = timestamp_text(now);
+        for row in rows {
+            let (agent, id, expires_at, title) = row?;
+            held.entry(agent).or_default().push(HeldTask {
+                id,
+                title,
+                live: expires_at > now_text,
+            });
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT agent_id, client_name, last_seen_at FROM agents
+             WHERE last_seen_at >= ?1 OR agent_id IN (SELECT agent_id FROM leases)
+             ORDER BY last_seen_at DESC, agent_id",
+        )?;
+        let agents = stmt.query_map([timestamp_text(now - seen_within)], |row| {
+            Ok(AgentInfo {
+                agent_id: row.get(0)?,
+                client_name: row.get(1)?,
+                last_seen_at: row.get(2)?,
+                tasks: Vec::new(),
+            })
+        })?;
+        agents
+            .map(|agent| {
+                let mut agent = agent?;
+                agent.tasks = held.remove(&agent.agent_id).unwrap_or_default();
+                Ok(agent)
+            })
+            .collect()
     }
 
     /// The highest-priority task `start_task` would accept: in todo, every

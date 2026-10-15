@@ -1501,3 +1501,57 @@ fn update_task_keeps_the_ticks_of_unchanged_criteria() {
         )
     );
 }
+
+#[test]
+fn list_agents_shows_recent_agents_and_lease_holders() {
+    let env = Env::new();
+    let a = agent("agent-a");
+    let id = env.todo("Held task");
+    env.service.start_task(&a, id).unwrap();
+    env.service
+        .list_tasks(&agent("agent-b"), &TaskFilter::default())
+        .unwrap();
+
+    // Two days on, agent-b drops off, agent-a's lease is stale but still
+    // listed, and agent-c has just called.
+    env.advance(2 * 24 * 3600);
+    env.service
+        .list_tasks(&agent("agent-c"), &TaskFilter::default())
+        .unwrap();
+    let agents = env
+        .service
+        .list_agents(SignedDuration::from_hours(24))
+        .unwrap();
+    let found: Vec<String> = agents
+        .iter()
+        .map(|agent| {
+            let tasks: Vec<String> = agent
+                .tasks
+                .iter()
+                .map(|task| format!("{} {} live={}", task.id, task.title, task.live))
+                .collect();
+            format!(
+                "{} {} [{}]",
+                agent.agent_id,
+                agent.last_seen_at,
+                tasks.join(", ")
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "agent-c 2026-10-17T09:00:00.000Z []".to_owned(),
+            format!("agent-a 2026-10-15T09:00:00.000Z [{id} Held task live=false]"),
+        ]
+    );
+
+    // A live lease shows as live.
+    env.service.log_progress(&a, id, "Back.").unwrap();
+    let agents = env
+        .service
+        .list_agents(SignedDuration::from_hours(24))
+        .unwrap();
+    assert_eq!(agents[0].agent_id, "agent-a");
+    assert!(agents[0].tasks[0].live);
+}

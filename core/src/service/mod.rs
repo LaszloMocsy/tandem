@@ -89,6 +89,28 @@ pub struct Agent {
     pub client_name: Option<String>,
 }
 
+/// An agent as the Agents panel shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentInfo {
+    pub agent_id: String,
+    /// From MCP `clientInfo`, such as `claude-code`.
+    pub client_name: Option<String>,
+    /// In [`timestamp_text`] form.
+    pub last_seen_at: String,
+    /// The tasks it holds a lease on, by id.
+    pub tasks: Vec<HeldTask>,
+}
+
+/// A task an agent holds a lease on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldTask {
+    pub id: TaskId,
+    /// Empty if the file is invalid.
+    pub title: String,
+    /// `false` once the lease has expired.
+    pub live: bool,
+}
+
 /// A task's lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lease {
