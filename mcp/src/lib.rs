@@ -1,2 +1,11 @@
-//! MCP tool handlers that call into `tandem-board-core`. Has no Tauri
-//! dependency, so it can later run headless.
+//! The MCP server for Tandem: the spec's tools over Streamable HTTP, one
+//! endpoint per project at `http://127.0.0.1:4317/p/<project-id>/mcp`.
+//! Every tool calls the project's [`Service`](tandem_board_core::service::Service),
+//! the same entry point the board uses. Has no Tauri dependency, so it can
+//! later run headless.
+
+mod server;
+mod tools;
+
+pub use server::{DEFAULT_ADDR, McpServer, ServeError, endpoint_path, router};
+pub use tools::TandemTools;
