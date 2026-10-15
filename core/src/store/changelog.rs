@@ -1,6 +1,7 @@
 use jiff::civil::Date;
 
 use super::markdown::{find_section, has_unclosed_fence, heading_level, lines};
+use super::sections::criteria;
 
 /// One changelog entry:
 ///
@@ -35,6 +36,16 @@ pub struct ChangelogEntry {
 pub struct Unmet {
     /// The criterion's number, counting from 1.
     pub criterion: u32,
+    pub reason: String,
+}
+
+/// An acceptance criterion a finished task left unmet: still unticked, and
+/// explained on the `Unmet:` line of the latest `finished` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnmetCriterion {
+    /// The criterion's number, counting from 1.
+    pub number: u32,
+    pub text: String,
     pub reason: String,
 }
 
@@ -154,17 +165,96 @@ pub(crate) fn headings(body: &str) -> Vec<EntryHeading> {
     lines(&body[section.content..section.end])
         .into_iter()
         .filter(|line| line.heading == Some(3))
-        .filter_map(|line| {
-            let text = line.text.trim_start().strip_prefix("###")?.trim();
-            let mut parts = text.split(" · ");
-            let heading = EntryHeading {
-                date: parts.next()?.trim().to_owned(),
-                who: parts.next()?.trim().to_owned(),
-                event: parts.next()?.trim().to_owned(),
-            };
-            parts.next().is_none().then_some(heading)
+        .filter_map(|line| parse_heading(line.text))
+        .collect()
+}
+
+fn parse_heading(line: &str) -> Option<EntryHeading> {
+    let text = line.trim_start().strip_prefix("###")?.trim();
+    let mut parts = text.split(" · ");
+    let heading = EntryHeading {
+        date: parts.next()?.trim().to_owned(),
+        who: parts.next()?.trim().to_owned(),
+        event: parts.next()?.trim().to_owned(),
+    };
+    parts.next().is_none().then_some(heading)
+}
+
+/// The criteria the latest `finished` entry lists as unmet that are still
+/// unticked, with their text and the agent's reason. A criterion ticked by
+/// hand since, or one that no longer exists, is left out.
+pub fn unmet_criteria(body: &str) -> Vec<UnmetCriterion> {
+    let criteria = criteria(body);
+    latest_unmet(body)
+        .into_iter()
+        .filter_map(|unmet| {
+            let criterion = criteria
+                .iter()
+                .find(|c| c.number == unmet.criterion && !c.met)?;
+            Some(UnmetCriterion {
+                number: unmet.criterion,
+                text: criterion.text.clone(),
+                reason: unmet.reason,
+            })
         })
         .collect()
+}
+
+/// The `Unmet:` line of the latest `finished` entry, parsed. An entry ends
+/// at the next heading of level 3 or above.
+fn latest_unmet(body: &str) -> Vec<Unmet> {
+    let Some(section) = find_section(body, "Changelog") else {
+        return Vec::new();
+    };
+    let mut latest = Vec::new();
+    let mut in_finished = false;
+    for line in lines(&body[section.content..section.end]) {
+        match line.heading {
+            Some(level) if level <= 3 => {
+                in_finished =
+                    level == 3 && parse_heading(line.text).is_some_and(|h| h.event == "finished");
+                if in_finished {
+                    latest.clear();
+                }
+            }
+            _ => {
+                if in_finished && let Some(value) = line.text.strip_prefix("Unmet:") {
+                    latest = parse_unmet(value);
+                }
+            }
+        }
+    }
+    latest
+}
+
+/// Parses `2 (needs a staging account); 4 (out of scope)`. A reason may
+/// contain `; ` itself, so an item ends only where the next one starts.
+fn parse_unmet(value: &str) -> Vec<Unmet> {
+    let mut items: Vec<String> = Vec::new();
+    for part in value.trim().split("; ") {
+        match items.last_mut() {
+            Some(item) if !(item.ends_with(')') && starts_item(part)) => {
+                item.push_str("; ");
+                item.push_str(part);
+            }
+            _ => items.push(part.to_owned()),
+        }
+    }
+    items
+        .iter()
+        .filter_map(|item| {
+            let (number, reason) = item.split_once(" (")?;
+            Some(Unmet {
+                criterion: number.parse().ok()?,
+                reason: reason.strip_suffix(')')?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn starts_item(part: &str) -> bool {
+    part.split_once(" (")
+        .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Appends a rendered entry to `body`, which must have LF line endings and
@@ -367,6 +457,49 @@ mod tests {
                 ("sam".to_owned(), "reopened".to_owned())
             ]
         );
+    }
+
+    fn unmet(body: &str) -> Vec<(u32, String, String)> {
+        unmet_criteria(body)
+            .into_iter()
+            .map(|u| (u.number, u.text, u.reason))
+            .collect()
+    }
+
+    #[test]
+    fn reads_unmet_criteria_from_the_latest_finished_entry() {
+        let criteria = "\n## Acceptance criteria\n- [x] One\n- [ ] Two\n- [ ] Three\n- [ ] Four\n";
+        let body = format!(
+            "{criteria}\n## Changelog\n\n\
+             ### 2026-10-13 · a · finished\nFirst try.\nUnmet: 3 (old reason)\n\
+             ### 2026-10-14 · sam · reopened\nAgain.\n\
+             ### 2026-10-15 · a · finished\nDone.\nFiles: a.rs\n\
+             Unmet: 2 (needs a staging account; or a mock); 4 (out of scope (for now))\n"
+        );
+        assert_eq!(
+            unmet(&body),
+            [
+                (
+                    2,
+                    "Two".to_owned(),
+                    "needs a staging account; or a mock".to_owned()
+                ),
+                (4, "Four".to_owned(), "out of scope (for now)".to_owned()),
+            ]
+        );
+
+        // Ticked by hand since, or no longer there.
+        let ticked = body
+            .replace("- [ ] Two", "- [x] Two")
+            .replace("- [ ] Four\n", "");
+        assert_eq!(unmet(&ticked), []);
+
+        // A later finish without an `Unmet:` line clears the list.
+        let all_met = format!("{body}\n### 2026-10-16 · a · finished\nAll done.\n");
+        assert_eq!(unmet(&all_met), []);
+
+        // Only the Changelog section counts.
+        assert_eq!(unmet(&format!("{criteria}Unmet: 2 (x)\n")), []);
     }
 
     #[test]

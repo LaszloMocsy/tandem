@@ -12,7 +12,7 @@ use super::{
     check_regular_file, leases,
 };
 use crate::index::{IndexedTask, Problem, tasks_in};
-use crate::store::{Priority, Status, StoreError, TaskId, task_path};
+use crate::store::{Priority, Status, StoreError, TaskId, task_path, unmet_criteria};
 
 impl Service {
     /// Summaries of the tasks that match `filter`, sorted by id.
@@ -140,9 +140,16 @@ impl Board {
             parent: task.parent,
             labels: task.labels.clone(),
             depends_on: task.depends_on.clone(),
+            created: task.created,
             lease: self.leases.get(&task.id).cloned(),
             blocked: self.blocked.get(&task.id).cloned(),
             problem: task.problem.clone(),
+            // An invalid file is indexed as `backlog`, so its raw text is
+            // never read as a body here.
+            unmet: match task.status {
+                Status::Finished => unmet_criteria(&task.body),
+                _ => Vec::new(),
+            },
         }
     }
 

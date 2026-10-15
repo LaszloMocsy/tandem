@@ -4,7 +4,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use tandem_board_core::index::{Changes, Problem};
 use tandem_board_core::service::{self, LogEntry};
-use tandem_board_core::store::{Priority, Status, TaskId};
+use tandem_board_core::store::{self, Priority, Status, TaskId};
 
 /// The `tasks-changed` event.
 pub const TASKS_CHANGED: &str = "tasks-changed";
@@ -39,9 +39,13 @@ pub struct TaskSummary {
     pub parent: Option<String>,
     pub labels: Vec<String>,
     pub depends_on: Vec<String>,
+    /// `YYYY-MM-DD`; `None` only if the file is invalid.
+    pub created: Option<String>,
     pub lease: Option<Lease>,
     pub blocked: Option<String>,
     pub problem: Option<TaskProblem>,
+    /// Only filled in for tasks in `finished`.
+    pub unmet: Vec<UnmetCriterion>,
 }
 
 impl From<service::TaskSummary> for TaskSummary {
@@ -54,9 +58,30 @@ impl From<service::TaskSummary> for TaskSummary {
             parent: task.parent.map(|id| id.to_string()),
             labels: task.labels,
             depends_on: task.depends_on.iter().map(ToString::to_string).collect(),
+            created: task.created.map(|date| date.to_string()),
             lease: task.lease.map(Lease::from),
             blocked: task.blocked,
             problem: task.problem.map(TaskProblem::from),
+            unmet: task.unmet.into_iter().map(UnmetCriterion::from).collect(),
+        }
+    }
+}
+
+/// An acceptance criterion the agent left unmet, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmetCriterion {
+    pub criterion: u32,
+    pub text: String,
+    pub reason: String,
+}
+
+impl From<store::UnmetCriterion> for UnmetCriterion {
+    fn from(unmet: store::UnmetCriterion) -> Self {
+        Self {
+            criterion: unmet.number,
+            text: unmet.text,
+            reason: unmet.reason,
         }
     }
 }

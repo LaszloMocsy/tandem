@@ -11,7 +11,7 @@ use tandem_board_core::service::{
     Actor, Config, Finish, LogKind, NewTask, Service, ServiceError, TaskEdit, TaskFilter,
     TaskSummary, Written,
 };
-use tandem_board_core::store::{Priority, ReadOnly, Status, TaskId, Unmet};
+use tandem_board_core::store::{Date, Priority, ReadOnly, Status, TaskId, Unmet, UnmetCriterion};
 use tempfile::TempDir;
 
 const START: &str = "2026-10-15T09:00:00Z";
@@ -703,6 +703,20 @@ fn finish_ticks_met_criteria_and_requires_a_reason_for_the_rest() {
         "finished",
         "\n### 2026-10-15 · agent-a · finished\nDone.\nUnmet: 2 (needs a staging account)\n",
     );
+    let summary = env.summary(id);
+    assert_eq!(
+        summary.unmet,
+        [UnmetCriterion {
+            number: 2,
+            text: "Two".into(),
+            reason: "needs a staging account".into(),
+        }]
+    );
+    assert_eq!(summary.created, Some(Date::constant(2026, 10, 15)));
+
+    // Reopened, the card is no longer in Review and shows no badge.
+    env.service.reopen(id, "Try again.").unwrap();
+    assert_eq!(env.summary(id).unmet, []);
 }
 
 #[test]

@@ -27,7 +27,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::index::{Changes, Problem, ProjectIndex, rescan_in, rescan_task_in, timestamp_text};
 use crate::store::{
     Access, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR, Task, TaskId, Unmet,
-    parse_task_file, task_path,
+    UnmetCriterion, parse_task_file, task_path,
 };
 
 pub use error::ServiceError;
@@ -111,9 +111,14 @@ pub struct TaskSummary {
     pub parent: Option<TaskId>,
     pub labels: Vec<String>,
     pub depends_on: Vec<TaskId>,
+    /// `None` only if the file is invalid.
+    pub created: Option<Date>,
     pub lease: Option<Lease>,
     pub blocked: Option<String>,
     pub problem: Option<Problem>,
+    /// The criteria the agent left unmet, with reasons. Only filled in for
+    /// tasks in `finished`, where the Review card shows them.
+    pub unmet: Vec<UnmetCriterion>,
 }
 
 /// A task as `get_task` shows it.

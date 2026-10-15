@@ -42,6 +42,14 @@ export interface TaskProblem {
   message: string
 }
 
+/** An acceptance criterion the agent left unmet, and why. */
+export interface UnmetCriterion {
+  /** Counting from 1. */
+  criterion: number
+  text: string
+  reason: string
+}
+
 export interface TaskSummary {
   id: string
   title: string
@@ -50,9 +58,13 @@ export interface TaskSummary {
   parent: string | null
   labels: string[]
   dependsOn: string[]
+  /** `YYYY-MM-DD`; `null` only if the file is invalid. */
+  created: string | null
   lease: Lease | null
   blocked: string | null
   problem: TaskProblem | null
+  /** Only filled in for tasks in `finished`. */
+  unmet: UnmetCriterion[]
 }
 
 export interface WorkLogEntry {
