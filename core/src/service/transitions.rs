@@ -11,8 +11,8 @@ use super::{
 };
 use crate::index::{graph_in, timestamp_text};
 use crate::store::{
-    ACCEPTANCE_CRITERIA, ChangelogEntry, DESCRIPTION, RELEVANT_FILES, Status, Task, TaskId,
-    create_task, unused_id,
+    ACCEPTANCE_CRITERIA, ChangelogEntry, DESCRIPTION, EntryHeading, RELEVANT_FILES, Status, Task,
+    TaskId, create_task, unused_id,
 };
 
 impl Service {
@@ -420,26 +420,28 @@ impl Service {
 /// Whether an agent may start an in-progress task that has no lease: only
 /// if you reopened it last, or the agent itself started it last.
 fn check_unleased_start(call: &Call<'_>, task: &Task, agent: &str) -> Result<(), ServiceError> {
-    let changelog = task.changelog();
-    if changelog
-        .last()
-        .is_some_and(|entry| entry.event == "reopened")
-    {
-        return Ok(());
-    }
-    let starter = changelog
-        .iter()
-        .rev()
-        .find(|entry| entry.event == "started")
-        .map(|entry| entry.who.as_str());
-    match starter {
-        Some(starter) if starter == agent => Ok(()),
-        starter => Err(ServiceError::ClaimedByOther {
+    match last_hand_over(task) {
+        Some(entry) if entry.event == "reopened" => Ok(()),
+        Some(entry) if entry.event == "started" && entry.who == agent => Ok(()),
+        entry => Err(ServiceError::ClaimedByOther {
             task: task.id,
-            holder: starter.unwrap_or(&call.config.user_name).to_owned(),
+            holder: entry
+                .filter(|entry| entry.event == "started")
+                .map_or(call.config.user_name.clone(), |entry| entry.who),
             expires_at: None,
         }),
     }
+}
+
+/// The latest changelog entry that hands the task over: `started`,
+/// `finished`, `released` or `reopened`. Milestones and edits don't.
+pub(super) fn last_hand_over(task: &Task) -> Option<EntryHeading> {
+    task.changelog().into_iter().rev().find(|entry| {
+        matches!(
+            entry.event.as_str(),
+            "started" | "finished" | "released" | "reopened"
+        )
+    })
 }
 
 /// Which tasks an agent may edit at all: not finished or done ones, and in

@@ -297,6 +297,42 @@ impl Service {
             .retain(|tx| tx.send(changes.clone()).is_ok());
     }
 
+    /// Issues a new agent id for an MCP client that starts a task: the
+    /// client's name in lowercase ASCII letters, digits and dashes, plus a
+    /// random suffix, such as `claude-code-7f2a`. The id is recorded in
+    /// `agents`, so [`is_known_agent`](Self::is_known_agent) accepts it.
+    pub fn register_agent(&self, client_name: Option<&str>) -> Result<String, ServiceError> {
+        let base = client_agent_id(client_name.unwrap_or(""));
+        let index = self.lock();
+        let now = timestamp_text((self.config.clock)());
+        loop {
+            let mut suffix = [0u8; 2];
+            getrandom::fill(&mut suffix).expect("the OS random number generator failed");
+            let id = format!("{base}-{:02x}{:02x}", suffix[0], suffix[1]);
+            if check_agent_id(&id, &self.config.user_name).is_err() {
+                continue;
+            }
+            let inserted = index.connection().execute(
+                "INSERT OR IGNORE INTO agents (agent_id, client_name, last_seen_at)
+                 VALUES (?1, ?2, ?3)",
+                params![id, client_name, now],
+            )?;
+            if inserted == 1 {
+                return Ok(id);
+            }
+        }
+    }
+
+    /// Whether `id` was issued by [`register_agent`](Self::register_agent).
+    pub fn is_known_agent(&self, id: &str) -> Result<bool, ServiceError> {
+        Ok(self
+            .lock()
+            .connection()
+            .query_row("SELECT 1 FROM agents WHERE agent_id = ?1", [id], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
     /// The `.tandem/` folder.
     pub fn task_dir(&self) -> &Path {
         &self.dir
@@ -465,11 +501,36 @@ impl Call<'_> {
         };
         match self.lease(id)? {
             Some(lease) if lease.agent_id == agent.id => Ok(()),
+            None if self.started_last(id, &agent.id) => {
+                // The lease was lost, as in a database rebuild, but the
+                // changelog shows this agent started the task: it carries on.
+                self.tx.execute(
+                    "INSERT INTO leases (task_id, agent_id, claimed_at, expires_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        id,
+                        agent.id,
+                        timestamp_text(self.now),
+                        timestamp_text(self.now + self.config.lease_duration)
+                    ],
+                )?;
+                Ok(())
+            }
             other => Err(ServiceError::NotHolder {
                 task: id,
                 holder: other.map(|lease| lease.agent_id),
             }),
         }
+    }
+
+    /// Whether the task is in progress and `agent` started it, with nothing
+    /// handing it over since.
+    fn started_last(&self, id: TaskId, agent: &str) -> bool {
+        read_file(self.dir, id).is_ok_and(|task| {
+            task.status == Status::InProgress
+                && transitions::last_hand_over(&task)
+                    .is_some_and(|entry| entry.event == "started" && entry.who == agent)
+        })
     }
 
     /// The name changelog entries use for the caller.
@@ -585,6 +646,28 @@ fn check_agent_id(id: &str, user_name: &str) -> Result<(), ServiceError> {
         )));
     }
     Ok(())
+}
+
+/// The agent id for an MCP call that carries no issued id: the client name
+/// in lowercase ASCII letters and digits, with every other run of
+/// characters as one dash, such as `claude-code`, or `agent` without a name.
+/// Issued ids add a random suffix to it.
+pub fn client_agent_id(client_name: &str) -> String {
+    let mut base = String::new();
+    for c in client_name.chars() {
+        if base.len() >= 40 {
+            break;
+        }
+        if c.is_ascii_alphanumeric() {
+            base.push(c.to_ascii_lowercase());
+        } else if !base.is_empty() && !base.ends_with('-') {
+            base.push('-');
+        }
+    }
+    match base.trim_end_matches('-') {
+        "" => "agent".to_owned(),
+        base => base.to_owned(),
+    }
 }
 
 /// Checks that `.tandem` is still a real folder before writing to it: it

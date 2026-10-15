@@ -1306,3 +1306,51 @@ fn every_change_is_sent_to_subscribers_once() {
     drop(events);
     env.todo("Another");
 }
+
+#[test]
+fn issued_agent_ids_are_unique_and_known() {
+    let env = Env::new();
+    let first = env.service.register_agent(Some("Claude Code")).unwrap();
+    let second = env.service.register_agent(Some("Claude Code")).unwrap();
+    assert_ne!(first, second);
+    for id in [&first, &second] {
+        let suffix = id.strip_prefix("claude-code-").unwrap();
+        assert_eq!(suffix.len(), 4);
+        assert!(suffix.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(env.service.is_known_agent(id).unwrap());
+    }
+    let anonymous = env.service.register_agent(None).unwrap();
+    assert!(anonymous.starts_with("agent-"));
+    let odd = env.service.register_agent(Some("日本 tool!!")).unwrap();
+    assert!(odd.starts_with("tool-"), "{odd}");
+    assert!(!env.service.is_known_agent("claude-code").unwrap());
+    // Issued ids pass the service's own checks.
+    let id = env.todo("Task");
+    env.service.start_task(&agent(&first), id).unwrap();
+}
+
+#[test]
+fn the_starting_agent_recovers_its_lease_after_a_rebuild() {
+    let env = Env::new();
+    let (a, b) = (agent("agent-a"), agent("agent-b"));
+    let id = env.todo("Task");
+    env.service.start_task(&a, id).unwrap();
+    env.db().execute("DELETE FROM leases", []).unwrap();
+
+    // Another agent can't use the gap; the agent that started it carries on.
+    assert_eq!(
+        code(env.service.log_progress(&b, id, "Mine?")),
+        "not_holder"
+    );
+    env.service.log_progress(&a, id, "Still mine.").unwrap();
+    assert_eq!(env.lease(id).unwrap().0, "agent-a");
+
+    // Once the task changes hands, the old agent can't recover it.
+    env.service.finish_task(&a, id, finish("Done.")).unwrap();
+    env.service.reopen(id, "One more thing.").unwrap();
+    assert_eq!(
+        code(env.service.log_progress(&a, id, "Back?")),
+        "not_holder"
+    );
+    assert_eq!(env.lease(id), None);
+}
