@@ -11,7 +11,7 @@ use super::{
     Actor, Lease, LogEntry, LogKind, Service, ServiceError, TaskDetail, TaskFilter, TaskSummary,
     check_regular_file, leases,
 };
-use crate::index::{IndexedTask, Problem, rescan_task_in, tasks_in};
+use crate::index::{IndexedTask, Problem, tasks_in};
 use crate::store::{Priority, Status, StoreError, TaskId, task_path};
 
 impl Service {
@@ -61,7 +61,7 @@ impl Service {
     /// latest reopen feedback.
     pub fn get_task(&self, actor: &Actor, id: TaskId) -> Result<TaskDetail, ServiceError> {
         self.call(actor, |call| {
-            rescan_task_in(call.tx, call.dir, id)?;
+            call.scan_task(id)?;
             let board = Board::load(call.tx, call.now)?;
             let task = board.get(id).ok_or(ServiceError::NotFound(id))?;
             let path = task_path(call.dir, id);

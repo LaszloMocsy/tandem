@@ -12,17 +12,19 @@ mod error;
 mod read;
 mod transitions;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use crate::index::{Changes, Problem, ProjectIndex, rescan_task_in, timestamp_text};
+use crate::index::{Changes, Problem, ProjectIndex, rescan_in, rescan_task_in, timestamp_text};
 use crate::store::{
     Access, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR, Task, TaskId, Unmet,
     parse_task_file, task_path,
@@ -241,6 +243,7 @@ pub struct Service {
     dir: PathBuf,
     read_only: Option<ReadOnly>,
     config: Config,
+    subscribers: Mutex<Vec<Sender<Changes>>>,
 }
 
 impl Service {
@@ -267,7 +270,36 @@ impl Service {
             index: Mutex::new(index),
             read_only,
             config,
+            subscribers: Mutex::new(Vec::new()),
         }
+    }
+
+    /// A channel that receives the tasks changed by every index change
+    /// from then on: writes through the service, and outside edits found
+    /// by the watcher or a rescan. A working-log note or blocked flag
+    /// counts as a change to its task. Dropping the receiver unsubscribes.
+    pub fn subscribe(&self) -> Receiver<Changes> {
+        let (tx, rx) = mpsc::channel();
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(tx);
+        rx
+    }
+
+    fn emit(&self, changes: Changes) {
+        if changes.is_empty() {
+            return;
+        }
+        self.subscribers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|tx| tx.send(changes.clone()).is_ok());
+    }
+
+    /// The `.tandem/` folder.
+    pub fn task_dir(&self) -> &Path {
+        &self.dir
     }
 
     pub fn config(&self) -> &Config {
@@ -281,13 +313,20 @@ impl Service {
 
     /// A full rescan, for a burst of watcher events or the periodic sweep.
     pub fn rescan(&self) -> Result<Changes, ServiceError> {
-        Ok(self.lock().rescan()?)
+        let mut index = self.lock();
+        let changes = index.rescan()?;
+        self.emit(changes.clone());
+        Ok(changes)
     }
 
     /// Re-reads one task's file, for a watcher event. An event for a file
-    /// the service just wrote finds the same hash and changes nothing.
+    /// the service just wrote finds the same hash and changes nothing, so
+    /// the app's own writes never come back as changes.
     pub fn rescan_task(&self, id: TaskId) -> Result<Changes, ServiceError> {
-        Ok(self.lock().rescan_task(id)?)
+        let mut index = self.lock();
+        let changes = index.rescan_task(id)?;
+        self.emit(changes.clone());
+        Ok(changes)
     }
 
     fn lock(&self) -> MutexGuard<'_, ProjectIndex> {
@@ -316,9 +355,13 @@ impl Service {
             now,
             today: now.to_zoned(self.config.time_zone.clone()).date(),
             config: &self.config,
+            changes: RefCell::default(),
         };
         let out = f(&call)?;
+        let changes = call.changes.take();
         tx.commit()?;
+        // Still under the lock, so subscribers see changes in commit order.
+        self.emit(changes);
         Ok(out)
     }
 
@@ -359,12 +402,36 @@ struct Call<'a> {
     now: Timestamp,
     today: Date,
     config: &'a Config,
+    /// What the call changed, sent to subscribers once it commits.
+    changes: RefCell<Changes>,
 }
 
 impl Call<'_> {
+    /// Re-indexes one task's file.
+    fn scan_task(&self, id: TaskId) -> Result<(), ServiceError> {
+        let changes = rescan_task_in(self.tx, self.dir, id)?;
+        self.changes.borrow_mut().merge(changes);
+        Ok(())
+    }
+
+    /// A full stat scan.
+    fn scan_all(&self) -> Result<(), ServiceError> {
+        let changes = rescan_in(self.tx, self.dir)?;
+        self.changes.borrow_mut().merge(changes);
+        Ok(())
+    }
+
+    /// Records a change to a task's overlays: its working log or flags.
+    fn touched(&self, id: TaskId) {
+        self.changes.borrow_mut().merge(Changes {
+            changed: [id].into(),
+            removed: Default::default(),
+        });
+    }
+
     /// Re-indexes the task, then reads and parses its file.
     fn read(&self, id: TaskId) -> Result<Task, ServiceError> {
-        rescan_task_in(self.tx, self.dir, id)?;
+        self.scan_task(id)?;
         read_file(self.dir, id)
     }
 
@@ -373,7 +440,7 @@ impl Call<'_> {
     fn write(&self, task: &Task) -> Result<Written, ServiceError> {
         check_folder(self.dir)?;
         crate::store::write_task(self.dir, task)?;
-        rescan_task_in(self.tx, self.dir, task.id)?;
+        self.scan_task(task.id)?;
         Ok(written(task))
     }
 
@@ -421,6 +488,7 @@ impl Call<'_> {
     }
 
     fn log(&self, id: TaskId, kind: LogKind, message: &str) -> Result<(), ServiceError> {
+        self.touched(id);
         self.tx.execute(
             "INSERT INTO work_log (task_id, agent_id, kind, message, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",

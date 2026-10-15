@@ -1252,3 +1252,57 @@ fn a_tandem_folder_swapped_for_a_symlink_is_not_written() {
         before
     );
 }
+
+#[test]
+fn every_change_is_sent_to_subscribers_once() {
+    use tandem_board_core::index::Changes;
+    let env = Env::new();
+    let a = agent("agent-a");
+    let events = env.service.subscribe();
+    let next = || events.try_recv().ok();
+    let changed = |id: TaskId| {
+        Some(Changes {
+            changed: [id].into(),
+            removed: Default::default(),
+        })
+    };
+
+    let id = env.todo("Task");
+    assert_eq!(next(), changed(id));
+    assert_eq!(next(), None);
+
+    env.service.start_task(&a, id).unwrap();
+    assert_eq!(next(), changed(id));
+    // Overlays count too.
+    env.service.log_progress(&a, id, "Working.").unwrap();
+    assert_eq!(next(), changed(id));
+    env.service.set_blocked(&a, id, "Question").unwrap();
+    assert_eq!(next(), changed(id));
+
+    // Reads, refused calls and rescans that find nothing send nothing.
+    env.service.get_task(&a, id).unwrap();
+    env.service.list_tasks(&a, &TaskFilter::default()).unwrap();
+    assert!(env.service.approve(id).is_err());
+    env.service.rescan().unwrap();
+    env.service.rescan_task(id).unwrap();
+    assert_eq!(next(), None);
+
+    // An outside edit found by a rescan, and a deletion.
+    let text = env.file(id).replace("title: Task", "title: Edited");
+    fs::write(env.path(id), text).unwrap();
+    env.service.rescan_task(id).unwrap();
+    assert_eq!(next(), changed(id));
+    fs::remove_file(env.path(id)).unwrap();
+    env.service.rescan().unwrap();
+    assert_eq!(
+        next(),
+        Some(Changes {
+            changed: Default::default(),
+            removed: [id].into(),
+        })
+    );
+
+    // A dropped receiver is simply unsubscribed.
+    drop(events);
+    env.todo("Another");
+}

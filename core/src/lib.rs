@@ -5,3 +5,4 @@ pub mod graph;
 pub mod index;
 pub mod service;
 pub mod store;
+pub mod watcher;

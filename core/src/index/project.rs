@@ -71,6 +71,19 @@ impl Changes {
     pub fn is_empty(&self) -> bool {
         self.changed.is_empty() && self.removed.is_empty()
     }
+
+    /// Adds later changes: a task removed and then changed again counts as
+    /// changed, and the other way round.
+    pub fn merge(&mut self, later: Changes) {
+        for id in later.removed {
+            self.changed.remove(&id);
+            self.removed.insert(id);
+        }
+        for id in later.changed {
+            self.removed.remove(&id);
+            self.changed.insert(id);
+        }
+    }
 }
 
 /// A project's database, `projects/<project-id>.db`, and the index of its
@@ -566,6 +579,27 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merging_keeps_the_latest_state() {
+        let id = |s: &str| s.parse::<TaskId>().unwrap();
+        let (a, b, c) = (id("a7rq4ne"), id("k3f9x2m"), id("p2xmq7d"));
+        let mut changes = Changes {
+            changed: [a, b].into(),
+            removed: [c].into(),
+        };
+        changes.merge(Changes {
+            changed: [c].into(),
+            removed: [b].into(),
+        });
+        assert_eq!(
+            changes,
+            Changes {
+                changed: [a, c].into(),
+                removed: [b].into(),
+            }
+        );
+    }
 
     #[test]
     fn hashes_as_lowercase_hex() {

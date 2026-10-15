@@ -9,7 +9,7 @@ use super::{
     Actor, Call, Finish, LogKind, NewTask, Service, ServiceError, TaskEdit, Written, read_file,
     written,
 };
-use crate::index::{graph_in, rescan_in, rescan_task_in, timestamp_text};
+use crate::index::{graph_in, timestamp_text};
 use crate::store::{
     ACCEPTANCE_CRITERIA, ChangelogEntry, DESCRIPTION, RELEVANT_FILES, Status, Task, TaskId,
     create_task, unused_id,
@@ -27,7 +27,7 @@ impl Service {
         let depends_on = dedup(new.depends_on);
         self.call(actor, |call| {
             // A full stat scan first, so the graph check sees every file.
-            rescan_in(call.tx, call.dir)?;
+            call.scan_all()?;
             let id = unused_id(call.dir)?;
             graph_in(call.tx)?.check_change(id, new.parent, &depends_on)?;
             let mut task = Task {
@@ -49,7 +49,7 @@ impl Service {
             set_section(&mut task, ACCEPTANCE_CRITERIA, &criteria)?;
             append(&mut task, call, "created", "")?;
             create_task(call.dir, &task)?;
-            rescan_task_in(call.tx, call.dir, id)?;
+            call.scan_task(id)?;
             Ok(written(&task))
         })
     }
@@ -76,7 +76,7 @@ impl Service {
     ) -> Result<Written, ServiceError> {
         self.check_writable()?;
         self.call(actor, |call| {
-            rescan_in(call.tx, call.dir)?;
+            call.scan_all()?;
             let original = read_file(call.dir, id)?;
             let is_agent = matches!(actor, Actor::Agent(_));
             if is_agent {
@@ -459,7 +459,7 @@ fn check_agent_access(call: &Call<'_>, task: &Task) -> Result<(), ServiceError> 
 impl Call<'_> {
     /// Checks that the task has a file, valid or not.
     fn check_exists(&self, id: TaskId) -> Result<(), ServiceError> {
-        rescan_task_in(self.tx, self.dir, id)?;
+        self.scan_task(id)?;
         match crate::index::task_in(self.tx, id)? {
             Some(_) => Ok(()),
             None => Err(ServiceError::NotFound(id)),
