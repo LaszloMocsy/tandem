@@ -847,3 +847,111 @@ button {
 .finish-criteria input[type='checkbox'] {
   margin-top: 3px;
 }
+
+.panel-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.panel-buttons button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.panel-buttons button[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.panel-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.agents {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agents > li {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.agent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-head .muted {
+  margin-left: auto;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.agent-head .dot {
+  background: var(--stale);
+}
+
+.agent-head .dot.active {
+  background: var(--live);
+}
+
+.held {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.held li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.held .link {
+  font-size: 14px;
+  text-align: left;
+}
+
+.held code {
+  font-size: 12px;
+  font-style: normal;
+}
+
+.held-none {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.copy-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.copy-head h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.copy-text {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

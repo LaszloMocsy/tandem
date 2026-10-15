@@ -6,6 +6,7 @@ import { DetailPane, type PaneApi } from './DetailPane.tsx'
 import { Dialog, FinishForm, NewTaskForm, ReopenForm } from './dialogs.tsx'
 import { errorMessage } from './edit.ts'
 import { moveFor } from './moves.ts'
+import { AgentsPanel, SetupPanel } from './panels.tsx'
 import { shortcutFor } from './shortcuts.ts'
 import { board, useBoard, type BoardStore } from './store.ts'
 import { Toolbar } from './Toolbar.tsx'
@@ -17,7 +18,7 @@ const LEASE_TICK_MS = 15_000
 
 /** The commands the app uses. */
 export type AppApi = PaneApi &
-  Pick<Api, 'listTasks' | 'createTask' | 'start' | 'finish' | 'release'>
+  Pick<Api, 'listTasks' | 'listAgents' | 'createTask' | 'start' | 'finish' | 'release'>
 
 const columnName = (status: Status) => COLUMNS.find((c) => c.status === status)?.title ?? status
 
@@ -47,6 +48,17 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
 
   const [selected, setSelected] = useState<string | null>(null)
   const close = useCallback(() => setSelected(null), [])
+  // The Agents or Setup panel, in the detail pane's place.
+  const [panel, setPanel] = useState<'agents' | 'setup' | null>(null)
+  const closePanel = useCallback(() => setPanel(null), [])
+  const openTask = useCallback((id: string) => {
+    setPanel(null)
+    setSelected(id)
+  }, [])
+  const togglePanel = (next: 'agents' | 'setup') => {
+    setSelected(null)
+    setPanel((current) => (current === next ? null : next))
+  }
   // A task that is gone, or from another project, closes the pane.
   const open = selected !== null && tasks.some((task) => task.id === selected) ? selected : null
 
@@ -177,6 +189,24 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
             onNewTask={openNewTask}
           />
         )}
+        {project !== null && (
+          <nav className="panel-buttons" aria-label="Panels">
+            <button
+              type="button"
+              aria-pressed={panel === 'agents'}
+              onClick={() => togglePanel('agents')}
+            >
+              Agents
+            </button>
+            <button
+              type="button"
+              aria-pressed={panel === 'setup'}
+              onClick={() => togglePanel('setup')}
+            >
+              Setup
+            </button>
+          </nav>
+        )}
       </header>
       {error && (
         <p className="error" role="alert">
@@ -202,10 +232,10 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
             now={now}
             selected={open}
             readOnly={readOnly}
-            onOpen={setSelected}
+            onOpen={openTask}
             onMove={(task, to) => void move(task, to)}
           />
-          {open !== null && (
+          {open !== null ? (
             <DetailPane
               key={open}
               project={project}
@@ -215,6 +245,18 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
               onClose={close}
               api={api}
             />
+          ) : panel === 'agents' ? (
+            <AgentsPanel
+              project={project}
+              tasks={tasks}
+              now={now}
+              onOpenTask={openTask}
+              onClose={closePanel}
+              api={api}
+            />
+          ) : (
+            panel === 'setup' &&
+            current && <SetupPanel project={current} onClose={closePanel} />
           )}
         </div>
       )}
@@ -232,7 +274,7 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
                 void submit(async () => {
                   const written = await api.createTask(project, task)
                   setCreating(false)
-                  setSelected(written.id)
+                  openTask(written.id)
                 })
               }
             />

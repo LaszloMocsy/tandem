@@ -36,6 +36,16 @@ export interface Lease {
   live: boolean
 }
 
+/** An agent in the Agents panel. */
+export interface AgentInfo {
+  agentId: string
+  /** From MCP `clientInfo`, such as `claude-code`. */
+  clientName: string | null
+  lastSeenAt: string
+  /** The tasks it holds a lease on. */
+  tasks: { id: string; title: string; live: boolean }[]
+}
+
 export interface TaskProblem {
   /** `graph` is a loop or a missing parent. */
   kind: 'invalid_file' | 'graph'
@@ -234,6 +244,8 @@ export const api = {
   listTasks: (project: string, filter?: TaskFilter) =>
     call<TaskSummary[]>('list_tasks', { project, filter }),
   getTask: (project: string, id: string) => call<TaskDetail>('get_task', { project, id }),
+  /** Agents seen in the last day, and any still holding a lease, newest first. */
+  listAgents: (project: string) => call<AgentInfo[]>('list_agents', { project }),
   createTask: (project: string, task: NewTask) =>
     call<Written>('create_task', { project, task }),
   updateTask: (project: string, id: string, edit: TaskEdit) =>
