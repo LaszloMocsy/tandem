@@ -54,8 +54,50 @@ function compareNullable(a: string | null, b: string | null): number {
   return a < b ? -1 : 1
 }
 
-/** Puts every task in its column, in card order. */
-export function buildColumns(tasks: readonly TaskSummary[]): Columns {
+/** What the board shows; `null` fields don't filter. */
+export interface Filters {
+  label: string | null
+  /** Shows the children of this task. */
+  parent: string | null
+  /** The ids the text search matched, or `null` without a search. */
+  matches: ReadonlySet<string> | null
+}
+
+export const NO_FILTERS: Filters = { label: null, parent: null, matches: null }
+
+export function isFiltered(filters: Filters): boolean {
+  return filters.label !== null || filters.parent !== null || filters.matches !== null
+}
+
+export function isVisible(task: TaskSummary, filters: Filters): boolean {
+  return (
+    (filters.label === null || task.labels.includes(filters.label)) &&
+    (filters.parent === null || task.parent === filters.parent) &&
+    (filters.matches === null || filters.matches.has(task.id))
+  )
+}
+
+/** Every label in use, sorted. */
+export function labelsIn(tasks: readonly TaskSummary[]): string[] {
+  return [...new Set(tasks.flatMap((task) => task.labels))].sort((a, b) => a.localeCompare(b))
+}
+
+/** The tasks that have children, by title. */
+export function parentsIn(tasks: readonly TaskSummary[]): TaskSummary[] {
+  const parents = new Set(tasks.map((task) => task.parent))
+  return tasks
+    .filter((task) => parents.has(task.id))
+    .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id))
+}
+
+/**
+ * Puts every task that passes `filters` in its column, in card order.
+ * Parents, progress and dependencies still come from every task.
+ */
+export function buildColumns(
+  tasks: readonly TaskSummary[],
+  filters: Filters = NO_FILTERS,
+): Columns {
   const byId = new Map(tasks.map((task) => [task.id, task]))
   const children = new Map<string, { done: number; total: number }>()
   for (const task of tasks) {
@@ -69,6 +111,7 @@ export function buildColumns(tasks: readonly TaskSummary[]): Columns {
 
   const columns: Columns = { backlog: [], todo: [], in_progress: [], finished: [], done: [] }
   for (const task of [...tasks].sort(compareTasks)) {
+    if (!isVisible(task, filters)) continue
     columns[task.status].push({
       task,
       parent: task.parent === null ? null : ref(task.parent),

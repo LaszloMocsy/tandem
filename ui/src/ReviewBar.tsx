@@ -1,5 +1,6 @@
-import { useRef, useState, type FormEvent } from 'react'
+import { useState } from 'react'
 import type { Status } from './api.ts'
+import { Dialog, ReopenForm } from './dialogs.tsx'
 
 /**
  * Your actions on a task, by status: Approve in Backlog; Mark reviewed and
@@ -33,13 +34,10 @@ export function ReviewBar({
   onReopen: (feedback: string) => Promise<boolean>
   onCommit: () => void
 }) {
-  const dialog = useRef<HTMLDialogElement>(null)
-  const [dialogOpen, setDialogOpen] = useState(false)
-  const [feedback, setFeedback] = useState('')
+  const [reopening, setReopening] = useState(false)
 
-  async function reopen(event: FormEvent) {
-    event.preventDefault()
-    if (await onReopen(feedback.trim())) dialog.current?.close()
+  async function reopen(feedback: string) {
+    if (await onReopen(feedback)) setReopening(false)
   }
 
   let content
@@ -68,10 +66,7 @@ export function ReviewBar({
           <button
             type="button"
             disabled={disabled || busy}
-            onClick={() => {
-              dialog.current?.showModal()
-              setDialogOpen(true)
-            }}
+            onClick={() => setReopening(true)}
           >
             Reopen with feedback…
           </button>
@@ -100,60 +95,20 @@ export function ReviewBar({
   return (
     <div className="review-bar" role="region" aria-label="Review">
       <div className="review-bar-row">{content}</div>
-      {error && !dialogOpen && (
+      {error && !reopening && (
         <p className="field-error" role="alert">
           {error}
         </p>
       )}
       {status === 'finished' && (
-        <dialog
-          ref={dialog}
-          className="dialog"
-          aria-label="Reopen with feedback"
-          onClose={() => {
-            setDialogOpen(false)
-            setFeedback('')
-          }}
-          onKeyDown={(event) => {
-            // Escape closes the dialog, not the pane behind it.
-            if (event.key === 'Escape') event.stopPropagation()
-          }}
-        >
-          <form onSubmit={(event) => void reopen(event)}>
-            <h3>Reopen with feedback</h3>
-            <p className="hint">
-              The task goes back to In progress. Your feedback is added to its changelog and
-              given to the next agent that works on it.
-            </p>
-            <textarea
-              aria-label="Feedback"
-              rows={5}
-              value={feedback}
-              autoFocus
-              disabled={busy}
-              onChange={(event) => setFeedback(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault()
-                  event.currentTarget.form?.requestSubmit()
-                }
-              }}
-            />
-            {error && dialogOpen && (
-              <p className="field-error" role="alert">
-                {error}
-              </p>
-            )}
-            <div className="actions">
-              <button type="submit" className="primary" disabled={busy || !feedback.trim()}>
-                Reopen
-              </button>
-              <button type="button" disabled={busy} onClick={() => dialog.current?.close()}>
-                Cancel
-              </button>
-            </div>
-          </form>
-        </dialog>
+        <Dialog open={reopening} label="Reopen with feedback" onClose={() => setReopening(false)}>
+          <ReopenForm
+            busy={busy}
+            error={error}
+            onSubmit={(feedback) => void reopen(feedback)}
+            onCancel={() => setReopening(false)}
+          />
+        </Dialog>
       )}
     </div>
   )

@@ -85,6 +85,72 @@ body {
   color: var(--muted);
 }
 
+.toolbar {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.toolbar .search,
+.toolbar select {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.toolbar .search {
+  width: 220px;
+}
+
+.toolbar .search:focus,
+.toolbar select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.toolbar select {
+  max-width: 200px;
+}
+
+.new-task-button {
+  padding: 4px 12px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.new-task-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 16px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--blocked-bg);
+  color: var(--blocked);
+}
+
+.notice button {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 16px;
+  cursor: pointer;
+}
+
 .empty,
 .error {
   margin: 24px 16px;
@@ -116,8 +182,24 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  border: 2px solid transparent;
   border-radius: 8px;
   background: var(--column);
+  transition: opacity 0.1s;
+}
+
+.column.drop-target {
+  border-color: var(--border);
+  border-style: dashed;
+}
+
+.column.drop-over {
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+.column.drop-blocked {
+  opacity: 0.5;
 }
 
 .column-title {
@@ -153,6 +235,15 @@ body {
 
 .card:hover {
   border-color: var(--muted);
+}
+
+.card.dragging {
+  opacity: 0.4;
+}
+
+.card.overlay {
+  box-shadow: 0 6px 20px rgb(0 0 0 / 18%);
+  cursor: grabbing;
 }
 
 .card:focus-visible,
@@ -689,4 +780,70 @@ button {
 .dialog .actions {
   justify-content: flex-end;
   margin-top: 10px;
+}
+
+.dialog form > input,
+.field input,
+.field select,
+.field textarea,
+.finish-criteria input:not([type='checkbox']) {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus,
+.finish-criteria input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.field > :not(span) {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 12px;
+}
+
+.field .chips {
+  margin-bottom: 4px;
+}
+
+.finish-criteria {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finish-criteria label {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.finish-criteria input[type='checkbox'] {
+  margin-top: 3px;
 }

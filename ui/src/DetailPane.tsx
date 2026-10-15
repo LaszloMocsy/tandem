@@ -11,6 +11,7 @@ import {
 } from './api.ts'
 import { COLUMNS } from './columns.ts'
 import { errorMessage, formatTime, parseLines, sameList, taskName, taskOptions } from './edit.ts'
+import { DependencyPicker } from './DependencyPicker.tsx'
 import { ReviewBar } from './ReviewBar.tsx'
 
 export type Field =
@@ -575,43 +576,13 @@ function Metadata({
 
       <dt>Depends on</dt>
       <dd>
-        {dependsOn.length > 0 && (
-          <ul className="chips">
-            {dependsOn.map((dep) => (
-              <li key={dep} className="chip">
-                {taskName(tasks, dep)}
-                {!disabled && (
-                  <button
-                    type="button"
-                    aria-label={`Remove dependency ${dep}`}
-                    onClick={() =>
-                      void onSave('dependsOn', { dependsOn: dependsOn.filter((d) => d !== dep) })
-                    }
-                  >
-                    ×
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-        {!disabled && (
-          <select
-            aria-label="Add dependency"
-            value=""
-            onChange={(event) => {
-              const dep = event.target.value
-              if (dep) void onSave('dependsOn', { dependsOn: [...dependsOn, dep] })
-            }}
-          >
-            <option value="">Add dependency…</option>
-            {taskOptions(tasks, [id, ...dependsOn]).map((task) => (
-              <option key={task.id} value={task.id}>
-                {taskName(tasks, task.id)}
-              </option>
-            ))}
-          </select>
-        )}
+        <DependencyPicker
+          value={dependsOn}
+          tasks={tasks}
+          exclude={[id]}
+          disabled={disabled}
+          onChange={(dependsOn) => void onSave('dependsOn', { dependsOn })}
+        />
         <FieldError message={errors.dependsOn} />
       </dd>
     </dl>

@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import type { TaskSummary } from './api.ts'
-import { buildColumns, elapsed, leaseState, unmetLabel } from './columns.ts'
+import { buildColumns, elapsed, labelsIn, leaseState, parentsIn, unmetLabel } from './columns.ts'
 
 function task(id: string, patch: Partial<TaskSummary> = {}): TaskSummary {
   return {
@@ -108,4 +108,30 @@ test('formats durations and unmet counts', () => {
   ])
   expect(unmetLabel(1)).toBe('1 criterion unmet')
   expect(unmetLabel(2)).toBe('2 criteria unmet')
+})
+
+test('filters by label, parent and search matches, keeping context from every task', () => {
+  const tasks = [
+    task('epic', { title: 'Epic', labels: ['auth'] }),
+    task('one', { parent: 'epic', labels: ['auth', 'ui'], status: 'done' }),
+    task('two', { parent: 'epic', dependsOn: ['one'] }),
+    task('other', { labels: ['docs'] }),
+  ]
+  const visible = (filters: Parameters<typeof buildColumns>[1]) =>
+    Object.values(buildColumns(tasks, filters)).flatMap(ids)
+  const none = { label: null, parent: null, matches: null }
+  expect(visible(none).sort()).toEqual(['epic', 'one', 'other', 'two'])
+  expect(visible({ ...none, label: 'auth' }).sort()).toEqual(['epic', 'one'])
+  expect(visible({ ...none, parent: 'epic' }).sort()).toEqual(['one', 'two'])
+  expect(visible({ ...none, matches: new Set(['two', 'other']) }).sort()).toEqual(['other', 'two'])
+  expect(visible({ label: 'auth', parent: 'epic', matches: new Set(['one', 'two']) })).toEqual(['one'])
+
+  // A filtered-out parent still gives its title, and a filtered-out
+  // dependency still counts as done.
+  const columns = buildColumns(tasks, { ...none, label: 'ui' })
+  expect(columns.done[0].parent).toEqual({ id: 'epic', title: 'Epic' })
+  expect(buildColumns(tasks, { ...none, parent: 'epic' }).todo[0].waitingOn).toEqual([])
+
+  expect(labelsIn(tasks)).toEqual(['auth', 'docs', 'ui'])
+  expect(parentsIn(tasks).map((t) => t.id)).toEqual(['epic'])
 })

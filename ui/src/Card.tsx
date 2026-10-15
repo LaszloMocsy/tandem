@@ -1,3 +1,5 @@
+import type { DraggableAttributes, DraggableSyntheticListeners } from '@dnd-kit/core'
+import type { Ref } from 'react'
 import type { Priority } from './api.ts'
 import { leaseState, unmetLabel, type CardData, type TaskRef } from './columns.ts'
 
@@ -14,18 +16,31 @@ function describe(ref: TaskRef): string {
 
 /**
  * One task on the board. `now` decides whether its lease is still live.
- * Clicking it, or Enter while it has focus, opens it.
+ * Clicking it, or Enter while it has focus, opens it. The board passes
+ * dnd-kit's `ref`, `attributes` and `listeners` to make it draggable.
  */
 export function Card({
   card,
   now,
   selected = false,
   onOpen,
+  ref,
+  attributes,
+  listeners,
+  dragging = false,
+  overlay = false,
 }: {
   card: CardData
   now: number
   selected?: boolean
-  onOpen: (id: string) => void
+  onOpen?: (id: string) => void
+  ref?: Ref<HTMLElement>
+  attributes?: DraggableAttributes
+  listeners?: DraggableSyntheticListeners
+  /** The card stays in place, faded, while its copy is dragged. */
+  dragging?: boolean
+  /** The copy that follows the pointer. */
+  overlay?: boolean
 }) {
   const { task, parent, children, waitingOn } = card
   const lease = task.lease && leaseState(task.lease, now)
@@ -33,13 +48,25 @@ export function Card({
 
   return (
     <article
-      className={selected ? 'card selected' : 'card'}
+      ref={ref}
+      className={[
+        'card',
+        selected && 'selected',
+        dragging && 'dragging',
+        overlay && 'overlay',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      data-task-id={task.id}
+      tabIndex={0}
+      {...attributes}
+      {...listeners}
       aria-label={task.title || task.id}
       aria-current={selected || undefined}
-      tabIndex={0}
-      onClick={() => onOpen(task.id)}
+      onClick={() => onOpen?.(task.id)}
       onKeyDown={(event) => {
-        if (event.key === 'Enter') onOpen(task.id)
+        listeners?.onKeyDown?.(event)
+        if (event.key === 'Enter') onOpen?.(task.id)
       }}
     >
       <div className="card-top">

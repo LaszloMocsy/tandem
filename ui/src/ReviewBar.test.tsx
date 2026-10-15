@@ -41,9 +41,8 @@ test('Backlog offers Approve', () => {
 test('Review offers Mark reviewed and Reopen with feedback, with a dialog', () => {
   const html = render('finished')
   expect(buttons(html)).toEqual(['Mark reviewed', 'Reopen with feedback…'])
-  expect(html).toMatch(/<dialog class="dialog" aria-label="Reopen with feedback">.*aria-label="Feedback"/)
-  // Reopen needs feedback.
-  expect(html).toMatch(/<button type="submit" class="primary" disabled="">Reopen<\/button>/)
+  // The dialog's form mounts when it opens.
+  expect(html).toContain('<dialog class="dialog" aria-label="Reopen with feedback"></dialog>')
 })
 
 test('Done offers Commit review only while the file has uncommitted changes', () => {
