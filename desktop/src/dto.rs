@@ -86,6 +86,43 @@ impl From<store::UnmetCriterion> for UnmetCriterion {
     }
 }
 
+/// An agent in the Agents panel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    pub agent_id: String,
+    pub client_name: Option<String>,
+    pub last_seen_at: String,
+    pub tasks: Vec<HeldTask>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeldTask {
+    pub id: String,
+    pub title: String,
+    pub live: bool,
+}
+
+impl From<service::AgentInfo> for AgentInfo {
+    fn from(agent: service::AgentInfo) -> Self {
+        Self {
+            agent_id: agent.agent_id,
+            client_name: agent.client_name,
+            last_seen_at: agent.last_seen_at,
+            tasks: agent
+                .tasks
+                .into_iter()
+                .map(|task| HeldTask {
+                    id: task.id.to_string(),
+                    title: task.title,
+                    live: task.live,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Lease {

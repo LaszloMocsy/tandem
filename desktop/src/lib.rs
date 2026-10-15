@@ -42,6 +42,7 @@ pub fn run() {
             commands::choose_folder,
             commands::list_tasks,
             commands::get_task,
+            commands::list_agents,
             commands::create_task,
             commands::update_task,
             commands::approve_task,

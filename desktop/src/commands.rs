@@ -7,12 +7,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use jiff::SignedDuration;
 use tandem_board_core::service::{Actor, Service};
 use tandem_board_core::store::TaskId;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::dto::{Finish, NewTask, TaskDetail, TaskEdit, TaskFilter, TaskSummary, Written};
+use crate::dto::{
+    AgentInfo, Finish, NewTask, TaskDetail, TaskEdit, TaskFilter, TaskSummary, Written,
+};
 use crate::error::Error;
 use crate::projects::{Opened, ProjectInfo, Projects};
 
@@ -85,6 +88,23 @@ pub async fn list_tasks(
     with_service(projects, project, move |service| {
         let tasks = service.list_tasks(&Actor::User, &filter)?;
         Ok(tasks.into_iter().map(TaskSummary::from).collect())
+    })
+    .await
+}
+
+/// How long an agent stays in the Agents panel after its last call, unless
+/// it still holds a lease.
+const AGENTS_SEEN_WITHIN: SignedDuration = SignedDuration::from_hours(24);
+
+/// The Agents panel: recent agents and the tasks each holds.
+#[tauri::command]
+pub async fn list_agents(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+) -> Result<Vec<AgentInfo>> {
+    with_service(projects, project, move |service| {
+        let agents = service.list_agents(AGENTS_SEEN_WITHIN)?;
+        Ok(agents.into_iter().map(AgentInfo::from).collect())
     })
     .await
 }
