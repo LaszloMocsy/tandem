@@ -11,7 +11,8 @@
 //!
 //! The app's own writes need no special handling: the service indexes each
 //! file it writes, so the event for it finds the same hash and changes
-//! nothing. Changes reach the board through [`Service::subscribe`].
+//! nothing. Changes reach the board through [`Service::subscribe`], and
+//! failures through the `on_error` callback given to [`Watcher::start`].
 
 use std::collections::BTreeSet;
 use std::io;
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
-use crate::service::Service;
+use crate::service::{Service, ServiceError};
 use crate::store::{TASK_DIR, TaskId};
 
 /// Settings for a [`Watcher`].
@@ -62,6 +63,27 @@ pub enum WatcherError {
     Thread(#[source] io::Error),
 }
 
+/// A failure while watching, passed to the `on_error` callback. None is
+/// fatal: the watcher keeps running, and the next sweep retries whatever
+/// failed, so a lasting problem is reported again on every sweep.
+#[derive(Debug, thiserror::Error)]
+pub enum WatchError {
+    /// A full scan failed, after a burst, a watcher error or on a sweep.
+    #[error("scanning the task folder failed")]
+    Rescan(#[source] ServiceError),
+    /// Re-reading one changed task file failed.
+    #[error("re-reading task `{id}` failed")]
+    RescanTask {
+        id: TaskId,
+        #[source]
+        source: ServiceError,
+    },
+    /// The platform watcher reported an error, so events may have been
+    /// lost. A full scan follows.
+    #[error("the file watcher failed; running a full scan")]
+    Watch(#[source] notify::Error),
+}
+
 /// A running watcher for one project. Dropping it stops the watching and
 /// the sweep, and waits for the worker thread to finish.
 pub struct Watcher {
@@ -76,8 +98,13 @@ enum Message {
 }
 
 impl Watcher {
-    /// Starts watching the service's `.tandem/` folder.
-    pub fn start(service: Arc<Service>, config: WatcherConfig) -> Result<Self, WatcherError> {
+    /// Starts watching the service's `.tandem/` folder. `on_error` runs on
+    /// the watcher's thread for every failure, so the app can show it.
+    pub fn start(
+        service: Arc<Service>,
+        config: WatcherConfig,
+        on_error: impl FnMut(WatchError) + Send + 'static,
+    ) -> Result<Self, WatcherError> {
         let (tx, rx) = mpsc::channel();
         let events = tx.clone();
         let watch_error = |source| WatcherError::Watch {
@@ -95,7 +122,7 @@ impl Watcher {
             .map_err(watch_error)?;
         let worker = thread::Builder::new()
             .name("tandem-watcher".into())
-            .spawn(move || run(&service, &rx, &config))
+            .spawn(move || run(&service, &rx, &config, on_error))
             .map_err(WatcherError::Thread)?;
         Ok(Self {
             debouncer: Some(debouncer),
@@ -117,9 +144,19 @@ impl Drop for Watcher {
 }
 
 /// The worker loop: handles debounced batches as they come, and sweeps
-/// whenever a sweep interval passes. Errors are not fatal; the next sweep
-/// retries whatever failed.
-fn run(service: &Service, messages: &mpsc::Receiver<Message>, config: &WatcherConfig) {
+/// whenever a sweep interval passes. Failures go to `on_error`; the next
+/// sweep retries whatever failed.
+fn run(
+    service: &Service,
+    messages: &mpsc::Receiver<Message>,
+    config: &WatcherConfig,
+    mut on_error: impl FnMut(WatchError),
+) {
+    let rescan = |on_error: &mut dyn FnMut(WatchError)| {
+        if let Err(e) = service.rescan() {
+            on_error(WatchError::Rescan(e));
+        }
+    };
     let mut next_sweep = Instant::now() + config.sweep_interval;
     loop {
         let wait = next_sweep.saturating_duration_since(Instant::now());
@@ -127,22 +164,23 @@ fn run(service: &Service, messages: &mpsc::Receiver<Message>, config: &WatcherCo
             Ok(Message::Stop) | Err(RecvTimeoutError::Disconnected) => return,
             Ok(Message::Events(Ok(events))) => {
                 match plan(events.iter().map(|e| e.path.as_path()), config.burst) {
-                    Plan::Full => {
-                        let _ = service.rescan();
-                    }
+                    Plan::Full => rescan(&mut on_error),
                     Plan::Tasks(ids) => {
                         for id in ids {
-                            let _ = service.rescan_task(id);
+                            if let Err(source) = service.rescan_task(id) {
+                                on_error(WatchError::RescanTask { id, source });
+                            }
                         }
                     }
                 }
             }
             // The watcher may have dropped events.
-            Ok(Message::Events(Err(_))) => {
-                let _ = service.rescan();
+            Ok(Message::Events(Err(e))) => {
+                on_error(WatchError::Watch(e));
+                rescan(&mut on_error);
             }
             Err(RecvTimeoutError::Timeout) => {
-                let _ = service.rescan();
+                rescan(&mut on_error);
                 next_sweep = Instant::now() + config.sweep_interval;
             }
         }
@@ -235,7 +273,7 @@ mod tests {
         };
         let worker = {
             let service = Arc::clone(&service);
-            thread::spawn(move || run(&service, &rx, &config))
+            thread::spawn(move || run(&service, &rx, &config, |e| panic!("{e}")))
         };
         let path = service.task_dir().join(id.file_name());
         let text = fs::read_to_string(&path)
@@ -251,5 +289,44 @@ mod tests {
             .list_tasks(&Actor::User, &Default::default())
             .unwrap();
         assert_eq!(tasks[0].title, "After!");
+    }
+
+    #[test]
+    fn failures_go_to_the_error_callback() {
+        let data = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        let service =
+            Arc::new(Service::open(data.path(), "test", repo.path(), Config::default()).unwrap());
+        let (errors_tx, errors) = mpsc::channel();
+        let (tx, rx) = mpsc::channel();
+        let config = WatcherConfig {
+            sweep_interval: Duration::from_millis(100),
+            ..WatcherConfig::default()
+        };
+        let worker = {
+            let service = Arc::clone(&service);
+            thread::spawn(move || run(&service, &rx, &config, move |e| errors_tx.send(e).unwrap()))
+        };
+
+        // A watcher error is reported, then a full scan runs.
+        tx.send(Message::Events(Err(notify::Error::generic("lost events"))))
+            .unwrap();
+        let error = errors.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(error, WatchError::Watch(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            "the file watcher failed; running a full scan"
+        );
+
+        // A sweep that cannot read the folder reports it, on every sweep.
+        let dir = service.task_dir().to_owned();
+        fs::remove_dir_all(&dir).unwrap();
+        fs::write(&dir, "not a folder").unwrap();
+        for _ in 0..2 {
+            let error = errors.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(error, WatchError::Rescan(_)), "{error:?}");
+        }
+        tx.send(Message::Stop).unwrap();
+        worker.join().unwrap();
     }
 }

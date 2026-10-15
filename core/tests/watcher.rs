@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tandem_board_core::index::Changes;
@@ -18,6 +18,16 @@ struct Env {
     _data: TempDir,
     _repo: TempDir,
     service: Arc<Service>,
+    /// Watcher errors; every test checks there were none.
+    errors: Arc<Mutex<Vec<String>>>,
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            assert_eq!(*self.errors.lock().unwrap(), Vec::<String>::new());
+        }
+    }
 }
 
 impl Env {
@@ -30,6 +40,7 @@ impl Env {
             _data: data,
             _repo: repo,
             service,
+            errors: Arc::default(),
         }
     }
 
@@ -47,7 +58,13 @@ impl Env {
     }
 
     fn watch(&self) -> Watcher {
-        let watcher = Watcher::start(Arc::clone(&self.service), WatcherConfig::default()).unwrap();
+        let errors = Arc::clone(&self.errors);
+        let watcher = Watcher::start(
+            Arc::clone(&self.service),
+            WatcherConfig::default(),
+            move |e| errors.lock().unwrap().push(e.to_string()),
+        )
+        .unwrap();
         // Let the platform watch start, and any events from before it drain.
         std::thread::sleep(Duration::from_millis(300));
         watcher
