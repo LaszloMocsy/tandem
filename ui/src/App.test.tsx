@@ -61,3 +61,13 @@ test('shows the five columns with their cards', async () => {
   expect(html).toMatch(/aria-label="Todo">.*Task aaaaaaa.*aria-label="In progress"/)
   expect(html).toMatch(/aria-label="Review">.*Task bbbbbbb.*aria-label="Done"/)
 })
+
+test('a read-only project says why, such as asking you to update', async () => {
+  const reason =
+    'the tasks use format version 99, but this app supports only up to 1; update Tandem to edit them'
+  const board = store([{ ...project, readOnly: reason }], [task('aaaaaaa', 'todo')])
+  await board.start()
+  const html = renderToStaticMarkup(<App store={board} />)
+  expect(html).toContain(`<p class="read-only-notice" role="status">Read-only: ${reason}</p>`)
+  expect(html).toContain('disabled="" title="New task (N)"')
+})

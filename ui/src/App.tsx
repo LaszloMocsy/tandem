@@ -208,6 +208,11 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
           </nav>
         )}
       </header>
+      {current?.readOnly && (
+        <p className="read-only-notice" role="status">
+          Read-only: {current.readOnly}
+        </p>
+      )}
       {error && (
         <p className="error" role="alert">
           {error.message}
