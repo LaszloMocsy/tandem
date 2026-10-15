@@ -26,8 +26,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::index::{Changes, Problem, ProjectIndex, rescan_in, rescan_task_in, timestamp_text};
 use crate::store::{
-    Access, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR, Task, TaskId, Unmet,
-    UnmetCriterion, parse_task_file, task_path,
+    Access, ChangelogItem, Criterion, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR, Task,
+    TaskId, Unmet, UnmetCriterion, parse_task_file, task_path,
 };
 
 pub use error::ServiceError;
@@ -133,6 +133,32 @@ pub struct TaskDetail {
     pub work_log: Vec<LogEntry>,
     /// Your latest reopen feedback, for the next agent.
     pub review_feedback: Option<String>,
+    /// The parsed file; `None` if it is invalid.
+    pub content: Option<TaskContent>,
+}
+
+/// What the detail pane shows of a valid task file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskContent {
+    /// Empty if there is no Description section.
+    pub description: String,
+    pub criteria: Vec<Criterion>,
+    pub relevant_files: Vec<String>,
+    /// Oldest first.
+    pub changelog: Vec<ChangelogItem>,
+    pub reviewed_at: Option<Date>,
+}
+
+impl TaskContent {
+    fn new(task: &Task) -> Self {
+        Self {
+            description: task.description().to_owned(),
+            criteria: task.criteria(),
+            relevant_files: task.relevant_files(),
+            changelog: task.changelog_entries(),
+            reviewed_at: task.reviewed_at,
+        }
+    }
 }
 
 /// One working-log row.

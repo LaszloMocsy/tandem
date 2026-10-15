@@ -105,6 +105,34 @@ pub(super) fn set(body: &str, name: &str, content: &str) -> Result<String, Secti
     Ok(out)
 }
 
+/// The text of section `name` without its heading or surrounding blank
+/// lines. `None` if the section is missing.
+pub(super) fn text<'a>(body: &'a str, name: &str) -> Option<&'a str> {
+    find_section(body, name).map(|section| {
+        body[section.content..section.end]
+            .trim_matches('\n')
+            .trim_end()
+    })
+}
+
+/// The top-level `-`, `*` or `+` list items of section `name`.
+pub(super) fn list_items(body: &str, name: &str) -> Vec<String> {
+    let Some(section) = find_section(body, name) else {
+        return Vec::new();
+    };
+    lines(&body[section.content..section.end])
+        .into_iter()
+        .filter_map(|line| {
+            ["- ", "* ", "+ "]
+                .iter()
+                .find_map(|p| line.text.strip_prefix(p))
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 /// The checkboxes in the Acceptance criteria section: top-level list items
 /// starting with `[ ]` or `[x]`.
 pub(super) fn criteria(body: &str) -> Vec<Criterion> {
@@ -167,6 +195,22 @@ fn checkboxes(body: &str) -> Vec<(u32, usize, bool, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_section_text_and_list_items() {
+        let body = "\n## Description\n\nFirst.\n\n### Detail\nSecond.\n\n\
+                    ## Relevant files\n- src/a.rs\n* src/b.rs\n  - nested.rs\n-\nprose\n+ c.md\n";
+        assert_eq!(
+            text(body, DESCRIPTION),
+            Some("First.\n\n### Detail\nSecond.")
+        );
+        assert_eq!(text(body, ACCEPTANCE_CRITERIA), None);
+        assert_eq!(
+            list_items(body, RELEVANT_FILES),
+            ["src/a.rs", "src/b.rs", "c.md"]
+        );
+        assert_eq!(list_items(body, DESCRIPTION), Vec::<String>::new());
+    }
 
     const BODY: &str = "\n## Description\nOld.\n\n## Acceptance criteria\n- [ ] One\n- [x] Two\n  - [ ] nested\n* [ ] Three\n- [ ]not a box\n\n## Notes\nKeep.\n\n## Changelog\n\n### 2026-10-13 · a · created\n";
 

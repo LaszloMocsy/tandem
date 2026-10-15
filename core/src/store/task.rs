@@ -3,9 +3,9 @@ use std::str::FromStr;
 use jiff::civil::Date;
 use serde::Deserialize;
 
-use super::changelog::{self, ChangelogEntry, EntryError, EntryHeading};
+use super::changelog::{self, ChangelogEntry, ChangelogItem, EntryError, EntryHeading};
 use super::id::TaskId;
-use super::sections::{self, Criterion, SectionError};
+use super::sections::{self, Criterion, DESCRIPTION, RELEVANT_FILES, SectionError};
 use super::yaml;
 
 /// A task's status. These are the only statuses written to task files.
@@ -221,6 +221,21 @@ impl Task {
     /// The headings of the changelog entries, oldest first.
     pub fn changelog(&self) -> Vec<EntryHeading> {
         changelog::headings(&self.body)
+    }
+
+    /// The changelog entries with their text, oldest first.
+    pub fn changelog_entries(&self) -> Vec<ChangelogItem> {
+        changelog::entries(&self.body)
+    }
+
+    /// The Description section's text, empty if there is none.
+    pub fn description(&self) -> &str {
+        sections::text(&self.body, DESCRIPTION).unwrap_or_default()
+    }
+
+    /// The items listed in the Relevant files section.
+    pub fn relevant_files(&self) -> Vec<String> {
+        sections::list_items(&self.body, RELEVANT_FILES)
     }
 
     /// The checkboxes in the Acceptance criteria section.

@@ -156,16 +156,62 @@ fn heading_part<'a>(field: &'static str, value: &'a str) -> Result<&'a str, Entr
     }
 }
 
-/// The headings of the entries in the Changelog section, oldest first.
-/// Headings that don't have three ` · `-separated parts are skipped.
-pub(crate) fn headings(body: &str) -> Vec<EntryHeading> {
+/// One entry as read back from the Changelog section.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangelogItem {
+    pub heading: EntryHeading,
+    /// Everything after the heading line, up to the next heading of level 3
+    /// or above, without surrounding blank lines: the summary and the
+    /// `Files:`, `Follow-ups:` and `Unmet:` lines.
+    pub text: String,
+}
+
+/// The entries in the Changelog section, oldest first. Headings that don't
+/// have three ` · `-separated parts are skipped, along with what follows
+/// them up to the next entry.
+pub(crate) fn entries(body: &str) -> Vec<ChangelogItem> {
     let Some(section) = find_section(body, "Changelog") else {
         return Vec::new();
     };
-    lines(&body[section.content..section.end])
+    let content = &body[section.content..section.end];
+    let mut out = Vec::new();
+    // The current entry's heading and the byte range of its text.
+    let mut current: Option<(EntryHeading, usize, usize)> = None;
+    for line in lines(content) {
+        match line.heading {
+            Some(level) if level <= 3 => {
+                out.extend(current.take().map(|(heading, start, end)| ChangelogItem {
+                    heading,
+                    text: entry_text(&content[start..end]),
+                }));
+                current = (level == 3)
+                    .then(|| parse_heading(line.text))
+                    .flatten()
+                    .map(|heading| (heading, line.end, line.end));
+            }
+            _ => {
+                if let Some((_, _, end)) = &mut current {
+                    *end = line.end;
+                }
+            }
+        }
+    }
+    out.extend(current.map(|(heading, start, end)| ChangelogItem {
+        heading,
+        text: entry_text(&content[start..end]),
+    }));
+    out
+}
+
+fn entry_text(text: &str) -> String {
+    text.trim_matches('\n').trim_end().to_owned()
+}
+
+/// The headings of the entries in the Changelog section, oldest first.
+pub(crate) fn headings(body: &str) -> Vec<EntryHeading> {
+    entries(body)
         .into_iter()
-        .filter(|line| line.heading == Some(3))
-        .filter_map(|line| parse_heading(line.text))
+        .map(|entry| entry.heading)
         .collect()
 }
 
@@ -200,31 +246,21 @@ pub fn unmet_criteria(body: &str) -> Vec<UnmetCriterion> {
         .collect()
 }
 
-/// The `Unmet:` line of the latest `finished` entry, parsed. An entry ends
-/// at the next heading of level 3 or above.
+/// The `Unmet:` line of the latest `finished` entry, parsed.
 fn latest_unmet(body: &str) -> Vec<Unmet> {
-    let Some(section) = find_section(body, "Changelog") else {
-        return Vec::new();
-    };
-    let mut latest = Vec::new();
-    let mut in_finished = false;
-    for line in lines(&body[section.content..section.end]) {
-        match line.heading {
-            Some(level) if level <= 3 => {
-                in_finished =
-                    level == 3 && parse_heading(line.text).is_some_and(|h| h.event == "finished");
-                if in_finished {
-                    latest.clear();
-                }
-            }
-            _ => {
-                if in_finished && let Some(value) = line.text.strip_prefix("Unmet:") {
-                    latest = parse_unmet(value);
-                }
-            }
-        }
-    }
-    latest
+    entries(body)
+        .into_iter()
+        .rev()
+        .find(|entry| entry.heading.event == "finished")
+        .and_then(|entry| {
+            entry
+                .text
+                .lines()
+                .rev()
+                .find_map(|line| line.strip_prefix("Unmet:"))
+                .map(parse_unmet)
+        })
+        .unwrap_or_default()
 }
 
 /// Parses `2 (needs a staging account); 4 (out of scope)`. A reason may
@@ -500,6 +536,29 @@ mod tests {
 
         // Only the Changelog section counts.
         assert_eq!(unmet(&format!("{criteria}Unmet: 2 (x)\n")), []);
+    }
+
+    #[test]
+    fn reads_entries_with_their_text() {
+        let body = "\n## Changelog\n\n### 2026-10-13 · a · created\n\n\
+                    ### 2026-10-14 · a · finished\nFirst line.\n\n```\n### in code\n```\n\
+                    Files: a.rs\n\n### not an entry\nSkipped.\n#### a sub-heading\nStill skipped.\n\
+                    ### 2026-10-15 · sam · reviewed\nOk.\n\n## Notes\nNot changelog.\n";
+        let found: Vec<(String, String)> = entries(body)
+            .into_iter()
+            .map(|e| (e.heading.event, e.text))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("created".to_owned(), String::new()),
+                (
+                    "finished".to_owned(),
+                    "First line.\n\n```\n### in code\n```\nFiles: a.rs".to_owned()
+                ),
+                ("reviewed".to_owned(), "Ok.".to_owned()),
+            ]
+        );
     }
 
     #[test]

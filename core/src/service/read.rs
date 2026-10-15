@@ -8,11 +8,11 @@ use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension};
 
 use super::{
-    Actor, Lease, LogEntry, LogKind, Service, ServiceError, TaskDetail, TaskFilter, TaskSummary,
-    check_regular_file, leases,
+    Actor, Lease, LogEntry, LogKind, Service, ServiceError, TaskContent, TaskDetail, TaskFilter,
+    TaskSummary, check_regular_file, leases,
 };
 use crate::index::{IndexedTask, Problem, tasks_in};
-use crate::store::{Priority, Status, StoreError, TaskId, task_path, unmet_criteria};
+use crate::store::{Priority, Status, StoreError, Task, TaskId, task_path, unmet_criteria};
 
 impl Service {
     /// Summaries of the tasks that match `filter`, sorted by id.
@@ -73,6 +73,12 @@ impl Service {
                 }
                 Err(source) => return Err(StoreError::Io { path, source }.into()),
             };
+            let content = match task.problem {
+                Some(Problem::InvalidFile(_)) => None,
+                _ => Task::parse(&markdown)
+                    .ok()
+                    .map(|task| TaskContent::new(&task)),
+            };
             Ok(TaskDetail {
                 summary: board.summary(task),
                 markdown,
@@ -96,6 +102,7 @@ impl Service {
                     )
                     .optional()?
                     .flatten(),
+                content,
             })
         })
     }

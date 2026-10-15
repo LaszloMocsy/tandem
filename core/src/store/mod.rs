@@ -15,7 +15,7 @@ mod task;
 mod yaml;
 
 pub use changelog::{
-    ChangelogEntry, EntryError, EntryHeading, Unmet, UnmetCriterion, unmet_criteria,
+    ChangelogEntry, ChangelogItem, EntryError, EntryHeading, Unmet, UnmetCriterion, unmet_criteria,
 };
 pub use folder::{Access, CONFIG_FILE, FORMAT_VERSION, README_FILE, ReadOnly, prepare_folder};
 pub use fs::{

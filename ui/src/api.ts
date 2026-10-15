@@ -75,6 +75,33 @@ export interface WorkLogEntry {
   createdAt: string
 }
 
+export interface Criterion {
+  /** Counting from 1. */
+  number: number
+  met: boolean
+  text: string
+}
+
+/** One changelog entry, as read back from the file. */
+export interface ChangelogEntry {
+  date: string
+  who: string
+  event: string
+  /** The summary and any `Files:`, `Follow-ups:` and `Unmet:` lines. */
+  text: string
+}
+
+/** The parsed task file. */
+export interface TaskContent {
+  /** Empty if there is no Description section. */
+  description: string
+  criteria: Criterion[]
+  relevantFiles: string[]
+  /** Oldest first. */
+  changelog: ChangelogEntry[]
+  reviewedAt: string | null
+}
+
 export interface TaskDetail {
   summary: TaskSummary
   /** The task file, as it is on disk. */
@@ -84,6 +111,8 @@ export interface TaskDetail {
   /** Oldest first. */
   workLog: WorkLogEntry[]
   reviewFeedback: string | null
+  /** `null` if the file is invalid. */
+  content: TaskContent | null
 }
 
 /** The file a write changed. */

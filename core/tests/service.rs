@@ -862,6 +862,8 @@ fn an_invalid_file_is_refused_and_never_written() {
     assert_eq!(err.code(), "invalid_file");
     assert_eq!(code(env.service.approve(id)), "invalid_file");
     assert_eq!(env.file(id), broken);
+    let detail = env.service.get_task(&Actor::User, id).unwrap();
+    assert_eq!((detail.markdown, detail.content), (broken, None));
 
     let missing: TaskId = "zzzzzzz".parse().unwrap();
     assert_eq!(
@@ -1367,4 +1369,79 @@ fn the_starting_agent_recovers_its_lease_after_a_rebuild() {
         "not_holder"
     );
     assert_eq!(env.lease(id), None);
+}
+
+#[test]
+fn get_task_reads_the_sections_and_changelog() {
+    let env = Env::new();
+    let a = agent("agent-a");
+    let id = env.create(&Actor::User, "Task", &["One", "Two"]);
+    env.service
+        .update_task(
+            &Actor::User,
+            id,
+            TaskEdit {
+                relevant_files: Some(vec!["src/a.rs".into(), "src/b.rs".into()]),
+                ..TaskEdit::default()
+            },
+        )
+        .unwrap();
+    env.service.start_task(&a, id).unwrap();
+    env.service
+        .finish_task(
+            &a,
+            id,
+            Finish {
+                summary: "Done.".into(),
+                files_changed: vec!["src/a.rs".into()],
+                met: vec![1],
+                unmet: vec![Unmet {
+                    criterion: 2,
+                    reason: "later".into(),
+                }],
+                ..Finish::default()
+            },
+        )
+        .unwrap();
+
+    let content = env
+        .service
+        .get_task(&Actor::User, id)
+        .unwrap()
+        .content
+        .unwrap();
+    assert_eq!(content.description, "Task.");
+    assert_eq!(
+        content
+            .criteria
+            .iter()
+            .map(|c| (c.text.as_str(), c.met))
+            .collect::<Vec<_>>(),
+        [("One", true), ("Two", false)]
+    );
+    assert_eq!(content.relevant_files, ["src/a.rs", "src/b.rs"]);
+    let changelog: Vec<(&str, &str, &str)> = content
+        .changelog
+        .iter()
+        .map(|e| {
+            (
+                e.heading.who.as_str(),
+                e.heading.event.as_str(),
+                e.text.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        changelog,
+        [
+            ("sam", "created", ""),
+            ("agent-a", "started", ""),
+            (
+                "agent-a",
+                "finished",
+                "Done.\nFiles: src/a.rs\nUnmet: 2 (later)"
+            ),
+        ]
+    );
+    assert_eq!(content.reviewed_at, None);
 }

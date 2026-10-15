@@ -139,6 +139,8 @@ pub struct TaskDetail {
     pub children: Vec<TaskSummary>,
     pub work_log: Vec<WorkLogEntry>,
     pub review_feedback: Option<String>,
+    /// `None` if the file is invalid.
+    pub content: Option<TaskContent>,
 }
 
 impl From<service::TaskDetail> for TaskDetail {
@@ -150,8 +152,66 @@ impl From<service::TaskDetail> for TaskDetail {
             children: task.children.into_iter().map(TaskSummary::from).collect(),
             work_log: task.work_log.into_iter().map(WorkLogEntry::from).collect(),
             review_feedback: task.review_feedback,
+            content: task.content.map(TaskContent::from),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskContent {
+    pub description: String,
+    pub criteria: Vec<Criterion>,
+    pub relevant_files: Vec<String>,
+    pub changelog: Vec<ChangelogEntry>,
+    pub reviewed_at: Option<String>,
+}
+
+impl From<service::TaskContent> for TaskContent {
+    fn from(content: service::TaskContent) -> Self {
+        Self {
+            description: content.description,
+            criteria: content
+                .criteria
+                .into_iter()
+                .map(|c| Criterion {
+                    number: c.number,
+                    met: c.met,
+                    text: c.text,
+                })
+                .collect(),
+            relevant_files: content.relevant_files,
+            changelog: content
+                .changelog
+                .into_iter()
+                .map(|entry| ChangelogEntry {
+                    date: entry.heading.date,
+                    who: entry.heading.who,
+                    event: entry.heading.event,
+                    text: entry.text,
+                })
+                .collect(),
+            reviewed_at: content.reviewed_at.map(|date| date.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Criterion {
+    pub number: u32,
+    pub met: bool,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangelogEntry {
+    pub date: String,
+    pub who: String,
+    pub event: String,
+    /// The summary and any `Files:`, `Follow-ups:` and `Unmet:` lines.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
