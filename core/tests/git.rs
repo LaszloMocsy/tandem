@@ -56,6 +56,20 @@ fn lines(text: &str) -> Vec<&str> {
 }
 
 #[test]
+fn is_repo_is_true_anywhere_inside_a_work_tree() {
+    let repo = repo();
+    assert!(git::is_repo(repo.path()));
+    let sub = repo.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    assert!(git::is_repo(&sub));
+    assert!(!git::is_repo(&repo.path().join(".git")));
+
+    let plain = TempDir::new().unwrap();
+    assert!(!git::is_repo(plain.path()));
+    assert!(!git::is_repo(&plain.path().join("missing")));
+}
+
+#[test]
 fn has_changes_sees_new_edited_and_staged_files() {
     let dir = repo();
     let repo = dir.path();

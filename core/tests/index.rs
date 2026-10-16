@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jiff::Timestamp;
 use rusqlite::Connection;
 use tandem_board_core::index::{
-    AppDb, Changes, IndexError, IndexedTask, Problem, ProjectIndex, project_db_path,
+    AppDb, Changes, IndexError, IndexedTask, Problem, ProjectIndex, delete_project_db,
+    project_db_path,
 };
 use tandem_board_core::store::{Access, Date, Priority, ReadOnly, Status, TaskId, read_task};
 use tempfile::TempDir;
@@ -335,6 +336,40 @@ fn a_deleted_database_rebuilds_from_files() {
     add_lease(&index, B);
     let index = index.reset().unwrap();
     assert_eq!(index.tasks().unwrap(), before);
+    assert_eq!(leases(&index), Vec::<String>::new());
+}
+
+#[test]
+fn deleting_a_project_database_leaves_the_files_and_other_projects() {
+    let env = Env::new();
+    env.write(A, &task(A, "Kept", "todo", ""));
+    let index = env.open();
+    let other = ProjectIndex::open(env.data.path(), "other", env.repo.path()).unwrap();
+    add_lease(&index, A);
+    drop(index);
+    drop(other);
+    // Leftover journal files go too.
+    for suffix in ["-wal", "-shm"] {
+        let mut path = env.db().into_os_string();
+        path.push(suffix);
+        fs::write(path, "").unwrap();
+    }
+
+    delete_project_db(env.data.path(), "test").unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = env.db().into_os_string();
+        path.push(suffix);
+        assert!(!PathBuf::from(path).exists(), "{suffix}");
+    }
+    assert!(project_db_path(env.data.path(), "other").is_file());
+    assert!(env.path(A).is_file());
+    // Deleting it again, or one that never existed, is fine.
+    delete_project_db(env.data.path(), "test").unwrap();
+    delete_project_db(env.data.path(), "never").unwrap();
+
+    // Opening the project again starts from the files, with no leases.
+    let index = env.open();
+    assert_eq!(titles(&index), [(id(A), "Kept".to_owned())]);
     assert_eq!(leases(&index), Vec::<String>::new());
 }
 

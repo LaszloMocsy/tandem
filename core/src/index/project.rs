@@ -25,6 +25,27 @@ pub fn project_db_path(data_dir: &Path, project_id: &str) -> PathBuf {
     data_dir.join("projects").join(format!("{project_id}.db"))
 }
 
+/// Deletes a project's database, with its WAL and shared-memory files, as
+/// removing the project from the app does. A missing file is fine. On Unix
+/// a connection still open on it keeps working on the deleted file.
+pub fn delete_project_db(data_dir: &Path, project_id: &str) -> Result<(), IndexError> {
+    remove_db_files(&project_db_path(data_dir, project_id))
+}
+
+/// Removes `db_path` and its `-wal` and `-shm` files, ignoring missing ones.
+fn remove_db_files(db_path: &Path) -> Result<(), IndexError> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = db_path.as_os_str().to_owned();
+        path.push(suffix);
+        let path = PathBuf::from(path);
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(io_error(&path)(e)),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// One row of the task index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedTask {
@@ -153,15 +174,7 @@ impl ProjectIndex {
             ..
         } = self;
         conn.close().map_err(|(_, e)| e)?;
-        for suffix in ["", "-wal", "-shm"] {
-            let mut path = db_path.clone().into_os_string();
-            path.push(suffix);
-            let path = PathBuf::from(path);
-            match fs::remove_file(&path) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(io_error(&path)(e)),
-                _ => {}
-            }
-        }
+        remove_db_files(&db_path)?;
         Self::open_at(db_path, &repo)
     }
 
