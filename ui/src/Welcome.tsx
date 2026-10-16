@@ -20,9 +20,7 @@ export function Welcome({
   return (
     <main className="welcome">
       <div className="welcome-inner">
-        <div className="logo" aria-hidden="true">
-          T
-        </div>
+        <img className="logo" src="/logo.svg" alt="" width={56} height={56} />
         <h2>Welcome to Tandem</h2>
         <p className="welcome-lead">
           A task board you share with your coding agents, kept as files in your repo.

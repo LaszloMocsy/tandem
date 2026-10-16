@@ -88,9 +88,16 @@ body {
 }
 
 .topbar h1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   font-size: 15px;
   font-weight: 600;
+}
+
+.topbar-logo {
+  display: block;
 }
 
 .switcher {
@@ -1193,16 +1200,8 @@ button {
 }
 
 .logo {
-  display: grid;
-  width: 44px;
-  height: 44px;
+  display: block;
   margin-bottom: 14px;
-  border-radius: 11px;
-  background: linear-gradient(135deg, #3b6fd8, #6f9bf0);
-  color: #fff;
-  font-size: 20px;
-  font-weight: 700;
-  place-items: center;
 }
 
 .welcome h2 {
