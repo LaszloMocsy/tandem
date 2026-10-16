@@ -20,7 +20,7 @@ What v1 leaves out is listed under Scope and later versions.
 
 Git records outcomes, SQLite holds activity. Every other rule follows from that.
 
-1. **A task file changes only when something worth reading later happens:** the task is created, its spec is edited, it is approved, started, finished, reviewed, reopened or released. Claims, heartbeats, blocked flags and the working log never touch files.
+1. **A task file changes only when something worth reading later happens:** the task is created, its spec is edited, it is approved, started, finished, reviewed, reopened, released or deleted. Claims, heartbeats, blocked flags and the working log never touch files.
 2. **The app commits only when you press Commit review.** Otherwise it only writes files. The task file rides along in the commit with the code: the first commit of a task carries `status: in_progress`, the last one carries `status: finished`, and your review then sets `done`.
 3. **Files are the source of truth.** The SQLite database can be deleted at any time and is rebuilt from `.tandem/`. Only in-flight state (leases, working logs) is lost.
 4. **Nothing in the repo except `.tandem/`.** SQLite lives in the app's data directory, so the repo needs no `.gitignore` entries.
@@ -139,10 +139,13 @@ You approve tasks into Todo and review them into Done; agents only work on what 
 | Review → Done | Mark reviewed | you only | `status: done`, `reviewed_at: <today>` | none |
 | Review → In progress | Reopen with feedback | you only | `status: in_progress`, changelog `reopened` with feedback | Feedback stored for the next agent |
 | In progress → Todo | `release_task`, or drag | agent or you | `status: todo`, changelog `released` | Lease removed |
+| Delete | Delete task, from any status | you only | File deleted | Index row and any stale lease removed |
 
 Any move out of `done` also removes `reviewed_at`.
 
-No MCP tool can approve a task into `todo` or set `reviewed_at`, so agents cannot approve their own work. Marking reviewed writes the file without committing it: it lands in your next commit, you can amend it into the latest commit, or you can press **Commit review** to commit only that file.
+No MCP tool can approve a task into `todo` or set `reviewed_at`, so agents cannot approve their own work. No MCP tool deletes a task either.
+
+Deleting is refused while an agent holds a live lease on the task, and while another task names it as its `parent` or lists it in `depends_on`, since that task would be left invalid or locked for good; you unlink those first. An invalid file can be deleted. Like any other write, the deletion is not committed: git history keeps the last committed version, and the confirmation warns when the file was never committed. Marking reviewed writes the file without committing it: it lands in your next commit, you can amend it into the latest commit, or you can press **Commit review** to commit only that file.
 
 ## SQLite schema
 
@@ -372,6 +375,7 @@ One window: a project switcher, a five-column board, and a detail pane that slid
 - Working-log timeline, visibly marked "local only, not committed"
 - A review bar on Review cards: **Mark reviewed** and **Reopen with feedback**
 - An **Approve** button on Backlog cards, which moves the task to Todo
+- A **Delete task** button at the bottom, with a confirmation that lists anything blocking it
 - A **Commit review** button on Done cards while their file has uncommitted changes. It commits only that task file (git add, then git commit with the file as pathspec), with the message "Review \<id>: \<title>" and a Task: \<id> trailer, and leaves anything else you have staged alone.
 
 **Agents panel.** Connected agents, last seen, and the task each one holds.
