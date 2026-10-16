@@ -1555,3 +1555,150 @@ fn list_agents_shows_recent_agents_and_lease_holders() {
     assert_eq!(agents[0].agent_id, "agent-a");
     assert!(agents[0].tasks[0].live);
 }
+
+#[test]
+fn delete_task_removes_the_file_at_any_status() {
+    let env = Env::new();
+    let a = agent("agent-a");
+    let todo = env.todo("Dropped");
+    let started = env.todo("Abandoned");
+    env.service.start_task(&a, started).unwrap();
+    let events = env.service.subscribe();
+
+    env.service.delete_task(todo).unwrap();
+    assert!(!env.path(todo).exists());
+    let removed = events.try_recv().unwrap();
+    assert!(removed.removed.contains(&todo), "{removed:?}");
+    assert_eq!(code(env.service.get_task(&Actor::User, todo)), "not_found");
+    assert_eq!(code(env.service.delete_task(todo)), "not_found");
+
+    // Once the agent's lease goes stale, its task can go too, lease and all.
+    env.advance(16 * 60);
+    env.service.delete_task(started).unwrap();
+    assert!(!env.path(started).exists());
+    assert_eq!(env.lease(started), None);
+    assert!(
+        env.service
+            .list_tasks(&Actor::User, &TaskFilter::default())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn delete_task_waits_for_the_agent_working_on_it() {
+    let env = Env::new();
+    let a = agent("agent-a");
+    let id = env.todo("Busy");
+    env.service.start_task(&a, id).unwrap();
+    let before = env.file(id);
+
+    let check = env.service.delete_check(id).unwrap();
+    assert_eq!(
+        check.lease.as_ref().map(|l| l.agent_id.as_str()),
+        Some("agent-a")
+    );
+    assert!(check.blocked());
+    let err = env.service.delete_task(id).unwrap_err();
+    assert_eq!(err.code(), "claimed_by_other");
+    assert!(err.to_string().contains("agent-a"), "{err}");
+    assert_eq!(env.file(id), before);
+
+    env.service.release_task(&a, id, "").unwrap();
+    assert!(!env.service.delete_check(id).unwrap().blocked());
+    env.service.delete_task(id).unwrap();
+    assert!(!env.path(id).exists());
+}
+
+#[test]
+fn delete_task_is_refused_while_other_tasks_link_to_it() {
+    let env = Env::new();
+    let u = Actor::User;
+    let top = env.todo("Top");
+    let link = |title: &str, parent, depends_on| {
+        env.service
+            .create_task(
+                &u,
+                NewTask {
+                    title: title.into(),
+                    parent,
+                    depends_on,
+                    ..NewTask::default()
+                },
+            )
+            .unwrap()
+            .id
+    };
+    let child = link("Child", Some(top), vec![]);
+    let after = link("After", None, vec![top]);
+
+    let check = env.service.delete_check(top).unwrap();
+    assert_eq!(check.children, [child]);
+    assert_eq!(check.dependents, [after]);
+    assert!(check.blocked());
+    let err = env.service.delete_task(top).unwrap_err();
+    assert_eq!(err.code(), "task_referenced");
+    let message = err.to_string();
+    assert!(message.contains(&format!("parent of {child}")), "{message}");
+    assert!(
+        message.contains(&format!("dependency of {after}")),
+        "{message}"
+    );
+    assert!(env.path(top).exists());
+
+    // Unlinked, it goes, and the others stay valid.
+    let unlink = TaskEdit {
+        parent: Some(None),
+        depends_on: Some(vec![]),
+        ..TaskEdit::default()
+    };
+    env.service.update_task(&u, child, unlink.clone()).unwrap();
+    env.service.update_task(&u, after, unlink).unwrap();
+    env.service.delete_task(top).unwrap();
+    assert_eq!(env.summary(child).problem, None);
+    assert_eq!(env.summary(after).problem, None);
+}
+
+#[test]
+fn delete_task_removes_an_invalid_file() {
+    let env = Env::new();
+    let id = env.todo("Broken");
+    fs::write(env.path(id), "---\nnope: [\n").unwrap();
+    env.service.rescan().unwrap();
+    assert!(env.summary(id).problem.is_some());
+
+    assert!(!env.service.delete_check(id).unwrap().committed);
+    env.service.delete_task(id).unwrap();
+    assert!(!env.path(id).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_task_removes_a_symlinked_file_and_not_its_target() {
+    let env = Env::new();
+    let outside = TempDir::new().unwrap();
+    let id = env.todo("Linked");
+    let target = outside.path().join("elsewhere.md");
+    fs::write(&target, env.file(id)).unwrap();
+    fs::remove_file(env.path(id)).unwrap();
+    std::os::unix::fs::symlink(&target, env.path(id)).unwrap();
+
+    env.service.delete_task(id).unwrap();
+    assert!(fs::symlink_metadata(env.path(id)).is_err());
+    assert!(target.is_file());
+}
+
+#[test]
+fn a_read_only_project_refuses_delete_task() {
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    fs::create_dir(repo.path().join(".tandem")).unwrap();
+    fs::write(
+        repo.path().join(".tandem/config.toml"),
+        "format_version = 2\n",
+    )
+    .unwrap();
+    let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
+    let id: TaskId = "k3f9x2m".parse().unwrap();
+    assert_eq!(code(service.delete_task(id)), "read_only");
+}

@@ -1,5 +1,5 @@
-//! Commit review, the one git operation the app runs, and the check that a
-//! folder is in a git repo, through the git CLI. Every command runs in the repo with `git -C`, and paths are pathspecs
+//! Commit review, the one git operation the app runs, and the read-only
+//! checks the board needs, through the git CLI. Every command runs in the repo with `git -C`, and paths are pathspecs
 //! relative to it.
 
 use std::io;
@@ -20,6 +20,14 @@ pub enum GitError {
 pub fn is_repo(folder: &Path) -> bool {
     git(folder, &["rev-parse", "--is-inside-work-tree"])
         .is_ok_and(|out| out.stdout.trim_ascii() == b"true")
+}
+
+/// Whether the latest commit has `path`, so git history keeps a copy of it
+/// once the file is deleted. `false` outside a repo or before the first
+/// commit.
+pub fn is_committed(repo: &Path, path: &str) -> bool {
+    // `./` makes the path relative to `repo`, not to the work tree's root.
+    git(repo, &["cat-file", "-e", &format!("HEAD:./{path}")]).is_ok()
 }
 
 /// Whether `path` has changes git hasn't committed: edited, staged or not
