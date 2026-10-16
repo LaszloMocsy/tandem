@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import type { ProjectInfo } from './api.ts'
-import { CreateBoardForm, RemoveProjectForm } from './dialogs.tsx'
+import type { DeleteCheck, ProjectInfo, TaskSummary } from './api.ts'
+import { CreateBoardForm, DeleteTaskForm, RemoveProjectForm } from './dialogs.tsx'
 import { ProjectSwitcher } from './ProjectSwitcher.tsx'
 import { Welcome } from './Welcome.tsx'
 
@@ -136,4 +136,83 @@ test('opening a git repo without a board offers to create one, without a warning
   expect(html).toContain('No board in this folder')
   expect(html).not.toContain('git repository')
   expect(html).toContain('>Create board</button>')
+})
+
+function summary(id: string, title: string): TaskSummary {
+  return {
+    id,
+    title,
+    status: 'todo',
+    priority: 'medium',
+    parent: null,
+    labels: [],
+    dependsOn: [],
+    created: '2026-10-16',
+    lease: null,
+    blocked: null,
+    problem: null,
+    unmet: [],
+  }
+}
+
+const dropped = summary('k3f9x2m', 'Dropped idea')
+const child = summary('a7rq4ne', 'Child')
+
+function deleteForm(check: DeleteCheck | null, error: string | null = null) {
+  return renderToStaticMarkup(
+    <DeleteTaskForm
+      task={dropped}
+      tasks={[dropped, child]}
+      check={check}
+      busy={false}
+      error={error}
+      onSubmit={noop}
+      onRecheck={noop}
+      onCancel={noop}
+    />,
+  )
+}
+
+const clear: DeleteCheck = { children: [], dependents: [], lease: null, committed: false }
+
+test('deleting a task that was never committed warns it is gone for good', () => {
+  const html = deleteForm(clear)
+  expect(html).toContain('Delete “Dropped idea”?')
+  expect(html).toContain('<code>.tandem/k3f9x2m.md</code>')
+  expect(html).toContain('never committed')
+  expect(html).toContain('<button type="submit" class="danger">Delete task</button>')
+  expect(html).toContain('>Keep task</button>')
+})
+
+test('deleting a committed task says git keeps it', () => {
+  const html = deleteForm({ ...clear, committed: true })
+  expect(html).toContain('Git history keeps its last committed version')
+  expect(html).not.toContain('never committed')
+})
+
+test('deleting waits for the check, and a failed check does not block', () => {
+  expect(deleteForm(null)).toContain('disabled="">Checking…</button>')
+  const failed = deleteForm(null, 'git broke')
+  expect(failed).toContain('git broke')
+  expect(failed).toContain('<button type="submit" class="danger">Delete task</button>')
+})
+
+test('deleting is blocked by an agent at work and by linked tasks', () => {
+  const html = deleteForm({
+    children: ['a7rq4ne'],
+    dependents: ['a7rq4ne'],
+    lease: {
+      agentId: 'claude-code-7f2a',
+      claimedAt: '2026-10-16T09:00:00Z',
+      expiresAt: '2026-10-16T09:15:00Z',
+      live: true,
+    },
+    committed: true,
+  })
+  expect(html).toContain('<code>claude-code-7f2a</code>) is working on this task')
+  expect(html).toContain('It is the parent of:')
+  expect(html).toContain('These tasks depend on it:')
+  expect(html).toContain('<code>a7rq4ne</code> Child')
+  expect(html).toContain('Unlink them first')
+  expect(html).toContain('<button type="submit" class="danger" disabled="">Delete task</button>')
 })

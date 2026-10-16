@@ -31,6 +31,18 @@ export type Opened =
    */
   | { kind: 'noTaskFolder'; repoPath: string; gitRepo: boolean }
 
+/** What stands in the way of deleting a task, and what deleting it loses. */
+export interface DeleteCheck {
+  /** Tasks whose parent is this task. */
+  children: string[]
+  /** Tasks that depend on this task. */
+  dependents: string[]
+  /** The live lease, while an agent is working on the task. */
+  lease: Lease | null
+  /** Whether git history keeps a copy of the file. */
+  committed: boolean
+}
+
 export interface Lease {
   agentId: string
   claimedAt: string
@@ -195,8 +207,8 @@ export const TASKS_CHANGED = 'tasks-changed'
 /**
  * A refused command. `code` is one of the spec's error codes, such as
  * `invalid_transition` or `cycle_detected`, or `project_not_found`,
- * `invalid_argument`, `read_only`, `git_failed`, `agents_working` or
- * `internal`.
+ * `invalid_argument`, `read_only`, `git_failed`, `agents_working`,
+ * `task_referenced` or `internal`.
  */
 export class CommandError extends Error {
   readonly code: string
@@ -258,6 +270,15 @@ export const api = {
     call<Written>('create_task', { project, task }),
   updateTask: (project: string, id: string, edit: TaskEdit) =>
     call<Written>('update_task', { project, id, edit }),
+  /** What stands in the way of deleting a task. */
+  deleteCheck: (project: string, id: string) =>
+    call<DeleteCheck>('delete_check', { project, id }),
+  /**
+   * Deletes a task's file, at any status. Refused with `claimed_by_other`
+   * while an agent works on it, and `task_referenced` while another task
+   * links to it.
+   */
+  deleteTask: (project: string, id: string) => call<null>('delete_task', { project, id }),
 
   /** Backlog → Todo. */
   approve: (project: string, id: string) => call<Written>('approve_task', { project, id }),

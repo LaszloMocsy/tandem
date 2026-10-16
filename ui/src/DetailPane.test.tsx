@@ -174,3 +174,18 @@ test('editor helpers', () => {
   expect(taskName(tasks, 'a7rq4ne')).toBe('Auth epic (a7rq4ne)')
   expect(taskName(tasks, 'zzzzzzz')).toBe('zzzzzzz')
 })
+
+test('the footer, such as Delete task, comes after the working log', () => {
+  const html = renderToStaticMarkup(
+    <TaskView
+      detail={detail}
+      tasks={tasks}
+      readOnly={false}
+      errors={{}}
+      onSave={async () => true}
+      onClearError={() => {}}
+      footer={<button type="button">Delete task…</button>}
+    />,
+  )
+  expect(html.indexOf('Delete task…')).toBeGreaterThan(html.indexOf('aria-label="Working log"'))
+})

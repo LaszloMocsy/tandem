@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
-import type { Criterion, Finish, NewTask, Priority, ProjectInfo, TaskSummary } from './api.ts'
+import type {
+  Criterion,
+  DeleteCheck,
+  Finish,
+  NewTask,
+  Priority,
+  ProjectInfo,
+  TaskSummary,
+} from './api.ts'
 import { DependencyPicker } from './DependencyPicker.tsx'
 import { parseLines, taskName, taskOptions } from './edit.ts'
 import type { CreateOffer, WorkingTask } from './projects.ts'
@@ -444,6 +452,101 @@ export function RemoveProjectForm({
         ready={working !== null && !blocked}
         busy={busy}
         cancel="Keep board"
+        danger
+        onCancel={onCancel}
+      />
+    </form>
+  )
+}
+
+/** Tasks named by id, with their titles, in a dialog callout. */
+function TaskList({ ids, tasks }: { ids: readonly string[]; tasks: readonly TaskSummary[] }) {
+  return (
+    <ul className="working">
+      {ids.map((id) => (
+        <li key={id}>
+          <code>{id}</code> {tasks.find((task) => task.id === id)?.title}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * Deleting a task's file. Blocked while an agent works on it or another
+ * task links to it; `check` is `null` while that is being checked.
+ */
+export function DeleteTaskForm({
+  task,
+  tasks,
+  check,
+  busy,
+  error,
+  onSubmit,
+  onRecheck,
+  onCancel,
+}: {
+  task: TaskSummary
+  tasks: readonly TaskSummary[]
+  check: DeleteCheck | null
+  busy: boolean
+  error: string | null
+  onSubmit: () => void
+  onRecheck: () => void
+  onCancel: () => void
+}) {
+  const linked = check !== null && (check.children.length > 0 || check.dependents.length > 0)
+  const blocked = check !== null && (linked || check.lease !== null)
+  return (
+    <form onSubmit={onSubmitted(onSubmit)}>
+      <h3>Delete “{task.title || task.id}”?</h3>
+      <p className="hint">
+        Tandem deletes <code>.tandem/{task.id}.md</code> from your repo, at any status. Nothing is
+        committed for you.
+      </p>
+      {check !== null &&
+        (check.committed ? (
+          <p className="dialog-callout safe">
+            Git history keeps its last committed version, and the deletion shows up in your next
+            commit.
+          </p>
+        ) : (
+          <p className="dialog-callout warning">
+            This task was never committed, so deleting it can't be undone.
+          </p>
+        ))}
+      {blocked && (
+        <div className="dialog-callout danger" role="status">
+          {check.lease && (
+            <p>
+              An agent (<code>{check.lease.agentId}</code>) is working on this task. Wait until it
+              finishes or releases it.
+            </p>
+          )}
+          {check.children.length > 0 && (
+            <>
+              <p>It is the parent of:</p>
+              <TaskList ids={check.children} tasks={tasks} />
+            </>
+          )}
+          {check.dependents.length > 0 && (
+            <>
+              <p>These tasks depend on it:</p>
+              <TaskList ids={check.dependents} tasks={tasks} />
+            </>
+          )}
+          {linked && <p>Unlink them first, from their own detail panes.</p>}
+          <button type="button" className="link" disabled={busy} onClick={onRecheck}>
+            Check again
+          </button>
+        </div>
+      )}
+      <FormError error={blocked ? null : error} />
+      <Actions
+        submit={check === null && error === null ? 'Checking…' : 'Delete task'}
+        ready={(check !== null || error !== null) && !blocked}
+        busy={busy}
+        cancel="Keep task"
         danger
         onCancel={onCancel}
       />
