@@ -53,7 +53,7 @@ function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) 
       openProject: async (path, createFolder = false) => {
         const project = projects.find((p) => p.repoPath === path)
         if (project) return { kind: 'project', project }
-        if (!createFolder) return { kind: 'noTaskFolder', repoPath: path }
+        if (!createFolder) return { kind: 'noTaskFolder', repoPath: path, gitRepo: true }
         const created = projectInfo(path.split('/').pop()!)
         projects = [created, ...projects]
         tasks[created.id] = []
@@ -162,7 +162,7 @@ test('opening a folder without .tandem changes nothing until asked to create it'
   await store.start()
 
   const declined = await store.openProject('/repos/new')
-  expect(declined).toEqual({ kind: 'noTaskFolder', repoPath: '/repos/new' })
+  expect(declined).toEqual({ kind: 'noTaskFolder', repoPath: '/repos/new', gitRepo: true })
   expect(store.getState().project).toBe('a')
 
   const created = await store.openProject('/repos/new', true)

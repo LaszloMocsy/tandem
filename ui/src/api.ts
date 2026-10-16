@@ -25,8 +25,11 @@ export interface ProjectInfo {
 /** What opening a folder did. */
 export type Opened =
   | { kind: 'project'; project: ProjectInfo }
-  /** The folder has no `.tandem/`; open it with `createFolder` to make one. */
-  | { kind: 'noTaskFolder'; repoPath: string }
+  /**
+   * The folder has no `.tandem/`; open it with `createFolder` to make one.
+   * `gitRepo` says whether the folder is in a git repo.
+   */
+  | { kind: 'noTaskFolder'; repoPath: string; gitRepo: boolean }
 
 export interface Lease {
   agentId: string
@@ -192,7 +195,8 @@ export const TASKS_CHANGED = 'tasks-changed'
 /**
  * A refused command. `code` is one of the spec's error codes, such as
  * `invalid_transition` or `cycle_detected`, or `project_not_found`,
- * `invalid_argument`, `read_only`, `git_failed` or `internal`.
+ * `invalid_argument`, `read_only`, `git_failed`, `agents_working` or
+ * `internal`.
  */
 export class CommandError extends Error {
   readonly code: string
@@ -236,7 +240,11 @@ export const api = {
    */
   openProject: (path: string, createFolder = false) =>
     call<Opened>('open_project', { path, createFolder }),
-  /** Closes a project and removes it from the recent list. */
+  /**
+   * Closes a project, removes it from the recent list and deletes its local
+   * database. The repo and its `.tandem/` files stay. Refused with
+   * `agents_working` while an agent holds a live lease on one of its tasks.
+   */
   removeProject: (project: string) => call<boolean>('remove_project', { project }),
   /** Asks for a folder with the system dialog; `null` if cancelled. */
   chooseFolder: () => call<string | null>('choose_folder'),

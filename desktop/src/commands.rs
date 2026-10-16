@@ -56,7 +56,7 @@ pub async fn open_project(
     blocking(move || projects.open(&path, create_folder)).await
 }
 
-/// Closes a project and removes it from the recent list.
+/// Removes a project from the app; see [`Projects::remove`].
 #[tauri::command]
 pub async fn remove_project(projects: State<'_, Arc<Projects>>, project: String) -> Result<bool> {
     let projects = Arc::clone(&projects);
