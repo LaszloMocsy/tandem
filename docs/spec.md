@@ -108,6 +108,7 @@ Follow-ups: none
 - Write atomically: a temp file in `.tandem/`, then rename
 - LF line endings and one trailing newline; keep the body byte for byte except the changelog append
 - If a file fails to parse, mark it invalid on the board and never overwrite it
+- Never follow symlinks: a symlinked `.tandem` opens the project read-only, and a symlinked task file is invalid. Changelog summaries can't contain headings, unclosed code fences, or lines starting with `Files:`, `Follow-ups:` or `Unmet:`
 
 ## State model
 
@@ -224,33 +225,35 @@ CREATE TABLE agents (
 
 The app serves MCP over Streamable HTTP on `127.0.0.1:4317` (configurable), with one endpoint per project: `http://127.0.0.1:4317/p/<project-id>/mcp`. It binds to localhost only and needs the app to be running. If the call fails to connect, the agent tells you to open the app.
 
-**Agent identity:** taken from the MCP client name and a short session id (such as `claude-code-7f2a`), or set explicitly with an optional `agent` argument on `start_task`. **Leases** last 15 minutes and are extended by every tool call from the holder, so agents never need to send a separate heartbeat.
+**Agent identity:** issued by the server. `start_task` creates a new agent id from the MCP client name and a random suffix (such as `claude-code-7f2a`) and returns it; agents cannot choose their own. The tools only the lease holder may call take it back as a required `agent` argument, and the other tools accept it optionally. A call without it is attributed to the client name from `clientInfo`, such as `claude-code`. Identity doesn't depend on MCP sessions, so clients on protocol 2026-07-28, which has none, and older clients with sessions work the same way. **Leases** last 15 minutes and are extended by every tool call that passes the holder's id, so agents never need to send a separate heartbeat.
 
 **Tools:**
 
 | Tool | Arguments | What it does | Writes file |
 | --- | --- | --- | --- |
-| `list_tasks` | `status?`, `label?`, `parent?`, `query?`, `ready_only?` | Summaries: id, title, status, priority, parent, labels, lease holder, blocked | no |
-| `get_task` | `id` | Full Markdown, parent and children, working log, latest review feedback | no |
-| `next_task` | `label?`, `parent?` | Highest-priority todo task with all dependencies done and no live lease | no |
-| `create_task` | `title`, `description`, `acceptance_criteria[]`, `priority?`, `parent?`, `labels?`, `depends_on?` | New file in backlog, changelog `created` | yes |
-| `update_task` | `id` plus any of `title`, `description`, `acceptance_criteria`, `relevant_files`, `priority`, `parent`, `labels`, `depends_on` | Edits the spec; cannot change status or review | yes |
-| `start_task` | `id`, `agent?` | Atomic claim; sets `in_progress`, changelog `started` | yes |
-| `log_progress` | `id`, `message` | Adds a working-log note | no |
-| `set_blocked` | `id`, `reason` (empty clears it) | Sets or clears the blocked flag | no |
-| `add_changelog_entry` | `id`, `summary`, `files?` | Optional milestone entry before an intermediate commit on a long task | yes |
-| `finish_task` | `id`, `summary`, `files_changed[]`, `follow_ups?`, `met?`, `unmet?` | Ticks the `met` criteria, sets `finished`, changelog `finished`, releases the lease. Refuses with `criteria_unmet` while an unticked criterion is missing from `unmet` | yes |
-| `release_task` | `id`, `note` | Sets `todo`, changelog `released`, removes the lease | yes |
+| `list_tasks` | `status?`, `label?`, `parent?`, `query?`, `ready_only?`, `agent?` | Summaries: id, title, status, priority, parent, labels, lease holder, blocked | no |
+| `get_task` | `id`, `agent?` | Full Markdown, parent and children, working log, latest review feedback | no |
+| `next_task` | `label?`, `parent?`, `agent?` | Highest-priority todo task with all dependencies done and no live lease | no |
+| `create_task` | `title`, `description`, `acceptance_criteria[]`, `priority?`, `parent?`, `labels?`, `depends_on?`, `agent?` | New file in backlog, changelog `created` | yes |
+| `update_task` | `id` plus any of `title`, `description`, `acceptance_criteria`, `relevant_files`, `priority`, `parent`, `labels`, `depends_on`; `agent?` | Edits the spec; cannot change status or review | yes |
+| `start_task` | `id` | Atomic claim; sets `in_progress`, changelog `started`; returns the new agent id | yes |
+| `log_progress` | `id`, `message`, `agent` | Adds a working-log note | no |
+| `set_blocked` | `id`, `reason` (empty clears it), `agent` | Sets or clears the blocked flag | no |
+| `add_changelog_entry` | `id`, `summary`, `files?`, `agent` | Optional milestone entry before an intermediate commit on a long task | yes |
+| `finish_task` | `id`, `summary`, `files_changed[]`, `follow_ups?`, `met?`, `unmet?`, `agent` | Ticks the `met` criteria, sets `finished`, changelog `finished`, releases the lease. Refuses with `criteria_unmet` while an unticked criterion is missing from `unmet` | yes |
+| `release_task` | `id`, `note`, `agent` | Sets `todo`, changelog `released`, removes the lease | yes |
 
 `create_task` and `update_task` refuse a `parent` or `depends_on` that would close a loop.
+
+`update_task` from an agent is limited so that nothing an agent changes gets worked on before you approve it. In backlog, agents can edit anything. After approval, `relevant_files`, `labels` and `priority` stay open; any other change to a todo task sends it back to backlog with an `edited` changelog entry until you approve it again, and is refused on a task in progress, which only the lease holder can edit at all. Finished and done tasks are closed to agents. You can edit any task from the board.
 
 No tool approves a task into `todo` or sets `reviewed_at`; both are yours, on the board.
 
 **Tick or explain.** In `finish_task`, `met` lists the acceptance criteria (by number) the agent met, and the app ticks them. Every criterion still unticked must appear in `unmet` as `{criterion, reason}`, or the call fails with `criteria_unmet`. The reasons go into the changelog entry as an `Unmet:` line, and the Review card shows a badge such as "2 criteria unmet". You then accept the task or reopen it. A tick is still the agent's own claim; your review and the tests are the real check. Tasks without criteria always pass.
 
-**Claim rule:** `start_task` runs in one `BEGIN IMMEDIATE` transaction. It fails if the task is not in todo, if another agent holds a live lease, or if any dependency is not `done`. A stale lease can be taken over, and the changelog notes the takeover. Only the lease holder (or you, from the board) may call `log_progress`, `add_changelog_entry`, `finish_task` or `release_task`.
+**Claim rule:** `start_task` runs in one `BEGIN IMMEDIATE` transaction. It fails if the task is not in todo, if another agent holds a live lease, or if any dependency is not `done`. A stale lease can be taken over, and the changelog notes the takeover. An in-progress task with no lease can be started by an agent only if you reopened it; a task you started from the board stays yours. If a rebuild lost a lease, the agent that started the task carries on with its id, and its next holder call restores the lease. Calling `start_task` again on a held task is refused with `claimed_by_other`, since every call issues a new id. Only the lease holder (or you, from the board) may call `log_progress`, `set_blocked`, `add_changelog_entry`, `finish_task` or `release_task`. Agent ids are 1 to 64 ASCII letters, digits, `-`, `_` or `.`, and must not match your name in any case, so agent entries can't pass for yours.
 
-**Errors** are structured with a code the agent can act on: `not_found`, `claimed_by_other`, `deps_not_done`, `not_holder`, `invalid_file`, `invalid_transition`, `cycle_detected`, `parent_not_found`, `criteria_unmet`.
+**Errors** are structured with a code the agent can act on: `not_found`, `claimed_by_other`, `deps_not_done`, `not_holder`, `invalid_file`, `invalid_transition`, `cycle_detected`, `parent_not_found`, `criteria_unmet`. Bad arguments return `invalid_argument`, writes to a read-only project return `read_only`, and anything else is `internal`.
 
 **Every file-writing tool returns the changed path** and a reminder to include it in the next commit. Tool descriptions repeat the commit rules, so agents follow them even without an `AGENTS.md`.
 
@@ -290,7 +293,7 @@ Other clients (Codex, Cursor) use their own config formats; check each client's 
 
 This repo tracks work in `.tandem/` through the `tandem` MCP server.
 
-- Before starting work, call `start_task` on the task (use `next_task` if none was given).
+- Before starting work, call `start_task` on the task (use `next_task` if none was given), and pass the agent id it returns as `agent` to every later tandem call for that task.
 - Never edit task frontmatter or the Changelog section by hand. Use the tandem tools.
 - Include the task file in your first commit (status in_progress) and your final commit (status finished).
 - Add a `Task: <id>` trailer to every commit for that task.
