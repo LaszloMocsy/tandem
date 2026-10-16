@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
-import type { Criterion, Finish, NewTask, Priority, TaskSummary } from './api.ts'
+import type { Criterion, Finish, NewTask, Priority, ProjectInfo, TaskSummary } from './api.ts'
 import { DependencyPicker } from './DependencyPicker.tsx'
 import { parseLines, taskName, taskOptions } from './edit.ts'
+import type { CreateOffer, WorkingTask } from './projects.ts'
 
 /**
  * A modal native `<dialog>`, shown while `open`. Its content mounts only
@@ -54,19 +55,24 @@ function Actions({
   ready,
   busy,
   onCancel,
+  cancel = 'Cancel',
+  danger = false,
 }: {
   submit: string
   ready: boolean
   busy: boolean
   onCancel: () => void
+  cancel?: string
+  /** Styles the submit button as a destructive action. */
+  danger?: boolean
 }) {
   return (
     <div className="actions">
-      <button type="submit" className="primary" disabled={busy || !ready}>
+      <button type="submit" className={danger ? 'danger' : 'primary'} disabled={busy || !ready}>
         {submit}
       </button>
       <button type="button" disabled={busy} onClick={onCancel}>
-        Cancel
+        {cancel}
       </button>
     </div>
   )
@@ -326,6 +332,121 @@ export function NewTaskForm({
       </div>
       <FormError error={error} />
       <Actions submit="Create task" ready={title.trim() !== ''} busy={busy} onCancel={onCancel} />
+    </form>
+  )
+}
+
+/** Why a board in a folder git doesn't track is a trade-off. */
+function NoGitWarning({ repoPath }: { repoPath: string }) {
+  return (
+    <p className="dialog-callout warning">
+      <code>{repoPath}</code> is not in a git repository. Tandem keeps tasks as files you commit
+      with your code, so without git they have no history and Commit review won't work. You can
+      run <code>git init</code> there now or later.
+    </p>
+  )
+}
+
+/**
+ * Creating `.tandem/` in a folder without one: after Open board found no
+ * board, or after New board picked a folder git doesn't track.
+ */
+export function CreateBoardForm({
+  offer,
+  busy,
+  error,
+  onSubmit,
+  onCancel,
+}: {
+  offer: CreateOffer
+  busy: boolean
+  error: string | null
+  onSubmit: () => void
+  onCancel: () => void
+}) {
+  return (
+    <form onSubmit={onSubmitted(onSubmit)}>
+      <h3>{offer.asked ? 'Create a board without git?' : 'No board in this folder'}</h3>
+      {!offer.asked && (
+        <p className="hint">
+          <code>{offer.repoPath}</code> has no <code>.tandem/</code> folder. Create one, with
+          its <code>README.md</code>, to start a board here?
+        </p>
+      )}
+      {!offer.gitRepo && <NoGitWarning repoPath={offer.repoPath} />}
+      <FormError error={error} />
+      <Actions
+        submit={offer.gitRepo ? 'Create board' : 'Create board anyway'}
+        ready
+        busy={busy}
+        onCancel={onCancel}
+      />
+    </form>
+  )
+}
+
+/**
+ * Removing a project from the app, which never touches its folder. Blocked
+ * while an agent is working on one of its tasks; `working` is `null` while
+ * that is being checked.
+ */
+export function RemoveProjectForm({
+  project,
+  working,
+  busy,
+  error,
+  onSubmit,
+  onRecheck,
+  onCancel,
+}: {
+  project: ProjectInfo
+  working: readonly WorkingTask[] | null
+  busy: boolean
+  error: string | null
+  onSubmit: () => void
+  onRecheck: () => void
+  onCancel: () => void
+}) {
+  const blocked = working !== null && working.length > 0
+  return (
+    <form onSubmit={onSubmitted(onSubmit)}>
+      <h3>Remove “{project.name}” from Tandem?</h3>
+      <p className="dialog-callout safe">
+        Your codebase stays as it is. Tandem won't delete <code>{project.repoPath}</code> or the
+        task files in its <code>.tandem/</code> folder.
+      </p>
+      <p className="hint">
+        The board leaves Tandem's project list, agents lose its MCP endpoint, and its local
+        activity (leases and working logs) is deleted. Open the folder again any time to bring the
+        board back.
+      </p>
+      {blocked && (
+        <div className="dialog-callout danger" role="status">
+          <p>
+            An agent is working on this board. Wait until it finishes or releases{' '}
+            {working.length === 1 ? 'its task' : 'these tasks'}, then remove the project.
+          </p>
+          <ul className="working">
+            {working.map((task) => (
+              <li key={task.id}>
+                <code>{task.id}</code> {task.title}
+              </li>
+            ))}
+          </ul>
+          <button type="button" className="link" disabled={busy} onClick={onRecheck}>
+            Check again
+          </button>
+        </div>
+      )}
+      <FormError error={blocked ? null : error} />
+      <Actions
+        submit={working === null ? 'Checking agents…' : 'Remove from Tandem'}
+        ready={working !== null && !blocked}
+        busy={busy}
+        cancel="Keep board"
+        danger
+        onCancel={onCancel}
+      />
     </form>
   )
 }
