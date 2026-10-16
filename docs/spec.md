@@ -342,7 +342,11 @@ The frontend never touches files directly. In v1, closing the window quits the a
 
 One window: a project switcher, a five-column board, and a detail pane that slides in from the right.
 
-**Project switcher.** Open a repo folder. If `.tandem/` is missing, offer to create it with its `README.md`.
+**Project switcher.** The project name in the top bar is a menu: switch to another project, **New board**, **Open board** and **Remove**. With no project open, a welcome screen offers New board and Open board and lists recent projects.
+
+- **Open board** opens a repo folder. If `.tandem/` is missing, offer to create it with its `README.md`.
+- **New board** creates `.tandem/` in the folder you pick, or opens the board already there. A folder outside a git repo gets a warning first, and you choose whether to go on.
+- **Remove** takes the project out of the app: its row in `app.db` and its project database. It never touches the repo or `.tandem/`, and the confirmation says so. It is refused while an agent holds a live lease on any of the project's tasks.
 
 **Board.** Five columns: Backlog, Todo, In progress, Review, Done. Cards are sorted by priority, then created date. A card shows:
 
