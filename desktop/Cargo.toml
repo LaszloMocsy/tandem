@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The binary carries the product name, so the Dock and app switcher show "Tandem" in dev runs too.
+[[bin]]
+name = "Tandem"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.7.2", features = [] }
 
