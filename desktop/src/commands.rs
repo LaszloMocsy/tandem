@@ -14,7 +14,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::dto::{
-    AgentInfo, Finish, NewTask, TaskDetail, TaskEdit, TaskFilter, TaskSummary, Written,
+    AgentInfo, DeleteCheck, Finish, NewTask, TaskDetail, TaskEdit, TaskFilter, TaskSummary, Written,
 };
 use crate::error::Error;
 use crate::projects::{Opened, ProjectInfo, Projects};
@@ -144,6 +144,32 @@ pub async fn update_task(
 ) -> Result<Written> {
     with_service(projects, project, move |service| {
         Ok(service.update_task(&Actor::User, id, edit.into())?.into())
+    })
+    .await
+}
+
+/// What stands in the way of deleting a task, and whether git keeps it.
+#[tauri::command]
+pub async fn delete_check(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+    id: TaskId,
+) -> Result<DeleteCheck> {
+    with_service(projects, project, move |service| {
+        Ok(service.delete_check(id)?.into())
+    })
+    .await
+}
+
+/// Deletes a task's file, at any status; see `Service::delete_task`.
+#[tauri::command]
+pub async fn delete_task(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+    id: TaskId,
+) -> Result<()> {
+    with_service(projects, project, move |service| {
+        Ok(service.delete_task(id)?)
     })
     .await
 }

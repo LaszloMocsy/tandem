@@ -45,6 +45,8 @@ pub fn run() {
             commands::list_agents,
             commands::create_task,
             commands::update_task,
+            commands::delete_check,
+            commands::delete_task,
             commands::approve_task,
             commands::start_task,
             commands::finish_task,

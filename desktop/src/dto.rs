@@ -143,6 +143,29 @@ impl From<service::Lease> for Lease {
     }
 }
 
+/// What stands in the way of deleting a task, for its confirmation dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteCheck {
+    pub children: Vec<String>,
+    pub dependents: Vec<String>,
+    /// The live lease, while an agent is working on the task.
+    pub lease: Option<Lease>,
+    /// Whether git history keeps a copy of the file.
+    pub committed: bool,
+}
+
+impl From<service::DeleteCheck> for DeleteCheck {
+    fn from(check: service::DeleteCheck) -> Self {
+        Self {
+            children: check.children.iter().map(ToString::to_string).collect(),
+            dependents: check.dependents.iter().map(ToString::to_string).collect(),
+            lease: check.lease.map(Into::into),
+            committed: check.committed,
+        }
+    }
+}
+
 /// Why a task gets the invalid badge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -429,6 +452,20 @@ impl From<Finish> for service::Finish {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delete_check_is_sent_in_camel_case() {
+        let check = DeleteCheck::from(service::DeleteCheck {
+            children: vec!["k3f9x2m".parse().unwrap()],
+            dependents: Vec::new(),
+            lease: None,
+            committed: true,
+        });
+        assert_eq!(
+            serde_json::to_string(&check).unwrap(),
+            r#"{"children":["k3f9x2m"],"dependents":[],"lease":null,"committed":true}"#
+        );
+    }
 
     #[test]
     fn edits_tell_a_null_parent_from_a_missing_one() {
