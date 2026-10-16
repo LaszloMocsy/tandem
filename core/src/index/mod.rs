@@ -19,7 +19,9 @@ use jiff::Timestamp;
 use crate::store::StoreError;
 
 pub use app::{AppDb, Project, is_valid_project_id};
-pub use project::{Changes, IndexedTask, Problem, ProjectIndex, project_db_path};
+pub use project::{
+    Changes, IndexedTask, Problem, ProjectIndex, delete_project_db, project_db_path,
+};
 pub(crate) use project::{graph_in, rescan_in, rescan_task_in, task_in, tasks_in};
 
 /// An error opening or updating a database.

@@ -15,8 +15,10 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
+use jiff::SignedDuration;
 use serde::Serialize;
-use tandem_board_core::index::{AppDb, Changes, Project};
+use tandem_board_core::git;
+use tandem_board_core::index::{AppDb, Changes, Project, delete_project_db};
 use tandem_board_core::service::{Config, Service};
 use tandem_board_core::store::TASK_DIR;
 use tandem_board_core::watcher::{Watcher, WatcherConfig};
@@ -54,7 +56,12 @@ pub enum Opened {
     /// The folder has no `.tandem/`. Nothing was created or added to the
     /// list; open it again with `create_folder` to create `.tandem/`.
     #[serde(rename_all = "camelCase")]
-    NoTaskFolder { repo_path: String },
+    NoTaskFolder {
+        repo_path: String,
+        /// Whether the folder is in a git repo, so the UI can warn before
+        /// creating a board that git won't track.
+        git_repo: bool,
+    },
 }
 
 /// Every project in `app.db`, and the open ones.
@@ -144,6 +151,7 @@ impl Projects {
         if !create_folder && !has_task_folder(&repo) {
             return Ok(Opened::NoTaskFolder {
                 repo_path: repo.display().to_string(),
+                git_repo: git::is_repo(&repo),
             });
         }
         let project = lock(&self.app_db).add_project(&repo)?;
@@ -158,13 +166,38 @@ impl Projects {
         })
     }
 
-    /// Closes the project and removes it from the list. Its repo and
-    /// database are left alone. Returns `false` if there is no such project.
+    /// Closes the project, removes it from the list and deletes its
+    /// database from the app's data directory. The repo, its `.tandem/`
+    /// folder and the task files are left alone. Refused with
+    /// `agents_working` while an agent holds a live lease on any of its
+    /// tasks. Returns `false` if there is no such project.
     pub fn remove(&self, id: &str) -> Result<bool, Error> {
+        let service = lock(&self.open)
+            .get(id)
+            .map(|project| Arc::clone(&project.service));
+        if let Some(service) = service {
+            check_no_agents_working(&service)?;
+            // Close the endpoint so no agent can claim a task, then check
+            // again for a claim that landed in between.
+            self.endpoints.remove(id);
+            if let Err(e) = check_no_agents_working(&service) {
+                self.endpoints.insert(id, service);
+                return Err(e);
+            }
+        }
         lock(&self.open).remove(id);
         lock(&self.failed).remove(id);
         self.endpoints.remove(id);
-        Ok(lock(&self.app_db).remove_project(id)?)
+        let removed = lock(&self.app_db).remove_project(id)?;
+        if removed {
+            // The project is gone from the list either way, so a database
+            // left behind is only reported; it is rebuilt if you add the
+            // project again.
+            if let Err(e) = delete_project_db(&self.data_dir, id) {
+                report(&format!("cannot delete the database of {id}"), &e);
+            }
+        }
+        Ok(removed)
     }
 
     /// The service of an open project.
@@ -263,6 +296,33 @@ impl Projects {
     }
 }
 
+/// Refuses with `agents_working` if an agent holds a live lease on any of
+/// the project's tasks. Stale leases don't count: their agent has stopped.
+fn check_no_agents_working(service: &Service) -> Result<(), Error> {
+    let working: Vec<String> = service
+        .list_agents(SignedDuration::ZERO)?
+        .into_iter()
+        .flat_map(|agent| agent.tasks)
+        .filter(|task| task.live)
+        .map(|task| task.id.to_string())
+        .collect();
+    if working.is_empty() {
+        return Ok(());
+    }
+    let (noun, verb) = if working.len() == 1 {
+        ("task", "it")
+    } else {
+        ("tasks", "them")
+    };
+    Err(Error::new(
+        "agents_working",
+        format!(
+            "an agent is working on {noun} {}; wait until the agent finishes or releases {verb}, then remove the project",
+            working.join(", ")
+        ),
+    ))
+}
+
 /// Whether `repo` has a `.tandem` entry. A symlinked one counts; it opens
 /// read-only.
 fn has_task_folder(repo: &Path) -> bool {
@@ -289,6 +349,7 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    use tandem_board_core::index::project_db_path;
     use tandem_board_core::service::{Actor, NewTask};
     use tandem_board_core::store::TaskId;
     use tempfile::TempDir;
@@ -371,7 +432,13 @@ mod tests {
 
         let opened = env.open(repo.path(), false);
         let repo_path = repo.path().canonicalize().unwrap().display().to_string();
-        assert_eq!(opened, Opened::NoTaskFolder { repo_path });
+        assert_eq!(
+            opened,
+            Opened::NoTaskFolder {
+                repo_path,
+                git_repo: false
+            }
+        );
         assert!(!repo.path().join(TASK_DIR).exists());
         assert!(env.projects.list().unwrap().is_empty());
 
@@ -387,6 +454,24 @@ mod tests {
         );
         assert_eq!(env.projects.list().unwrap(), std::slice::from_ref(&info));
         assert_eq!(env.endpoints.project_ids(), [info.id]);
+    }
+
+    #[test]
+    fn a_folder_without_tandem_says_whether_it_is_a_git_repo() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repo.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let Opened::NoTaskFolder { git_repo, .. } = env.open(repo.path(), false) else {
+            panic!("expected no .tandem folder");
+        };
+        assert!(git_repo);
     }
 
     #[test]
@@ -504,8 +589,11 @@ mod tests {
         let repo = TempDir::new().unwrap();
         let id = project(env.open(repo.path(), true)).id;
         let task = create(&env.projects.service(&id).unwrap(), "Kept");
+        let db = project_db_path(env.data.path(), &id);
+        assert!(db.is_file());
 
         assert!(env.projects.remove(&id).unwrap());
+        assert!(!db.exists());
         assert!(!env.projects.remove(&id).unwrap());
         assert!(env.projects.list().unwrap().is_empty());
         assert!(env.endpoints.project_ids().is_empty());
@@ -514,5 +602,48 @@ mod tests {
             "project_not_found"
         );
         assert!(repo.path().join(TASK_DIR).join(task.file_name()).is_file());
+    }
+
+    #[test]
+    fn a_project_cannot_be_removed_while_an_agent_works_on_it() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let id = project(env.open(repo.path(), true)).id;
+        let service = env.projects.service(&id).unwrap();
+        let task = create(&service, "Busy");
+        let agent = Actor::agent("claude-code-7f2a");
+        service.start_task(&agent, task).unwrap();
+
+        let error = env.projects.remove(&id).unwrap_err();
+        assert_eq!(error.code, "agents_working");
+        assert!(
+            error.message.contains(&task.to_string()),
+            "{}",
+            error.message
+        );
+        // Nothing changed: still listed, open and reachable by agents.
+        assert_eq!(env.projects.list().unwrap()[0].id, id);
+        assert!(env.projects.service(&id).is_ok());
+        assert_eq!(env.endpoints.project_ids(), std::slice::from_ref(&id));
+        assert!(project_db_path(env.data.path(), &id).is_file());
+
+        service.release_task(&agent, task, "").unwrap();
+        drop(service);
+        assert!(env.projects.remove(&id).unwrap());
+        assert!(env.projects.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_project_that_is_not_open_can_be_removed() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let id = project(env.open(repo.path(), true)).id;
+        fs::remove_dir_all(repo.path().join(TASK_DIR)).unwrap();
+        let env = env.relaunch();
+        assert!(!env.projects.list().unwrap()[0].open);
+
+        assert!(env.projects.remove(&id).unwrap());
+        assert!(env.projects.list().unwrap().is_empty());
+        assert!(!project_db_path(env.data.path(), &id).exists());
     }
 }

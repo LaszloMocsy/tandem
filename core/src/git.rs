@@ -1,5 +1,5 @@
-//! Commit review, the one git operation the app runs, through the git CLI.
-//! Every command runs in the repo with `git -C`, and paths are pathspecs
+//! Commit review, the one git operation the app runs, and the read-only
+//! checks the board needs, through the git CLI. Every command runs in the repo with `git -C`, and paths are pathspecs
 //! relative to it.
 
 use std::io;
@@ -13,6 +13,21 @@ pub enum GitError {
     Spawn(#[source] io::Error),
     #[error("`git {command}` failed: {message}")]
     Failed { command: String, message: String },
+}
+
+/// Whether `folder` is inside a git work tree, as creating a board there
+/// checks before warning you. `false` if git can't be run.
+pub fn is_repo(folder: &Path) -> bool {
+    git(folder, &["rev-parse", "--is-inside-work-tree"])
+        .is_ok_and(|out| out.stdout.trim_ascii() == b"true")
+}
+
+/// Whether the latest commit has `path`, so git history keeps a copy of it
+/// once the file is deleted. `false` outside a repo or before the first
+/// commit.
+pub fn is_committed(repo: &Path, path: &str) -> bool {
+    // `./` makes the path relative to `repo`, not to the work tree's root.
+    git(repo, &["cat-file", "-e", &format!("HEAD:./{path}")]).is_ok()
 }
 
 /// Whether `path` has changes git hasn't committed: edited, staged or not

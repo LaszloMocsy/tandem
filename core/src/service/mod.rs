@@ -8,6 +8,7 @@
 //! database. Files are written before the transaction commits; if the
 //! commit fails, the next rescan brings the index back in line.
 
+mod delete;
 mod error;
 mod read;
 mod transitions;
@@ -30,6 +31,7 @@ use crate::store::{
     TaskId, Unmet, UnmetCriterion, parse_task_file, task_path,
 };
 
+pub use delete::DeleteCheck;
 pub use error::ServiceError;
 
 /// The default lease length.

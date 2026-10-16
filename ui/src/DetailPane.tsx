@@ -3,6 +3,7 @@ import {
   api as tauriApi,
   type Api,
   type ChangelogEntry,
+  type DeleteCheck,
   type Priority,
   type TaskDetail,
   type TaskEdit,
@@ -12,6 +13,7 @@ import {
 import { COLUMNS } from './columns.ts'
 import { errorMessage, formatTime, parseLines, sameList, taskName, taskOptions } from './edit.ts'
 import { DependencyPicker } from './DependencyPicker.tsx'
+import { DeleteTaskForm, Dialog } from './dialogs.tsx'
 import { ReviewBar } from './ReviewBar.tsx'
 
 export type Field =
@@ -40,6 +42,8 @@ export type PaneApi = Pick<
   | 'reopen'
   | 'hasUncommittedChanges'
   | 'commitReview'
+  | 'deleteCheck'
+  | 'deleteTask'
 >
 
 /**
@@ -72,6 +76,11 @@ export function DetailPane({
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const isDone = detail?.summary.status === 'done'
+  // The Delete task dialog, and what stands in its way.
+  const [deleting, setDeleting] = useState(false)
+  const [deleteCheck, setDeleteCheck] = useState<DeleteCheck | null>(null)
+  const [deleteChecks, setDeleteChecks] = useState(0)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   useEffect(() => {
     let current = true
@@ -113,6 +122,48 @@ export function DetailPane({
       window.removeEventListener('focus', onFocus)
     }
   }, [api, project, id, isDone, detail])
+
+  // Checked when the dialog opens, and again when tasks change or you ask,
+  // so a released task or a removed link unblocks it.
+  useEffect(() => {
+    if (!deleting) return
+    let current = true
+    api.deleteCheck(project, id).then(
+      (check) => {
+        if (!current) return
+        setDeleteCheck(check)
+        setDeleteError(null)
+      },
+      // Deleting checks again, so a failed check only says why.
+      (error: unknown) => {
+        if (current) setDeleteError(errorMessage(error))
+      },
+    )
+    return () => {
+      current = false
+    }
+  }, [api, project, id, deleting, deleteChecks, tasks])
+
+  function openDelete() {
+    setDeleteCheck(null)
+    setDeleteError(null)
+    setDeleting(true)
+  }
+
+  async function deleteTask() {
+    setBusy(true)
+    setDeleteError(null)
+    try {
+      await api.deleteTask(project, id)
+      setDeleting(false)
+      onClose()
+    } catch (error) {
+      setDeleteError(errorMessage(error))
+      setDeleteChecks((n) => n + 1)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -190,10 +241,40 @@ export function DetailPane({
               }
             />
           }
+          footer={
+            <div className="detail-footer">
+              <button
+                type="button"
+                className="delete-task"
+                disabled={readOnly}
+                onClick={openDelete}
+              >
+                Delete task…
+              </button>
+            </div>
+          }
         />
       ) : (
         !loadError && <p className="empty">Loading…</p>
       )}
+      <Dialog
+        open={deleting && detail !== null}
+        label="Delete task"
+        onClose={() => setDeleting(false)}
+      >
+        {detail && (
+          <DeleteTaskForm
+            task={detail.summary}
+            tasks={tasks}
+            check={deleteCheck}
+            busy={busy}
+            error={deleteError}
+            onSubmit={() => void deleteTask()}
+            onRecheck={() => setDeleteChecks((n) => n + 1)}
+            onCancel={() => setDeleting(false)}
+          />
+        )}
+      </Dialog>
     </aside>
   )
 }
@@ -207,6 +288,7 @@ export function TaskView({
   onSave,
   onClearError,
   actions,
+  footer,
 }: {
   detail: TaskDetail
   tasks: readonly TaskSummary[]
@@ -216,6 +298,8 @@ export function TaskView({
   onClearError: (field: Field) => void
   /** Your actions on the task, under the title. */
   actions?: ReactNode
+  /** Shown at the end, below the working log. */
+  footer?: ReactNode
 }) {
   const { summary, content } = detail
   // An unreadable file is never written, so nothing is editable.
@@ -372,6 +456,7 @@ export function TaskView({
       <Section title="Working log" tag="local only, not committed">
         <WorkLog entries={detail.workLog} />
       </Section>
+      {footer}
     </div>
   )
 }

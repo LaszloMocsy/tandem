@@ -44,10 +44,19 @@ function store(projects: ProjectInfo[], tasks: TaskSummary[]) {
   })
 }
 
-test('shows that no project is open', () => {
+test('with no project open, shows the welcome screen', () => {
   const html = renderToStaticMarkup(<App store={store([], [])} />)
   expect(html).toContain('Tandem')
-  expect(html).toContain('No project open.')
+  expect(html).toContain('Welcome to Tandem')
+  expect(html).toContain('New board')
+})
+
+test('with a project open, its name is the project switcher', async () => {
+  const board = store([project], [])
+  await board.start()
+  const html = renderToStaticMarkup(<App store={board} />)
+  expect(html).toContain('aria-haspopup="menu"')
+  expect(html).not.toContain('Welcome to Tandem')
 })
 
 test('shows the five columns with their cards', async () => {

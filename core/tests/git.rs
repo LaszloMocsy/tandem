@@ -56,6 +56,20 @@ fn lines(text: &str) -> Vec<&str> {
 }
 
 #[test]
+fn is_repo_is_true_anywhere_inside_a_work_tree() {
+    let repo = repo();
+    assert!(git::is_repo(repo.path()));
+    let sub = repo.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    assert!(git::is_repo(&sub));
+    assert!(!git::is_repo(&repo.path().join(".git")));
+
+    let plain = TempDir::new().unwrap();
+    assert!(!git::is_repo(plain.path()));
+    assert!(!git::is_repo(&plain.path().join("missing")));
+}
+
+#[test]
 fn has_changes_sees_new_edited_and_staged_files() {
     let dir = repo();
     let repo = dir.path();
@@ -169,6 +183,7 @@ fn commit_review_commits_a_done_tasks_file_alone() {
 
     service.mark_reviewed(id).unwrap();
     assert!(service.has_uncommitted_changes(id).unwrap());
+    assert!(!service.delete_check(id).unwrap().committed);
     fs::write(repo.join("other.txt"), "two\n").unwrap();
     run(repo, &["add", "other.txt"]);
 
@@ -190,7 +205,32 @@ fn commit_review_commits_a_done_tasks_file_alone() {
         ["other.txt"]
     );
     assert!(!service.has_uncommitted_changes(id).unwrap());
+    // Committed, so deleting it would leave a copy in git history.
+    assert!(service.delete_check(id).unwrap().committed);
 
     // With nothing left to commit, git refuses.
     assert_eq!(service.commit_review(id).unwrap_err().code(), "git_failed");
+}
+
+#[test]
+fn is_committed_sees_only_files_in_the_latest_commit() {
+    let repo = repo();
+    let dir = repo.path();
+    assert!(git::is_committed(dir, "README.md"));
+    fs::write(dir.join("new.md"), "new\n").unwrap();
+    assert!(!git::is_committed(dir, "new.md"));
+    run(dir, &["add", "new.md"]);
+    assert!(!git::is_committed(dir, "new.md"));
+    run(dir, &["commit", "--quiet", "-m", "Add new"]);
+    assert!(git::is_committed(dir, "new.md"));
+
+    // Paths are relative to the folder, even below the work tree's root.
+    fs::create_dir(dir.join("sub")).unwrap();
+    fs::write(dir.join("sub/inner.md"), "inner\n").unwrap();
+    run(dir, &["add", "sub/inner.md"]);
+    run(dir, &["commit", "--quiet", "-m", "Add inner"]);
+    assert!(git::is_committed(&dir.join("sub"), "inner.md"));
+
+    let plain = TempDir::new().unwrap();
+    assert!(!git::is_committed(plain.path(), "README.md"));
 }

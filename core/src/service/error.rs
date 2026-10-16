@@ -39,6 +39,18 @@ pub enum ServiceError {
         list(.criteria)
     )]
     CriteriaUnmet { task: TaskId, criteria: Vec<u32> },
+    #[error(
+        "task `{task}` is still linked from other tasks{}{}; unlink them first",
+        linked(" as the parent of", .children),
+        linked(" as a dependency of", .dependents)
+    )]
+    Referenced {
+        task: TaskId,
+        /// Tasks whose `parent` is this task.
+        children: Vec<TaskId>,
+        /// Tasks that list this task in `depends_on`.
+        dependents: Vec<TaskId>,
+    },
     #[error("{0}")]
     InvalidArgument(String),
     #[error(transparent)]
@@ -55,8 +67,8 @@ impl ServiceError {
     /// The error code: one of the spec's `not_found`, `claimed_by_other`,
     /// `deps_not_done`, `not_holder`, `invalid_file`, `invalid_transition`,
     /// `cycle_detected`, `parent_not_found` and `criteria_unmet`, or
-    /// `invalid_argument`, `read_only`, `git_failed` and `internal`, which
-    /// the spec doesn't name.
+    /// `task_referenced`, `invalid_argument`, `read_only`, `git_failed` and
+    /// `internal`, which the spec doesn't name.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotFound(_) => "not_found",
@@ -67,6 +79,7 @@ impl ServiceError {
             Self::InvalidTransition { .. } => "invalid_transition",
             Self::Graph(e) => e.code(),
             Self::CriteriaUnmet { .. } => "criteria_unmet",
+            Self::Referenced { .. } => "task_referenced",
             Self::InvalidArgument(_) => "invalid_argument",
             Self::ReadOnly(_) => "read_only",
             Self::Git(_) => "git_failed",
@@ -104,6 +117,13 @@ impl From<rusqlite::Error> for ServiceError {
 fn list<T: std::fmt::Display>(items: &[T]) -> String {
     let items: Vec<String> = items.iter().map(ToString::to_string).collect();
     items.join(", ")
+}
+
+fn linked(what: &str, tasks: &[TaskId]) -> String {
+    if tasks.is_empty() {
+        return String::new();
+    }
+    format!("{what} {}", list(tasks))
 }
 
 fn until(expires_at: &Option<String>) -> String {
