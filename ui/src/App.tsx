@@ -186,7 +186,10 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
   return (
     <div className="app">
       <header className="topbar">
-        <h1>Tandem</h1>
+        <h1>
+          <img className="topbar-logo" src="/logo.svg" alt="" width={22} height={22} />
+          Tandem
+        </h1>
         {current && (
           <ProjectSwitcher
             projects={projects}
