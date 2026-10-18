@@ -8,6 +8,8 @@
 //!   that may have lost events.
 //! - Every 60 seconds a stat-only sweep catches what the watcher missed,
 //!   for example during sleep or on network drives.
+//! - An event on `config.toml`, or on the folder itself, is passed on with
+//!   [`Service::config_changed`], so the app reads the project name again.
 //!
 //! The app's own writes need no special handling: the service indexes each
 //! file it writes, so the event for it finds the same hash and changes
@@ -26,7 +28,7 @@ use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
 
 use crate::service::{Service, ServiceError};
-use crate::store::{TASK_DIR, TaskId};
+use crate::store::{CONFIG_FILE, TASK_DIR, TaskId};
 
 /// Settings for a [`Watcher`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,7 +165,11 @@ fn run(
         match messages.recv_timeout(wait) {
             Ok(Message::Stop) | Err(RecvTimeoutError::Disconnected) => return,
             Ok(Message::Events(Ok(events))) => {
-                match plan(events.iter().map(|e| e.path.as_path()), config.burst) {
+                let paths = || events.iter().map(|e| e.path.as_path());
+                if touches_config(paths()) {
+                    service.config_changed();
+                }
+                match plan(paths(), config.burst) {
                     Plan::Full => rescan(&mut on_error),
                     Plan::Tasks(ids) => {
                         for id in ids {
@@ -217,6 +223,15 @@ fn plan<'a>(paths: impl IntoIterator<Item = &'a std::path::Path>, burst: usize) 
     }
 }
 
+/// Whether a batch of events may have changed `config.toml`: an event on
+/// the file, or on the folder, which may have been replaced with another.
+fn touches_config<'a>(paths: impl IntoIterator<Item = &'a std::path::Path>) -> bool {
+    paths
+        .into_iter()
+        .filter_map(|path| path.file_name()?.to_str())
+        .any(|name| name == CONFIG_FILE || name == TASK_DIR)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -245,6 +260,10 @@ mod tests {
             plan([dir.join("notes.txt").as_path()], 10),
             Plan::Tasks(BTreeSet::new())
         );
+        assert!(!touches_config(paths.iter().map(PathBuf::as_path)));
+        assert!(touches_config([dir.join("config.toml").as_path()]));
+        assert!(touches_config([dir]));
+        assert!(!touches_config([dir.join("config.toml.bak").as_path()]));
     }
 
     #[test]

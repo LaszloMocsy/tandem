@@ -107,7 +107,7 @@ fn drain(events: &Receiver<Changes>) -> Vec<Changes> {
 fn changed(ids: &[TaskId]) -> Changes {
     Changes {
         changed: ids.iter().copied().collect(),
-        removed: BTreeSet::new(),
+        ..Changes::default()
     }
 }
 
@@ -286,4 +286,29 @@ fn switching_branches_updates_the_board_and_drops_leases() {
         env.summary(id).status == Status::InProgress
     });
     assert_eq!(env.summary(id).lease, None);
+}
+
+#[test]
+fn an_edit_to_config_toml_is_reported_without_a_loop() {
+    let env = Env::new();
+    let _watcher = env.watch();
+    let events = env.service.subscribe();
+    let config_changed = Changes {
+        config: true,
+        ..Changes::default()
+    };
+
+    // A pull brings in a new name.
+    let config = env.service.task_dir().join("config.toml");
+    fs::write(&config, "format_version = 1\nname = \"Pulled\"\n").unwrap();
+    let first = events.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(first, config_changed);
+    assert_eq!(env.service.name().unwrap().as_deref(), Some("Pulled"));
+    assert_eq!(drain(&events), Vec::<Changes>::new());
+
+    // Renaming from the app is reported the same way, and only once.
+    env.service.set_name("Renamed").unwrap();
+    let events = drain(&events);
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|changes| *changes == config_changed));
 }

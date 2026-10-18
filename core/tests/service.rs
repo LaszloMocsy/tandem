@@ -1279,7 +1279,7 @@ fn every_change_is_sent_to_subscribers_once() {
     let changed = |id: TaskId| {
         Some(Changes {
             changed: [id].into(),
-            removed: Default::default(),
+            ..Changes::default()
         })
     };
 
@@ -1313,8 +1313,8 @@ fn every_change_is_sent_to_subscribers_once() {
     assert_eq!(
         next(),
         Some(Changes {
-            changed: Default::default(),
             removed: [id].into(),
+            ..Changes::default()
         })
     );
 

@@ -107,6 +107,7 @@ fn changes(changed: &[&str], removed: &[&str]) -> Changes {
     Changes {
         changed: ids(changed),
         removed: ids(removed),
+        config: false,
     }
 }
 

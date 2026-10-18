@@ -86,11 +86,19 @@ pub struct Changes {
     pub changed: BTreeSet<TaskId>,
     /// Rows deleted because their file is gone.
     pub removed: BTreeSet<TaskId>,
+    /// Whether `config.toml` may have changed, as when a pull renames the
+    /// project. Only the watcher sets it; scans never read the config.
+    pub config: bool,
 }
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.changed.is_empty() && self.removed.is_empty()
+        self.changed.is_empty() && self.removed.is_empty() && !self.config
+    }
+
+    /// Whether any task changed, so the board needs to refetch.
+    pub fn has_tasks(&self) -> bool {
+        !self.changed.is_empty() || !self.removed.is_empty()
     }
 
     /// Adds later changes: a task removed and then changed again counts as
@@ -104,6 +112,7 @@ impl Changes {
             self.removed.remove(&id);
             self.changed.insert(id);
         }
+        self.config |= later.config;
     }
 }
 
@@ -601,16 +610,19 @@ mod tests {
         let mut changes = Changes {
             changed: [a, b].into(),
             removed: [c].into(),
+            config: false,
         };
         changes.merge(Changes {
             changed: [c].into(),
             removed: [b].into(),
+            config: true,
         });
         assert_eq!(
             changes,
             Changes {
                 changed: [a, c].into(),
                 removed: [b].into(),
+                config: true,
             }
         );
     }

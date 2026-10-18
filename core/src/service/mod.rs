@@ -455,6 +455,16 @@ impl Service {
         }
     }
 
+    /// Tells subscribers that `config.toml` may have changed, for a watcher
+    /// event on it, so the app can read the project name again.
+    pub fn config_changed(&self) {
+        let _index = self.lock();
+        self.emit(Changes {
+            config: true,
+            ..Changes::default()
+        });
+    }
+
     /// A full rescan, for a burst of watcher events or the periodic sweep.
     pub fn rescan(&self) -> Result<Changes, ServiceError> {
         let mut index = self.lock();
@@ -569,7 +579,7 @@ impl Call<'_> {
     fn touched(&self, id: TaskId) {
         self.changes.borrow_mut().merge(Changes {
             changed: [id].into(),
-            removed: Default::default(),
+            ..Changes::default()
         });
     }
 
