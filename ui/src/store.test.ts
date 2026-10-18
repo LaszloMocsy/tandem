@@ -1,5 +1,11 @@
 import { expect, test } from 'vitest'
-import { CommandError, type ProjectInfo, type TaskSummary, type TasksChanged } from './api.ts'
+import {
+  CommandError,
+  type ProjectInfo,
+  type ProjectsChanged,
+  type TaskSummary,
+  type TasksChanged,
+} from './api.ts'
 import { createBoardStore, type BoardDeps } from './store.ts'
 
 function projectInfo(id: string, open = true): ProjectInfo {
@@ -45,6 +51,7 @@ function deferred<T>() {
 /** A fake desktop app: projects, tasks per project and the event channel. */
 function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) {
   const handlers = new Set<(event: TasksChanged) => void>()
+  const projectHandlers = new Set<(event: ProjectsChanged) => void>()
   const fetches: string[] = []
   let hold: { promise: Promise<void> } | null = null
   const deps: BoardDeps = {
@@ -75,6 +82,10 @@ function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) 
       handlers.add(handler)
       return () => handlers.delete(handler)
     },
+    onProjectsChanged: async (handler) => {
+      projectHandlers.add(handler)
+      return () => projectHandlers.delete(handler)
+    },
   }
   return {
     deps,
@@ -83,7 +94,11 @@ function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) 
     emit: (project: string, changed: string[] = []) => {
       for (const handler of handlers) handler({ project, changed, removed: [] })
     },
-    listening: () => handlers.size,
+    rename: (project: string, name: string) => {
+      projects = projects.map((p) => (p.id === project ? { ...p, name } : p))
+      for (const handler of projectHandlers) handler({ project })
+    },
+    listening: () => handlers.size + projectHandlers.size,
     holdFetches: () => {
       const gate = deferred<void>()
       hold = gate
@@ -114,7 +129,7 @@ test('start shows the most recent open project and its tasks', async () => {
   expect(renders).toBeGreaterThan(0)
   // Starting twice, as StrictMode does, listens once.
   await store.start()
-  expect(app.listening()).toBe(1)
+  expect(app.listening()).toBe(2)
   store.stop()
   await Promise.resolve()
   expect(app.listening()).toBe(0)
@@ -134,6 +149,18 @@ test('tasks-changed for the project on screen refetches its tasks', async () => 
   app.emit('b')
   await settle()
   expect(app.fetches).toEqual(['a'])
+})
+
+test('projects-changed reloads the project list without refetching tasks', async () => {
+  const app = fakeApp([projectInfo('a')], { a: [] })
+  const store = createBoardStore(app.deps)
+  await store.start()
+  app.fetches.length = 0
+
+  app.rename('a', 'Renamed in a pull')
+  await settle()
+  expect(store.getState().projects[0].name).toBe('Renamed in a pull')
+  expect(app.fetches).toEqual([])
 })
 
 test('a burst of events during a fetch costs one more fetch', async () => {

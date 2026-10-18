@@ -22,6 +22,20 @@ export interface ProjectInfo {
   mcpUrl: string | null
 }
 
+export type Theme = 'system' | 'light' | 'dark'
+
+/** The app's settings, for every project on this machine. */
+export interface AppSettings {
+  /** The port the MCP server is set to use. */
+  mcpPort: number
+  defaultMcpPort: number
+  /** Where the server listens, such as `http://127.0.0.1:4317`, while it runs. */
+  mcpUrl: string | null
+  /** Why the server isn't running, when it isn't. */
+  mcpError: string | null
+  theme: Theme
+}
+
 /** What opening a folder did. */
 export type Opened =
   | { kind: 'project'; project: ProjectInfo }
@@ -204,11 +218,18 @@ export interface TasksChanged {
 
 export const TASKS_CHANGED = 'tasks-changed'
 
+/** The payload of the `projects-changed` event, such as after a rename. */
+export interface ProjectsChanged {
+  project: string
+}
+
+export const PROJECTS_CHANGED = 'projects-changed'
+
 /**
  * A refused command. `code` is one of the spec's error codes, such as
  * `invalid_transition` or `cycle_detected`, or `project_not_found`,
  * `invalid_argument`, `read_only`, `git_failed`, `agents_working`,
- * `task_referenced` or `internal`.
+ * `task_referenced`, `port_in_use`, `mcp_failed` or `internal`.
  */
 export class CommandError extends Error {
   readonly code: string
@@ -260,6 +281,27 @@ export const api = {
   removeProject: (project: string) => call<boolean>('remove_project', { project }),
   /** Asks for a folder with the system dialog; `null` if cancelled. */
   chooseFolder: () => call<string | null>('choose_folder'),
+  /**
+   * Sets the project's name in `.tandem/config.toml`; a blank name removes
+   * it, so the folder name is used. Refused with `read_only` on a read-only
+   * project.
+   */
+  setProjectName: (project: string, name: string) =>
+    call<ProjectInfo>('set_project_name', { project, name }),
+  /**
+   * Reset local state: deletes the project's database and rebuilds it from
+   * the task files. Leases, flags and working logs are lost.
+   */
+  resetProject: (project: string) => call<null>('reset_project', { project }),
+
+  getAppSettings: () => call<AppSettings>('get_app_settings'),
+  /**
+   * Moves the MCP server to `port`, changing every project's MCP URL.
+   * Refused with `port_in_use` if the port is taken; the server then stays
+   * where it was.
+   */
+  setMcpPort: (port: number) => call<AppSettings>('set_mcp_port', { port }),
+  setTheme: (theme: Theme) => call<AppSettings>('set_theme', { theme }),
 
   listTasks: (project: string, filter?: TaskFilter) =>
     call<TaskSummary[]>('list_tasks', { project, filter }),
@@ -317,4 +359,11 @@ export type Api = typeof api
 /** Calls `handler` for every `tasks-changed` event, until unlistened. */
 export function onTasksChanged(handler: (event: TasksChanged) => void): Promise<UnlistenFn> {
   return listen<TasksChanged>(TASKS_CHANGED, (event) => handler(event.payload))
+}
+
+/** Calls `handler` for every `projects-changed` event, until unlistened. */
+export function onProjectsChanged(
+  handler: (event: ProjectsChanged) => void,
+): Promise<UnlistenFn> {
+  return listen<ProjectsChanged>(PROJECTS_CHANGED, (event) => handler(event.payload))
 }
