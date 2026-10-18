@@ -37,8 +37,9 @@
   background: var(--bg);
 }
 
+/* Dark, following the system unless Settings forces light. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #16181c;
     --surface: #22252b;
     --column: #1c1f24;
@@ -62,6 +63,38 @@
     --safe: #8fd3a9;
     --shadow: 0 8px 24px rgb(0 0 0 / 45%);
   }
+}
+
+/* Dark, forced in Settings. Keep in step with the block above. */
+:root[data-theme='dark'] {
+  --bg: #16181c;
+  --surface: #22252b;
+  --column: #1c1f24;
+  --border: #2f333a;
+  --text: #e6e8eb;
+  --muted: #979ea9;
+  --chip: #2f333a;
+  --low: #6f7783;
+  --stale: #6f7783;
+  --blocked-bg: #3a1f22;
+  --blocked: #f19a9a;
+  --invalid-bg: #3a2c17;
+  --invalid: #f0bd6c;
+  --unmet-bg: #232a4a;
+  --unmet: #a9b4f5;
+  --accent: #6f9bf0;
+  --danger: #d9534f;
+  --info-bg: #1f2a44;
+  --info: #a9c1f5;
+  --safe-bg: #1b3326;
+  --safe: #8fd3a9;
+  --shadow: 0 8px 24px rgb(0 0 0 / 45%);
+
+  color-scheme: dark;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 * {

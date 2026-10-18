@@ -18,6 +18,7 @@ import { ProjectSwitcher } from './ProjectSwitcher.tsx'
 import { useProjectActions } from './projects.ts'
 import { shortcutFor } from './shortcuts.ts'
 import { board, useBoard, type BoardStore } from './store.ts'
+import { applyTheme } from './theme.ts'
 import { Toolbar } from './Toolbar.tsx'
 import { useNow } from './useNow.ts'
 import { useSearch } from './useSearch.ts'
@@ -30,7 +31,14 @@ const LEASE_TICK_MS = 15_000
 export type AppApi = PaneApi &
   Pick<
     Api,
-    'listTasks' | 'listAgents' | 'createTask' | 'start' | 'finish' | 'release' | 'chooseFolder'
+    | 'listTasks'
+    | 'listAgents'
+    | 'createTask'
+    | 'start'
+    | 'finish'
+    | 'release'
+    | 'chooseFolder'
+    | 'getAppSettings'
   >
 
 const columnName = (status: Status) => COLUMNS.find((c) => c.status === status)?.title ?? status
@@ -99,6 +107,14 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
     store.start().catch((error: unknown) => console.error('could not start the board', error))
     return () => store.stop()
   }, [store])
+
+  // The saved theme wins over the one remembered for the first paint.
+  useEffect(() => {
+    api.getAppSettings().then(
+      (settings) => applyTheme(settings.theme),
+      (error: unknown) => console.error('could not load the settings', error),
+    )
+  }, [api])
 
   /** Runs a board action, showing a refusal as the notice. */
   const run = useCallback(async (action: () => Promise<unknown>) => {
