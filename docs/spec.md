@@ -4,11 +4,11 @@ Oct 13, 2026 · @László Mócsy
 
 ## Overview
 
-Tandem (working name) is a local Tauri desktop app with a kanban board for tasks that you and AI coding agents share. Tasks are Markdown files in the repo, agents work on them through an MCP server built into the app, and you review and tick off what the agents finish.
+Tandem (working name) is a local Tauri desktop app with a kanban board for tasks that you and AI coding agents share. Tasks are Markdown files in the repo, or in the app's data directory for a local board; agents work on them through an MCP server built into the app, and you review and tick off what the agents finish.
 
 Goals for v1:
 
-- One task = one Markdown file in `.tandem/`, committed together with the code that works on it
+- One task = one Markdown file in `.tandem/`, committed together with the code that works on it. A `local` board keeps its files in the app's data directory instead, outside git (see Board storage)
 - Agents claim, work on and complete tasks through MCP tools, safely in parallel
 - A board with Backlog, Todo, In progress, Review and Done columns, showing live agent activity
 - A review tick that only you can set after an agent marks a task finished
@@ -21,15 +21,15 @@ What v1 leaves out is listed under Scope and later versions.
 Git records outcomes, SQLite holds activity. Every other rule follows from that.
 
 1. **A task file changes only when something worth reading later happens:** the task is created, its spec is edited, it is approved, started, finished, reviewed, reopened, released or deleted. Claims, heartbeats, blocked flags and the working log never touch files.
-2. **The app commits only when you press Commit review.** Otherwise it only writes files. The task file rides along in the commit with the code: the first commit of a task carries `status: in_progress`, the last one carries `status: finished`, and your review then sets `done`.
-3. **Files are the source of truth.** The SQLite database can be deleted at any time and is rebuilt from `.tandem/`. Only in-flight state (leases, working logs) is lost.
-4. **Nothing in the repo except `.tandem/`.** SQLite lives in the app's data directory, so the repo needs no `.gitignore` entries.
+2. **The app commits only when you press Commit review.** Otherwise it only writes files. On a `repo` board the task file rides along in the commit with the code: the first commit of a task carries `status: in_progress`, the last one carries `status: finished`, and your review then sets `done`. On a `local` board the app never commits, and the task's commits carry only the `Task: <id>` trailer.
+3. **Files are the source of truth.** The SQLite database can be deleted at any time and is rebuilt from the task folder: `.tandem/` on a `repo` board, `projects/<project-id>/tasks/` on a `local` board. Only in-flight state (leases, working logs) is lost.
+4. **Nothing in the repo except `.tandem/`.** SQLite lives in the app's data directory, so the repo needs no `.gitignore` entries. On a `local` board there is nothing in the repo at all: the task files live in the data directory too, and git keeps no history of them.
 5. **Agents change tasks only through MCP tools**, never by editing frontmatter or the changelog by hand. You can edit task files in any editor; the app picks up the change.
 6. **Small, stable diffs.** The app writes frontmatter in a fixed key order and touches only the lines it owns.
 
 ## Task file format
 
-Each task is one Markdown file with YAML frontmatter, stored flat in `.tandem/` at the repo root.
+Each task is one Markdown file with YAML frontmatter, stored flat in the board's task folder: `.tandem/` at the repo root on a `repo` board. A `local` board uses the same layout in another folder; see Board storage.
 
 ```txt
 .tandem/
@@ -42,7 +42,7 @@ Each task is one Markdown file with YAML frontmatter, stored flat in `.tandem/` 
 
 **IDs** are 7 random characters from a 32-character alphabet (lowercase letters and digits without `0 o 1 l`), such as `k3f9x2m`. That gives about 34 billion possible ids, so tasks created on different branches practically never clash; the app still checks before creating one. The filename is exactly `<id>.md`. The app reads only files whose name matches that pattern, so `README.md` and anything else in the folder is ignored. People and agents find tasks through the app or the MCP tools, by id, title, label or text, never by filename.
 
-**Format version.** `.tandem/config.toml` records which version of this file format the folder uses. The app creates it on init, and it is committed like the tasks.
+**Format version.** `.tandem/config.toml` records which version of this file format the folder uses. The app creates it on init, and on a `repo` board it is committed like the tasks.
 
 ```toml
 format_version = 1
@@ -105,10 +105,58 @@ Follow-ups: none
 
 **Write rules:**
 
-- Write atomically: a temp file in `.tandem/`, then rename
+- Write atomically: a temp file in the task folder, then rename
 - LF line endings and one trailing newline; keep the body byte for byte except the changelog append
 - If a file fails to parse, mark it invalid on the board and never overwrite it
-- Never follow symlinks: a symlinked `.tandem` opens the project read-only, and a symlinked task file is invalid. Changelog summaries can't contain headings, unclosed code fences, or lines starting with `Files:`, `Follow-ups:` or `Unmet:`
+- Never follow symlinks: a symlinked task folder (`.tandem`, or `tasks` on a `local` board) opens the project read-only, and a symlinked task file is invalid. Changelog summaries can't contain headings, unclosed code fences, or lines starting with `Files:`, `Follow-ups:` or `Unmet:`
+
+## Board storage
+
+Each project has a storage mode, stored in `projects.storage` in `app.db`. It decides only where the task folder lives.
+
+| Mode | Task folder | In git |
+| --- | --- | --- |
+| `repo` (default) | `<repo>/.tandem/` | yes, committed with the code |
+| `local` | `projects/<project-id>/tasks/` in the app's data directory | never |
+
+A `local` board writes nothing inside the repo. Its task folder sits next to the project database:
+
+```txt
+<app data dir>/
+  app.db
+  projects/
+    <project-id>.db  # project database
+    <project-id>/
+      tasks/         # the task folder, laid out like .tandem/
+        config.toml
+        README.md
+        a7rq4ne.md
+```
+
+Use it for repos you can't or don't want to commit task files to, such as client work, open-source repos you don't maintain, or personal scratch work. The files sit in the data directory rather than in a `.tandem/` listed in `.git/info/exclude`, because an excluded folder still sits in the working tree and is lost with the clone.
+
+**Same in both modes.** The file format, parsing, write rules, watcher, rebuild rules, `config.toml` and `README.md` are identical; only the root folder changes. `store`, `index` and `watcher` take the task folder as a path and never assume `<repo>/.tandem`. The symlink rule applies to the task folder in both modes.
+
+**What differs:**
+
+| | `repo` | `local` |
+| --- | --- | --- |
+| Commit review | On Done cards with uncommitted changes | Hidden |
+| Uncommitted-changes check | Used by Commit review and the delete confirmation | Skipped |
+| Path returned by file-writing tools | Relative to the repo root, with a commit reminder | Absolute, with no commit reminder |
+| Tool descriptions and server instructions | Include the task-file commit rules | Leave them out |
+| `AGENTS.md` snippet | The repo snippet | The local snippet |
+| `Task: <id>` commit trailer | Required | Required |
+| Remove | Keeps `.tandem/` | Deletes `projects/<project-id>/` too |
+
+**Move board** converts a board to the other mode. It is a true move:
+
+1. It is refused while an agent holds a live lease on any of the project's tasks, while the project is read-only, and when the target folder exists and isn't empty.
+2. It copies every file from the source folder into the target folder and verifies each copy byte for byte. If any copy fails, it deletes the target folder, keeps the source, and reports the error.
+3. It sets `projects.storage`, deletes the source folder, rebuilds the task index from the target folder and rescans. The watcher moves to the target folder. Leases, flags and working logs survive, since they are keyed by task id.
+4. It tells you what to commit: the deletion of `.tandem/` after repo → local, or the new `.tandem/` after local → repo.
+
+**Export board** works in both modes and changes nothing. It writes a `.zip` of every regular file in the task folder, byte for byte, with entries under `.tandem/` (such as `.tandem/k3f9x2m.md`), so `unzip board.zip -d <repo>` restores it as a `repo` board. Open board then picks it up, and Move board makes it local again if you want.
 
 ## State model
 
@@ -145,11 +193,11 @@ Any move out of `done` also removes `reviewed_at`.
 
 No MCP tool can approve a task into `todo` or set `reviewed_at`, so agents cannot approve their own work. No MCP tool deletes a task either.
 
-Deleting is refused while an agent holds a live lease on the task, and while another task names it as its `parent` or lists it in `depends_on`, since that task would be left invalid or locked for good; you unlink those first. An invalid file can be deleted. Like any other write, the deletion is not committed: git history keeps the last committed version, and the confirmation warns when the file was never committed. Marking reviewed writes the file without committing it: it lands in your next commit, you can amend it into the latest commit, or you can press **Commit review** to commit only that file.
+Deleting is refused while an agent holds a live lease on the task, and while another task names it as its `parent` or lists it in `depends_on`, since that task would be left invalid or locked for good; you unlink those first. An invalid file can be deleted. Like any other write, the deletion is not committed: git history keeps the last committed version, and the confirmation warns when the file was never committed. A `local` board has no git history, so its confirmation says the deletion is permanent. Marking reviewed writes the file without committing it: it lands in your next commit, you can amend it into the latest commit, or you can press **Commit review** to commit only that file.
 
 ## SQLite schema
 
-SQLite lives in the app's data directory, never in the repo: one global `app.db` for the project list, plus one database per project at `projects/<project-id>.db`. Both use WAL mode. Every row in a project database is either rebuilt from files or deliberately short-lived.
+SQLite lives in the app's data directory, never in the repo: one global `app.db` for the project list, plus one database per project at `projects/<project-id>.db`. A `local` board keeps its task folder there too, at `projects/<project-id>/tasks/`. Both use WAL mode. Every row in a project database is either rebuilt from files or deliberately short-lived.
 
 ```sql
 -- app.db
@@ -157,11 +205,12 @@ CREATE TABLE projects (
   id             TEXT PRIMARY KEY,   -- short slug, used in the MCP URL
   name           TEXT NOT NULL,
   repo_path      TEXT NOT NULL UNIQUE,
+  storage        TEXT NOT NULL DEFAULT 'repo' CHECK (storage IN ('repo','local')),
   last_opened_at TEXT
 );
 
 -- projects/<project-id>.db
-CREATE TABLE tasks (                 -- index of .tandem/*.md, rebuilt from files
+CREATE TABLE tasks (                 -- index of the task folder's *.md, rebuilt from files
   id          TEXT PRIMARY KEY,
   path        TEXT NOT NULL,
   title       TEXT NOT NULL,
@@ -216,13 +265,13 @@ CREATE TABLE agents (
 
 - **No hash inside task files.** Checking one would still mean reading the whole file, and every edit would rewrite that line and cause merge conflicts. Change detection uses `file_mtime`, `file_size` and `file_hash` in SQLite instead.
 - **Stat check:** every scan compares each file's mtime and size with the index, and re-reads and re-hashes only files where either changed. If the hash is unchanged, only the stored mtime is updated.
-- **On project open:** a full scan of `.tandem/`, then index rows whose file is gone are deleted. This catches everything that changed while the app was closed.
+- **On project open:** a full scan of the task folder, then index rows whose file is gone are deleted. This catches everything that changed while the app was closed.
 - **On a watcher event:** re-parse that file, debounced by about 200 ms. A burst of events (branch switch, `git pull`) triggers a full scan.
 - **Every 60 seconds:** a stat-only sweep, for events the watcher missed (sleep, network drives).
 - **After any index change:** re-check the whole graph for parent loops, dependency loops and missing parents. It is a linear pass, so it needs no separate trigger.
 - Drop any lease whose task is no longer `in_progress` in its file, for example after switching branches.
 - Delete working-log rows for missing tasks after 30 days.
-- A Reset local state button in settings deletes the project database and rescans.
+- A Reset local state button in settings deletes the project database and rescans. It never touches the task folder, also on a `local` board.
 
 ## MCP server
 
@@ -260,15 +309,17 @@ No tool approves a task into `todo` or sets `reviewed_at`; both are yours, on th
 
 **Every file-writing tool returns the changed path** and a reminder to include it in the next commit. Tool descriptions repeat the commit rules, so agents follow them even without an `AGENTS.md`.
 
+On a `local` board, the returned path is the file's absolute path in the app's data directory, and there is no commit reminder. Tool descriptions and server instructions depend on the project's mode: on a `local` board they leave out the task-file commit rules and keep the `Task: <id>` trailer rule. A client that connected before a Move board sees the new text after it reconnects.
+
 ## Agent workflow
 
-An agent's task always runs in this order, and its first and last commits carry the task file.
+An agent's task always runs in this order. On a `repo` board, its first and last commits carry the task file.
 
 1. Pick a task: the id you were given, or `next_task`. Read it with `get_task`.
-2. `start_task`. The first commit for this work includes the task file with `status: in_progress`.
+2. `start_task`. On a `repo` board, the first commit for this work includes the task file with `status: in_progress`.
 3. Work. Use `log_progress` for notes, and `set_blocked` with a question for you when stuck.
 4. On a long task, call `add_changelog_entry` before a meaningful intermediate commit (optional).
-5. `finish_task` with a summary and every acceptance criterion ticked or explained, then make the final commit including the task file with `status: finished`.
+5. `finish_task` with a summary and every acceptance criterion ticked or explained, then make the final commit, which on a `repo` board includes the task file with `status: finished`.
 6. If you reopen it, `get_task` shows your feedback; the agent calls `start_task` again.
 
 **Connecting an agent.** The app's setup panel generates the exact config per project. For Claude Code:
@@ -289,7 +340,7 @@ Or commit a project-level `.mcp.json`:
 
 Other clients (Codex, Cursor) use their own config formats; check each client's current MCP docs when building the setup panel.
 
-**Snippet for `AGENTS.md` or `CLAUDE.md`:**
+**Snippet for `AGENTS.md` or `CLAUDE.md`, for a `repo` board:**
 
 ```markdown
 ## Tasks
@@ -305,6 +356,24 @@ This repo tracks work in `.tandem/` through the `tandem` MCP server.
 - Call `finish_task` with a short summary before the final commit. Tick each acceptance criterion you met and explain each one you didn't. Never mark tasks reviewed.
 - If the tandem server is unreachable, ask me to open the app instead of editing files.
 ```
+
+**Snippet for a `local` board.** It leaves out the task-file commit rule and never names the task folder:
+
+```markdown
+## Tasks
+
+This repo tracks work on a local Tandem board through the `tandem` MCP server. The task files live outside the repo.
+
+- Before starting work, call `start_task` on the task (use `next_task` if none was given), and pass the agent id it returns as `agent` to every later tandem call for that task.
+- Never edit task frontmatter or the Changelog section by hand. Use the tandem tools.
+- Add a `Task: <id>` trailer to every commit for that task.
+- Use `log_progress` for notes and `set_blocked` when you need a decision from me.
+- Split large work into child tasks with `create_task` and `parent`. New tasks wait in backlog until I approve them; only start tasks in todo.
+- Call `finish_task` with a short summary before the final commit. Tick each acceptance criterion you met and explain each one you didn't. Never mark tasks reviewed.
+- If the tandem server is unreachable, ask me to open the app instead of editing files.
+```
+
+The setup panel shows the snippet for the project's mode. To keep a `local` board's repo free of Tandem, put the snippet in an instructions file you don't commit, and use the `claude mcp add` command rather than a committed `.mcp.json`.
 
 ## App architecture
 
@@ -345,11 +414,12 @@ The frontend never touches files directly. In v1, closing the window quits the a
 
 One window: a project switcher, a five-column board, and a detail pane that slides in from the right.
 
-**Project switcher.** The project name in the top bar is a menu: switch to another project, **New board**, **Open board** and **Remove**. With no project open, a welcome screen offers New board and Open board and lists recent projects.
+**Project switcher.** The project name in the top bar is a menu: switch to another project, **New board**, **Open board** and **Remove**. With no project open, a welcome screen offers New board and Open board and lists recent projects. The switcher and the recent-projects list mark `local` boards with a "local" tag.
 
-- **Open board** opens a repo folder. If `.tandem/` is missing, offer to create it with its `README.md`.
+- **Open board** opens a repo folder. If `.tandem/` is missing, offer to create the board with its `README.md`.
 - **New board** creates `.tandem/` in the folder you pick, or opens the board already there. A folder outside a git repo gets a warning first, and you choose whether to go on.
-- **Remove** takes the project out of the app: its row in `app.db` and its project database. It never touches the repo or `.tandem/`, and the confirmation says so. It is refused while an agent holds a live lease on any of the project's tasks.
+- **Storage choice.** When New board or Open board creates a board, you choose its storage mode: `repo` creates `.tandem/`, `local` creates `projects/<project-id>/tasks/` and nothing in the folder. It defaults to `repo` inside a git repo and to `local` outside one. The no-git warning shows only when `repo` is chosen. A folder that already has `.tandem/` opens as a `repo` board.
+- **Remove** takes the project out of the app: its row in `app.db` and its project database. It never touches the repo or `.tandem/`, and the confirmation says so. It is refused while an agent holds a live lease on any of the project's tasks. On a `local` board, Remove also deletes `projects/<project-id>/`, the task folder included. Its confirmation warns that the tasks will be deleted, since no other copy exists, and offers **Export board** first. It still never touches the repo.
 
 **Board.** Five columns: Backlog, Todo, In progress, Review, Done. Cards are sorted by priority, then created date. A card shows:
 
@@ -375,12 +445,14 @@ One window: a project switcher, a five-column board, and a detail pane that slid
 - Working-log timeline, visibly marked "local only, not committed"
 - A review bar on Review cards: **Mark reviewed** and **Reopen with feedback**
 - An **Approve** button on Backlog cards, which moves the task to Todo
-- A **Delete task** button at the bottom, with a confirmation that lists anything blocking it
-- A **Commit review** button on Done cards while their file has uncommitted changes. It commits only that task file (git add, then git commit with the file as pathspec), with the message "Review \<id>: \<title>" and a Task: \<id> trailer, and leaves anything else you have staged alone.
+- A **Delete task** button at the bottom, with a confirmation that lists anything blocking it. On a `local` board the confirmation says the deletion is permanent, since there is no git history
+- A **Commit review** button on Done cards of a `repo` board while their file has uncommitted changes. It commits only that task file (git add, then git commit with the file as pathspec), with the message "Review \<id>: \<title>" and a Task: \<id> trailer, and leaves anything else you have staged alone.
 
 **Agents panel.** Connected agents, last seen, and the task each one holds.
 
-**Setup panel.** The project's MCP URL with copy buttons for the Claude Code command, `.mcp.json` and the `AGENTS.md` snippet.
+**Setup panel.** The project's MCP URL with copy buttons for the Claude Code command, `.mcp.json` and the `AGENTS.md` snippet for the project's storage mode.
+
+**Settings.** The Project tab of the Settings page has a **Storage** section: the current mode and task folder path, **Move board** to the other mode, and **Export board**. Both follow the rules in Board storage. Move board asks for confirmation and then shows what to commit.
 
 **Also in v1:** a new-task dialog, filter by label or parent, text search, and shortcuts: `N` new task, `/` search, `Enter` open card, `R` mark reviewed, `A` approve.
 
@@ -453,6 +525,12 @@ Day 1 builds the core and proves it with a real agent before any UI exists; day 
 | States | An agent creates a task, then calls start\_task on it | Refused with invalid\_transition until you approve it into Todo |
 | Git | Press Commit review while other changes are staged | The new commit holds only the task file; everything else stays staged |
 | Criteria | finish\_task leaves one criterion neither met nor explained; then retry with a reason | First call refused with criteria\_unmet; the retry passes and the Review card shows the badge |
+| Storage | Create a `local` board, then create, edit, finish and delete tasks | Nothing is created or changed inside the repo |
+| Storage | Run the core store, index rebuild and watcher tests, parameterized over both modes | Every test passes in `repo` and `local` mode |
+| Storage | List tools and call each file-writing tool on a `repo` and a `local` board | Descriptions and instructions carry the task-file commit rules only on `repo`; `local` returns an absolute path with no commit reminder |
+| Storage | Move a board repo → local → repo | Every file is identical byte for byte; leases, flags and working logs survive |
+| Storage | Export a board in each mode, then unzip it into an empty repo and open it | Every file is identical byte for byte |
+| Storage | Remove a `local` board | The confirmation warns that the tasks will be deleted and offers Export board; afterwards `projects/<project-id>/` is gone |
 
 ## Scope and later versions
 
