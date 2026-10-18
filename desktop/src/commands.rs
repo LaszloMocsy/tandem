@@ -64,6 +64,25 @@ pub async fn remove_project(projects: State<'_, Arc<Projects>>, project: String)
     blocking(move || projects.remove(&project)).await
 }
 
+/// Sets the project's name in `.tandem/config.toml`; a blank name removes
+/// it, so the folder name is used.
+#[tauri::command]
+pub async fn set_project_name(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+    name: String,
+) -> Result<ProjectInfo> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.set_name(&project, &name)).await
+}
+
+/// Reset local state: rebuilds the project's database from its files.
+#[tauri::command]
+pub async fn reset_project(projects: State<'_, Arc<Projects>>, project: String) -> Result<()> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.reset(&project)).await
+}
+
 /// The app's settings and the MCP server's state, for the Settings page.
 #[tauri::command]
 pub async fn get_app_settings(projects: State<'_, Arc<Projects>>) -> Result<AppSettingsInfo> {

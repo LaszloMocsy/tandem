@@ -11,7 +11,7 @@ use tandem_board_mcp::Endpoints;
 use tauri::{Emitter, Manager, RunEvent};
 use tokio_util::sync::CancellationToken;
 
-use crate::dto::{TASKS_CHANGED, TasksChanged};
+use crate::dto::{PROJECTS_CHANGED, ProjectsChanged, TASKS_CHANGED, TasksChanged};
 use crate::error::report;
 use crate::mcp::Mcp;
 use crate::projects::Projects;
@@ -27,8 +27,18 @@ pub fn run() {
             let mcp = Mcp::new(Endpoints::new(&setup_cancel), setup_cancel.clone());
             let handle = app.handle().clone();
             let on_change = Arc::new(move |project: &str, changes: &Changes| {
-                if let Err(e) = handle.emit(TASKS_CHANGED, TasksChanged::new(project, changes)) {
+                if changes.has_tasks()
+                    && let Err(e) = handle.emit(TASKS_CHANGED, TasksChanged::new(project, changes))
+                {
                     report("cannot send tasks-changed", &e);
+                }
+                let payload = ProjectsChanged {
+                    project: project.to_owned(),
+                };
+                if changes.config
+                    && let Err(e) = handle.emit(PROJECTS_CHANGED, payload)
+                {
+                    report("cannot send projects-changed", &e);
                 }
             });
             let projects = Projects::new(&data_dir, mcp, on_change)?;
@@ -46,6 +56,8 @@ pub fn run() {
             commands::get_app_settings,
             commands::set_mcp_port,
             commands::set_theme,
+            commands::set_project_name,
+            commands::reset_project,
             commands::list_tasks,
             commands::get_task,
             commands::list_agents,

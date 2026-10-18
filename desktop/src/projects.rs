@@ -17,7 +17,7 @@ use std::thread;
 use jiff::SignedDuration;
 use serde::Serialize;
 use tandem_board_core::git;
-use tandem_board_core::index::{AppDb, Changes, Project, Theme, delete_project_db};
+use tandem_board_core::index::{AppDb, Changes, Project, Theme, delete_project_db, folder_name};
 use tandem_board_core::service::{Config, Service};
 use tandem_board_core::store::TASK_DIR;
 use tandem_board_core::watcher::{Watcher, WatcherConfig};
@@ -26,7 +26,8 @@ use tandem_board_mcp::{DEFAULT_ADDR, endpoint_path};
 use crate::error::{Error, describe, report};
 use crate::mcp::Mcp;
 
-/// Called with a project id and the tasks that changed in it.
+/// Called with a project id and what changed in it. When `config.toml`
+/// changed, the project's name in the list is up to date by then.
 pub type OnChange = Arc<dyn Fn(&str, &Changes) + Send + Sync>;
 
 /// A project as the project switcher shows it.
@@ -83,7 +84,9 @@ pub enum Opened {
 /// Every project in `app.db`, and the open ones.
 pub struct Projects {
     data_dir: PathBuf,
-    app_db: Mutex<AppDb>,
+    /// Shared with each project's event thread, which keeps its name up to
+    /// date.
+    app_db: Arc<Mutex<AppDb>>,
     open: Mutex<BTreeMap<String, OpenProject>>,
     /// Why a project failed to open on launch.
     failed: Mutex<BTreeMap<String, String>>,
@@ -105,7 +108,7 @@ impl Projects {
     pub fn new(data_dir: &Path, mcp: Mcp, on_change: OnChange) -> Result<Self, Error> {
         Ok(Self {
             data_dir: data_dir.to_owned(),
-            app_db: Mutex::new(AppDb::open(data_dir)?),
+            app_db: Arc::new(Mutex::new(AppDb::open(data_dir)?)),
             open: Mutex::default(),
             failed: Mutex::default(),
             mcp,
@@ -262,6 +265,27 @@ impl Projects {
         Ok(removed)
     }
 
+    /// Sets the project's name in its `config.toml`, or removes it when
+    /// `name` is blank so the folder name is used; see
+    /// [`Service::set_name`]. Returns the project as the list shows it.
+    pub fn set_name(&self, id: &str, name: &str) -> Result<ProjectInfo, Error> {
+        let service = self.service(id)?;
+        service.set_name(name)?;
+        let project = lock(&self.app_db)
+            .project(id)?
+            .ok_or_else(|| Error::project_not_found(id))?;
+        cache_name(&self.app_db, &project.id, &project.repo_path, &service)?;
+        let project = lock(&self.app_db).project(id)?.unwrap_or(project);
+        Ok(self.info(&project))
+    }
+
+    /// Deletes the project's database and rebuilds it from the files; see
+    /// [`Service::reset`]. Leases and working logs are lost.
+    pub fn reset(&self, id: &str) -> Result<(), Error> {
+        self.service(id)?.reset()?;
+        Ok(())
+    }
+
     /// The service of an open project.
     pub fn service(&self, id: &str) -> Result<Arc<Service>, Error> {
         lock(&self.open)
@@ -293,15 +317,28 @@ impl Projects {
                 project.repo_path.display()
             );
         }
+        // The name may have changed while the app was closed.
+        if let Err(e) = cache_name(&self.app_db, &project.id, &project.repo_path, &service) {
+            eprintln!("tandem: cannot read the name of {}: {e}", project.id);
+        }
 
-        // Subscribe before the watcher starts, so no change is missed.
+        // Subscribe before the watcher starts, so no change is missed. The
+        // thread holds a weak handle, so it ends with the project.
         let changes = service.subscribe();
         let on_change = Arc::clone(&self.on_change);
-        let id = project.id.clone();
+        let app_db = Arc::clone(&self.app_db);
+        let weak = Arc::downgrade(&service);
+        let (id, repo) = (project.id.clone(), project.repo_path.clone());
         thread::Builder::new()
             .name(format!("tandem-events-{id}"))
             .spawn(move || {
                 for changes in changes {
+                    if changes.config
+                        && let Some(service) = weak.upgrade()
+                        && let Err(e) = cache_name(&app_db, &id, &repo, &service)
+                    {
+                        eprintln!("tandem: cannot read the name of {id}: {e}");
+                    }
                     on_change(&id, &changes);
                 }
             })
@@ -358,6 +395,19 @@ impl Projects {
             Err(e) => describe(&e),
         }
     }
+}
+
+/// Stores the project's name, from its `config.toml` or else its folder,
+/// in the project list.
+fn cache_name(
+    app_db: &Mutex<AppDb>,
+    id: &str,
+    repo: &Path,
+    service: &Service,
+) -> Result<(), Error> {
+    let name = service.name()?.unwrap_or_else(|| folder_name(repo));
+    lock(app_db).set_name(id, &name)?;
+    Ok(())
 }
 
 /// Refuses with `agents_working` if an agent holds a live lease on any of
@@ -772,5 +822,104 @@ mod tests {
         assert_eq!(env.projects.set_theme(Theme::Dark).unwrap().theme, "dark");
         let env = env.relaunch();
         assert_eq!(env.projects.theme().unwrap(), Theme::Dark);
+    }
+
+    #[test]
+    fn the_name_comes_from_config_toml_or_the_folder() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let folder = folder_name(&repo.path().canonicalize().unwrap());
+        let config = repo.path().join(TASK_DIR).join("config.toml");
+        fs::create_dir(repo.path().join(TASK_DIR)).unwrap();
+        fs::write(&config, "format_version = 1\nname = \"From the team\"\n").unwrap();
+
+        let info = project(env.open(repo.path(), false));
+        assert_eq!(info.name, "From the team");
+        let id = info.id;
+
+        let info = env.projects.set_name(&id, " Renamed ").unwrap();
+        assert_eq!(info.name, "Renamed");
+        assert_eq!(env.projects.list().unwrap()[0].name, "Renamed");
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "format_version = 1\nname = \"Renamed\"\n"
+        );
+        // The id stays, so agent configs keep working.
+        assert_eq!(info.id, id);
+
+        assert_eq!(env.projects.set_name(&id, "").unwrap().name, folder);
+        assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
+        assert_eq!(
+            env.projects.set_name("missing", "x").unwrap_err().code,
+            "project_not_found"
+        );
+    }
+
+    #[test]
+    fn an_outside_edit_to_the_name_reaches_the_list() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let id = project(env.open(repo.path(), true)).id;
+        // Let the watcher start.
+        thread::sleep(Duration::from_millis(300));
+
+        let config = repo.path().join(TASK_DIR).join("config.toml");
+        fs::write(&config, "format_version = 1\nname = \"Pulled\"\n").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let (project, changes) = env
+                .events
+                .recv_timeout(deadline - std::time::Instant::now())
+                .expect("the watcher reports the config change");
+            if project == id && changes.config {
+                break;
+            }
+        }
+        // Updated before the event is passed on.
+        assert_eq!(env.projects.list().unwrap()[0].name, "Pulled");
+    }
+
+    #[test]
+    fn a_read_only_project_cannot_be_renamed() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let config = repo.path().join(TASK_DIR).join("config.toml");
+        fs::create_dir(repo.path().join(TASK_DIR)).unwrap();
+        fs::write(&config, "format_version = 99\n").unwrap();
+        let id = project(env.open(repo.path(), false)).id;
+        assert_eq!(
+            env.projects.set_name(&id, "Tandem").unwrap_err().code,
+            "read_only"
+        );
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "format_version = 99\n"
+        );
+    }
+
+    #[test]
+    fn reset_local_state_keeps_the_tasks_and_drops_leases() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let id = project(env.open(repo.path(), true)).id;
+        let service = env.projects.service(&id).unwrap();
+        let task = create(&service, "Kept");
+        service
+            .start_task(&Actor::agent("claude-code-7f2a"), task)
+            .unwrap();
+        // A live lease blocks Remove, but not Reset.
+        assert_eq!(env.projects.remove(&id).unwrap_err().code, "agents_working");
+
+        env.projects.reset(&id).unwrap();
+        let tasks = service
+            .list_tasks(&Actor::User, &Default::default())
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].lease, None);
+        assert!(env.projects.remove(&id).unwrap());
+        assert_eq!(
+            env.projects.reset(&id).unwrap_err().code,
+            "project_not_found"
+        );
     }
 }
