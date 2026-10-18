@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -22,9 +21,10 @@ use tandem_board_core::index::{AppDb, Changes, Project, delete_project_db};
 use tandem_board_core::service::{Config, Service};
 use tandem_board_core::store::TASK_DIR;
 use tandem_board_core::watcher::{Watcher, WatcherConfig};
-use tandem_board_mcp::{Endpoints, endpoint_path};
+use tandem_board_mcp::{DEFAULT_ADDR, endpoint_path};
 
 use crate::error::{Error, describe, report};
+use crate::mcp::Mcp;
 
 /// Called with a project id and the tasks that changed in it.
 pub type OnChange = Arc<dyn Fn(&str, &Changes) + Send + Sync>;
@@ -45,6 +45,20 @@ pub struct ProjectInfo {
     pub read_only: Option<String>,
     /// The project's MCP endpoint, while it is open and the server runs.
     pub mcp_url: Option<String>,
+}
+
+/// The app's settings, as the Settings page shows them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsInfo {
+    /// The port the MCP server is set to use.
+    pub mcp_port: u16,
+    pub default_mcp_port: u16,
+    /// Where the server listens, such as `http://127.0.0.1:4317`, while it
+    /// runs.
+    pub mcp_url: Option<String>,
+    /// Why the server isn't running, when it isn't.
+    pub mcp_error: Option<String>,
 }
 
 /// What opening a folder did.
@@ -71,8 +85,8 @@ pub struct Projects {
     open: Mutex<BTreeMap<String, OpenProject>>,
     /// Why a project failed to open on launch.
     failed: Mutex<BTreeMap<String, String>>,
-    endpoints: Endpoints,
-    mcp_addr: Option<SocketAddr>,
+    /// The MCP server, with an endpoint for every open project.
+    mcp: Mcp,
     on_change: OnChange,
 }
 
@@ -84,23 +98,58 @@ struct OpenProject {
 }
 
 impl Projects {
-    /// Opens `app.db` in `data_dir`. Open projects get an endpoint in
-    /// `endpoints`, served at `mcp_addr` if the server is running.
-    pub fn new(
-        data_dir: &Path,
-        endpoints: Endpoints,
-        mcp_addr: Option<SocketAddr>,
-        on_change: OnChange,
-    ) -> Result<Self, Error> {
+    /// Opens `app.db` in `data_dir`. Open projects get an endpoint on
+    /// `mcp`; [`start_mcp`](Self::start_mcp) starts the server.
+    pub fn new(data_dir: &Path, mcp: Mcp, on_change: OnChange) -> Result<Self, Error> {
         Ok(Self {
             data_dir: data_dir.to_owned(),
             app_db: Mutex::new(AppDb::open(data_dir)?),
             open: Mutex::default(),
             failed: Mutex::default(),
-            endpoints,
-            mcp_addr,
+            mcp,
             on_change,
         })
+    }
+
+    /// Starts the MCP server on the port from the settings, as on launch.
+    /// A failure, such as another copy of the app holding the port, is
+    /// reported and shown in Settings; the board works without the server.
+    pub fn start_mcp(&self) -> Result<(), Error> {
+        let port = self.mcp_port()?;
+        if let Err(e) = self.mcp.start(port) {
+            eprintln!("tandem: MCP server not started: {}", e.message);
+        }
+        Ok(())
+    }
+
+    pub fn app_settings(&self) -> Result<AppSettingsInfo, Error> {
+        Ok(AppSettingsInfo {
+            mcp_port: self.mcp_port()?,
+            default_mcp_port: DEFAULT_ADDR.port(),
+            mcp_url: self.mcp.addr().map(|addr| format!("http://{addr}")),
+            mcp_error: self.mcp.error(),
+        })
+    }
+
+    /// Moves the MCP server to `port` and saves it in the settings. Every
+    /// project's MCP URL changes with it. If the port can't be used, the
+    /// server stays where it was and the setting is unchanged.
+    pub fn set_mcp_port(&self, port: u16) -> Result<AppSettingsInfo, Error> {
+        if port == 0 {
+            return Err(Error::new(
+                "invalid_argument",
+                "the port must be between 1 and 65535",
+            ));
+        }
+        self.mcp.start(port)?;
+        let saved = (port != DEFAULT_ADDR.port()).then_some(port);
+        lock(&self.app_db).set_mcp_port(saved)?;
+        self.app_settings()
+    }
+
+    fn mcp_port(&self) -> Result<u16, Error> {
+        let settings = lock(&self.app_db).settings()?;
+        Ok(settings.mcp_port.unwrap_or(DEFAULT_ADDR.port()))
     }
 
     /// Opens every project in the list whose `.tandem/` folder still
@@ -179,15 +228,15 @@ impl Projects {
             check_no_agents_working(&service)?;
             // Close the endpoint so no agent can claim a task, then check
             // again for a claim that landed in between.
-            self.endpoints.remove(id);
+            self.mcp.endpoints().remove(id);
             if let Err(e) = check_no_agents_working(&service) {
-                self.endpoints.insert(id, service);
+                self.mcp.endpoints().insert(id, service);
                 return Err(e);
             }
         }
         lock(&self.open).remove(id);
         lock(&self.failed).remove(id);
-        self.endpoints.remove(id);
+        self.mcp.endpoints().remove(id);
         let removed = lock(&self.app_db).remove_project(id)?;
         if removed {
             // The project is gone from the list either way, so a database
@@ -249,7 +298,9 @@ impl Projects {
         let watcher = Watcher::start(Arc::clone(&service), WatcherConfig::default(), move |e| {
             report(&format!("watching {}", path.display()), &e);
         })?;
-        self.endpoints.insert(&project.id, Arc::clone(&service));
+        self.mcp
+            .endpoints()
+            .insert(&project.id, Arc::clone(&service));
         open.insert(
             project.id.clone(),
             OpenProject {
@@ -278,7 +329,7 @@ impl Projects {
                 .and_then(|service| service.read_only())
                 .map(ToString::to_string),
             mcp_url: service
-                .and(self.mcp_addr)
+                .and(self.mcp.addr())
                 .map(|addr| format!("http://{addr}{}", endpoint_path(&project.id))),
         }
     }
@@ -349,10 +400,13 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    use std::net::SocketAddr;
     use tandem_board_core::index::project_db_path;
     use tandem_board_core::service::{Actor, NewTask};
     use tandem_board_core::store::TaskId;
     use tempfile::TempDir;
+
+    use tandem_board_mcp::Endpoints;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -361,6 +415,8 @@ mod tests {
         data: TempDir,
         cancel: CancellationToken,
         endpoints: Endpoints,
+        /// Where the MCP server listens, on a free port.
+        addr: SocketAddr,
         events: mpsc::Receiver<(String, Changes)>,
         projects: Projects,
     }
@@ -369,12 +425,13 @@ mod tests {
         fn new(data: TempDir) -> Self {
             let cancel = CancellationToken::new();
             let endpoints = Endpoints::new(&cancel);
+            let mcp = Mcp::new(endpoints.clone(), cancel.clone());
+            let addr = mcp.start(0).unwrap();
             let (tx, events) = mpsc::channel();
             let tx = Mutex::new(tx);
             let projects = Projects::new(
                 data.path(),
-                endpoints.clone(),
-                Some("127.0.0.1:4317".parse().unwrap()),
+                mcp,
                 Arc::new(move |id: &str, changes: &Changes| {
                     let _ = lock(&tx).send((id.to_owned(), changes.clone()));
                 }),
@@ -384,6 +441,7 @@ mod tests {
                 data,
                 cancel,
                 endpoints,
+                addr,
                 events,
                 projects,
             }
@@ -450,7 +508,7 @@ mod tests {
         assert!(info.last_opened_at.is_some());
         assert_eq!(
             info.mcp_url.as_deref(),
-            Some(format!("http://127.0.0.1:4317/p/{}/mcp", info.id).as_str())
+            Some(format!("http://{}/p/{}/mcp", env.addr, info.id).as_str())
         );
         assert_eq!(env.projects.list().unwrap(), std::slice::from_ref(&info));
         assert_eq!(env.endpoints.project_ids(), [info.id]);
@@ -645,5 +703,52 @@ mod tests {
         assert!(env.projects.remove(&id).unwrap());
         assert!(env.projects.list().unwrap().is_empty());
         assert!(!project_db_path(env.data.path(), &id).exists());
+    }
+
+    #[test]
+    fn changing_the_port_moves_every_mcp_url_and_is_saved() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let id = project(env.open(repo.path(), true)).id;
+        let settings = env.projects.app_settings().unwrap();
+        assert_eq!(settings.mcp_port, DEFAULT_ADDR.port());
+        assert_eq!(settings.default_mcp_port, DEFAULT_ADDR.port());
+        assert_eq!(settings.mcp_url, Some(format!("http://{}", env.addr)));
+
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let settings = env.projects.set_mcp_port(port).unwrap();
+        assert_eq!(settings.mcp_port, port);
+        let url = format!("http://127.0.0.1:{port}");
+        assert_eq!(settings.mcp_url.as_deref(), Some(url.as_str()));
+        assert_eq!(settings.mcp_error, None);
+        let info = env.projects.list().unwrap().remove(0);
+        assert_eq!(info.mcp_url, Some(format!("{url}/p/{id}/mcp")));
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+
+        // The port is kept for the next launch.
+        let env = env.relaunch();
+        env.projects.start_mcp().unwrap();
+        assert_eq!(env.projects.app_settings().unwrap().mcp_url, Some(url));
+        let app = AppDb::open(env.data.path()).unwrap();
+        assert_eq!(app.settings().unwrap().mcp_port, Some(port));
+    }
+
+    #[test]
+    fn a_port_that_cannot_be_used_changes_nothing() {
+        let env = Env::new(TempDir::new().unwrap());
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+
+        let error = env.projects.set_mcp_port(port).unwrap_err();
+        assert_eq!(error.code, "port_in_use");
+        let settings = env.projects.app_settings().unwrap();
+        assert_eq!(settings.mcp_port, DEFAULT_ADDR.port());
+        assert_eq!(settings.mcp_url, Some(format!("http://{}", env.addr)));
+        assert_eq!(
+            env.projects.set_mcp_port(0).unwrap_err().code,
+            "invalid_argument"
+        );
     }
 }

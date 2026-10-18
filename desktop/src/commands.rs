@@ -17,7 +17,7 @@ use crate::dto::{
     AgentInfo, DeleteCheck, Finish, NewTask, TaskDetail, TaskEdit, TaskFilter, TaskSummary, Written,
 };
 use crate::error::Error;
-use crate::projects::{Opened, ProjectInfo, Projects};
+use crate::projects::{AppSettingsInfo, Opened, ProjectInfo, Projects};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -61,6 +61,23 @@ pub async fn open_project(
 pub async fn remove_project(projects: State<'_, Arc<Projects>>, project: String) -> Result<bool> {
     let projects = Arc::clone(&projects);
     blocking(move || projects.remove(&project)).await
+}
+
+/// The app's settings and the MCP server's state, for the Settings page.
+#[tauri::command]
+pub async fn get_app_settings(projects: State<'_, Arc<Projects>>) -> Result<AppSettingsInfo> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.app_settings()).await
+}
+
+/// Moves the MCP server to another port; see [`Projects::set_mcp_port`].
+#[tauri::command]
+pub async fn set_mcp_port(
+    projects: State<'_, Arc<Projects>>,
+    port: u16,
+) -> Result<AppSettingsInfo> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.set_mcp_port(port)).await
 }
 
 /// Asks for a folder with the system dialog. `None` if you cancel.
