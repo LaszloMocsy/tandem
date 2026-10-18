@@ -6,7 +6,7 @@ mod projects;
 
 use std::sync::Arc;
 
-use tandem_board_core::index::Changes;
+use tandem_board_core::index::{Changes, Theme};
 use tandem_board_mcp::Endpoints;
 use tauri::{Emitter, Manager, RunEvent};
 use tokio_util::sync::CancellationToken;
@@ -32,6 +32,7 @@ pub fn run() {
                 }
             });
             let projects = Projects::new(&data_dir, mcp, on_change)?;
+            apply_theme(app.handle(), projects.theme()?);
             projects.start_mcp()?;
             projects.open_all()?;
             app.manage(Arc::new(projects));
@@ -44,6 +45,7 @@ pub fn run() {
             commands::choose_folder,
             commands::get_app_settings,
             commands::set_mcp_port,
+            commands::set_theme,
             commands::list_tasks,
             commands::get_task,
             commands::list_agents,
@@ -70,4 +72,19 @@ pub fn run() {
                 cancel.cancel();
             }
         });
+}
+
+/// Gives the windows the theme, so their title bars match the page. The
+/// system theme lets each window follow the system again.
+pub(crate) fn apply_theme(app: &tauri::AppHandle, theme: Theme) {
+    let theme = match theme {
+        Theme::System => None,
+        Theme::Light => Some(tauri::Theme::Light),
+        Theme::Dark => Some(tauri::Theme::Dark),
+    };
+    for window in app.webview_windows().values() {
+        if let Err(e) = window.set_theme(theme) {
+            report("cannot set the window theme", &e);
+        }
+    }
 }

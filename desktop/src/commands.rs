@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use jiff::SignedDuration;
+use tandem_board_core::index::Theme;
 use tandem_board_core::service::{Actor, Service};
 use tandem_board_core::store::TaskId;
 use tauri::{AppHandle, State};
@@ -78,6 +79,23 @@ pub async fn set_mcp_port(
 ) -> Result<AppSettingsInfo> {
     let projects = Arc::clone(&projects);
     blocking(move || projects.set_mcp_port(port)).await
+}
+
+/// Sets the theme, `system`, `light` or `dark`, and applies it to the
+/// window; the UI applies it to the page.
+#[tauri::command]
+pub async fn set_theme(
+    app: AppHandle,
+    projects: State<'_, Arc<Projects>>,
+    theme: String,
+) -> Result<AppSettingsInfo> {
+    let theme: Theme = theme
+        .parse()
+        .map_err(|e: String| Error::new("invalid_argument", e))?;
+    let projects = Arc::clone(&projects);
+    let settings = blocking(move || projects.set_theme(theme)).await?;
+    crate::apply_theme(&app, theme);
+    Ok(settings)
 }
 
 /// Asks for a folder with the system dialog. `None` if you cancel.

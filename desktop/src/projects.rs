@@ -17,7 +17,7 @@ use std::thread;
 use jiff::SignedDuration;
 use serde::Serialize;
 use tandem_board_core::git;
-use tandem_board_core::index::{AppDb, Changes, Project, delete_project_db};
+use tandem_board_core::index::{AppDb, Changes, Project, Theme, delete_project_db};
 use tandem_board_core::service::{Config, Service};
 use tandem_board_core::store::TASK_DIR;
 use tandem_board_core::watcher::{Watcher, WatcherConfig};
@@ -59,6 +59,8 @@ pub struct AppSettingsInfo {
     pub mcp_url: Option<String>,
     /// Why the server isn't running, when it isn't.
     pub mcp_error: Option<String>,
+    /// `system`, `light` or `dark`.
+    pub theme: &'static str,
 }
 
 /// What opening a folder did.
@@ -123,12 +125,23 @@ impl Projects {
     }
 
     pub fn app_settings(&self) -> Result<AppSettingsInfo, Error> {
+        let settings = lock(&self.app_db).settings()?;
         Ok(AppSettingsInfo {
-            mcp_port: self.mcp_port()?,
+            mcp_port: settings.mcp_port.unwrap_or(DEFAULT_ADDR.port()),
             default_mcp_port: DEFAULT_ADDR.port(),
             mcp_url: self.mcp.addr().map(|addr| format!("http://{addr}")),
             mcp_error: self.mcp.error(),
+            theme: settings.theme.as_str(),
         })
+    }
+
+    pub fn theme(&self) -> Result<Theme, Error> {
+        Ok(lock(&self.app_db).settings()?.theme)
+    }
+
+    pub fn set_theme(&self, theme: Theme) -> Result<AppSettingsInfo, Error> {
+        lock(&self.app_db).set_theme(theme)?;
+        self.app_settings()
     }
 
     /// Moves the MCP server to `port` and saves it in the settings. Every
@@ -750,5 +763,14 @@ mod tests {
             env.projects.set_mcp_port(0).unwrap_err().code,
             "invalid_argument"
         );
+    }
+
+    #[test]
+    fn the_theme_is_saved() {
+        let env = Env::new(TempDir::new().unwrap());
+        assert_eq!(env.projects.app_settings().unwrap().theme, "system");
+        assert_eq!(env.projects.set_theme(Theme::Dark).unwrap().theme, "dark");
+        let env = env.relaunch();
+        assert_eq!(env.projects.theme().unwrap(), Theme::Dark);
     }
 }
