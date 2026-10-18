@@ -10,7 +10,8 @@ frontmatter or the Changelog section by hand.
 
 ## Files
 
-- `config.toml` records the version of this format.
+- `config.toml` records the version of this format, and optionally the
+  board's display name: `name = "My board"`.
 - Each task is `<id>.md`, where the id is 7 characters from
   `abcdefghijkmnpqrstuvwxyz23456789`, such as `k3f9x2m.md`.
 - Every other file in this folder, including this one, is ignored.

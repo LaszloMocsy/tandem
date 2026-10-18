@@ -2,8 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tandem_board_core::store::{
-    ChangelogEntry, Date, ParseError, Priority, Status, StoreError, Task, TaskId, Unmet,
-    create_task, list_task_files, read_task, task_path, unused_id, write_task,
+    ChangelogEntry, Date, ParseError, Priority, ReadOnly, Status, StoreError, Task, TaskId, Unmet,
+    create_task, list_task_files, project_name, read_task, set_project_name, task_path, unused_id,
+    write_task,
 };
 
 fn fixture(name: &str) -> String {
@@ -504,4 +505,84 @@ fn never_writes_through_a_symlinked_task_file() {
             .file_type()
             .is_symlink()
     );
+}
+
+#[test]
+fn setting_the_project_name_writes_config_toml_only_when_it_changes() {
+    let repo = tempfile::tempdir().unwrap();
+    let dir = repo.path().join(".tandem");
+    fs::create_dir(&dir).unwrap();
+    // A missing config is version 1, as on open.
+    assert!(set_project_name(repo.path(), Some("Tandem")).unwrap());
+    let config = dir.join("config.toml");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "format_version = 1\nname = \"Tandem\"\n"
+    );
+    assert_eq!(
+        project_name(repo.path()).unwrap().as_deref(),
+        Some("Tandem")
+    );
+
+    // The same name leaves the file alone, even with CRLF line endings.
+    fs::write(&config, "format_version = 1\r\nname = \"Tandem\"\r\n").unwrap();
+    assert!(!set_project_name(repo.path(), Some(" Tandem ")).unwrap());
+    assert!(!set_project_name(repo.path(), Some("Tandem")).unwrap());
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "format_version = 1\r\nname = \"Tandem\"\r\n"
+    );
+    assert!(set_project_name(repo.path(), None).unwrap());
+    assert!(!set_project_name(repo.path(), Some("")).unwrap());
+    assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
+    assert_eq!(project_name(repo.path()).unwrap(), None);
+    // No temp file is left behind.
+    assert_eq!(other_files(&dir), [config]);
+}
+
+#[test]
+fn a_blank_name_in_config_toml_counts_as_none() {
+    let repo = tempfile::tempdir().unwrap();
+    let dir = repo.path().join(".tandem");
+    fs::create_dir(&dir).unwrap();
+    assert_eq!(project_name(repo.path()).unwrap(), None);
+    fs::write(
+        dir.join("config.toml"),
+        "format_version = 1\nname = \"  \"\n",
+    )
+    .unwrap();
+    assert_eq!(project_name(repo.path()).unwrap(), None);
+    fs::write(
+        dir.join("config.toml"),
+        "format_version = 1\nname = \" T \"\n",
+    )
+    .unwrap();
+    assert_eq!(project_name(repo.path()).unwrap().as_deref(), Some("T"));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_project_name_is_never_written_through_a_symlink() {
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let dir = repo.path().join(".tandem");
+    fs::create_dir(&dir).unwrap();
+    let target = outside.path().join("config.toml");
+    fs::write(&target, "format_version = 1\n").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("config.toml")).unwrap();
+    assert!(matches!(
+        set_project_name(repo.path(), Some("Tandem")),
+        Err(StoreError::NotRegularFile { .. })
+    ));
+
+    let linked = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), linked.path().join(".tandem")).unwrap();
+    assert!(matches!(
+        set_project_name(linked.path(), Some("Tandem")),
+        Err(StoreError::ConfigReadOnly {
+            reason: ReadOnly::SymlinkedFolder,
+            ..
+        })
+    ));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "format_version = 1\n");
 }

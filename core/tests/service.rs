@@ -1702,3 +1702,67 @@ fn a_read_only_project_refuses_delete_task() {
     let id: TaskId = "k3f9x2m".parse().unwrap();
     assert_eq!(code(service.delete_task(id)), "read_only");
 }
+
+#[test]
+fn the_project_name_is_set_and_cleared_in_config_toml() {
+    let env = Env::new();
+    let config = env.repo.path().join(".tandem/config.toml");
+    assert_eq!(env.service.name().unwrap(), None);
+
+    assert_eq!(
+        env.service.set_name("  Tandem board ").unwrap().as_deref(),
+        Some("Tandem board")
+    );
+    assert_eq!(env.service.name().unwrap().as_deref(), Some("Tandem board"));
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "format_version = 1\nname = \"Tandem board\"\n"
+    );
+
+    assert_eq!(env.service.set_name("").unwrap(), None);
+    assert_eq!(env.service.name().unwrap(), None);
+    assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
+}
+
+#[test]
+fn a_bad_project_name_is_refused_and_nothing_is_written() {
+    let env = Env::new();
+    let config = env.repo.path().join(".tandem/config.toml");
+    let err = env.service.set_name("two\nlines").unwrap_err();
+    assert_eq!(err.code(), "invalid_argument");
+    assert_eq!(
+        code(env.service.set_name(&"x".repeat(101))),
+        "invalid_argument"
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
+}
+
+#[test]
+fn a_config_broken_after_open_is_never_overwritten() {
+    let env = Env::new();
+    let config = env.repo.path().join(".tandem/config.toml");
+    fs::write(&config, "format_version = 1\nname = [\n").unwrap();
+    assert_eq!(env.service.name().unwrap(), None);
+    assert_eq!(code(env.service.set_name("Tandem")), "read_only");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "format_version = 1\nname = [\n"
+    );
+}
+
+#[test]
+fn a_read_only_project_refuses_set_name() {
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    fs::create_dir(repo.path().join(".tandem")).unwrap();
+    let config = repo.path().join(".tandem/config.toml");
+    fs::write(&config, "format_version = 2\nname = \"Next\"\n").unwrap();
+    let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
+    // A newer format's name isn't trusted either.
+    assert_eq!(service.name().unwrap(), None);
+    assert_eq!(code(service.set_name("Tandem")), "read_only");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "format_version = 2\nname = \"Next\"\n"
+    );
+}

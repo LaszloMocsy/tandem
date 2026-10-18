@@ -27,8 +27,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::index::{Changes, Problem, ProjectIndex, rescan_in, rescan_task_in, timestamp_text};
 use crate::store::{
-    Access, ChangelogItem, Criterion, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR, Task,
-    TaskId, Unmet, UnmetCriterion, parse_task_file, task_path,
+    self, Access, ChangelogItem, Criterion, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR,
+    Task, TaskId, Unmet, UnmetCriterion, parse_task_file, task_path,
 };
 
 pub use delete::DeleteCheck;
@@ -406,6 +406,28 @@ impl Service {
     /// Why the project is read-only, if it is.
     pub fn read_only(&self) -> Option<&ReadOnly> {
         self.read_only.as_ref()
+    }
+
+    /// The name `config.toml` gives the project, if any; see
+    /// [`store::project_name`].
+    pub fn name(&self) -> Result<Option<String>, ServiceError> {
+        Ok(store::project_name(self.repo())?)
+    }
+
+    /// Sets the project name in `config.toml`, or removes it when `name`
+    /// is blank, so the app falls back to the folder name. Only the `name`
+    /// line changes; see [`store::set_project_name`]. Returns the name now
+    /// set.
+    pub fn set_name(&self, name: &str) -> Result<Option<String>, ServiceError> {
+        let name = store::normalize_project_name(name)
+            .map_err(|e| ServiceError::InvalidArgument(e.to_string()))?;
+        let _index = self.lock();
+        self.check_writable()?;
+        match store::set_project_name(self.repo(), name.as_deref()) {
+            Ok(_) => Ok(name),
+            Err(StoreError::ConfigReadOnly { reason, .. }) => Err(ServiceError::ReadOnly(reason)),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// A full rescan, for a burst of watcher events or the periodic sweep.

@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use super::folder::{NameError, ReadOnly};
 use super::id::TaskId;
 use super::task::{ParseError, Task};
 
@@ -29,6 +30,12 @@ pub enum StoreError {
     AlreadyExists { path: PathBuf },
     #[error("{} is a symbolic link or not a regular file", path.display())]
     NotRegularFile { path: PathBuf },
+    /// `config.toml` can't be changed, because the app can't read it, it is
+    /// from a newer format, or `.tandem` is a symbolic link.
+    #[error("{} cannot be changed: {reason}", path.display())]
+    ConfigReadOnly { path: PathBuf, reason: ReadOnly },
+    #[error(transparent)]
+    InvalidName(#[from] NameError),
 }
 
 pub(super) fn io_error(path: &Path) -> impl FnOnce(io::Error) -> StoreError + '_ {

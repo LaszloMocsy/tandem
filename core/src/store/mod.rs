@@ -17,7 +17,10 @@ mod yaml;
 pub use changelog::{
     ChangelogEntry, ChangelogItem, EntryError, EntryHeading, Unmet, UnmetCriterion, unmet_criteria,
 };
-pub use folder::{Access, CONFIG_FILE, FORMAT_VERSION, README_FILE, ReadOnly, prepare_folder};
+pub use folder::{
+    Access, CONFIG_FILE, FORMAT_VERSION, MAX_NAME_LEN, NameError, README_FILE, ReadOnly,
+    normalize_project_name, prepare_folder, project_name, set_project_name,
+};
 pub use fs::{
     StoreError, TASK_DIR, create_task, list_task_files, parse_task_file, read_task, task_path,
     unused_id, write_task,
