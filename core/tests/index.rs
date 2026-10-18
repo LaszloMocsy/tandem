@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use jiff::Timestamp;
 use rusqlite::Connection;
 use tandem_board_core::index::{
-    AppDb, Changes, IndexError, IndexedTask, Problem, ProjectIndex, delete_project_db,
-    project_db_path,
+    AppDb, AppSettings, Changes, IndexError, IndexedTask, Problem, ProjectIndex, Theme,
+    delete_project_db, folder_name, project_db_path,
 };
 use tandem_board_core::store::{Access, Date, Priority, ReadOnly, Status, TaskId, read_task};
 use tempfile::TempDir;
@@ -169,7 +169,7 @@ fn creates_exactly_the_spec_tables_in_wal_mode() {
     let mut app = AppDb::open(env.data.path()).unwrap();
     app.add_project(env.repo.path()).unwrap();
     let conn = Connection::open(env.data.path().join("app.db")).unwrap();
-    assert_eq!(names(&conn, "table"), ["projects"]);
+    assert_eq!(names(&conn, "table"), ["projects", "settings"]);
     assert_eq!(journal_mode(&conn), "wal");
 }
 
@@ -695,6 +695,97 @@ fn the_app_database_lists_projects() {
     assert!(app.remove_project("my-repo").unwrap());
     assert_eq!(app.project("my-repo").unwrap(), None);
     assert!(repo.is_dir());
+}
+
+#[test]
+fn the_app_database_caches_project_names() {
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let mut app = AppDb::open(data.path()).unwrap();
+    let project = app.add_project(repo.path()).unwrap();
+    assert_eq!(project.name, folder_name(&project.repo_path));
+    assert!(app.set_name(&project.id, "Tandem").unwrap());
+    assert!(!app.set_name("missing", "Tandem").unwrap());
+    assert_eq!(app.project(&project.id).unwrap().unwrap().name, "Tandem");
+    // The id doesn't follow the name.
+    assert_eq!(app.projects().unwrap()[0].id, project.id);
+}
+
+#[test]
+fn app_settings_default_and_persist() {
+    let data = TempDir::new().unwrap();
+    let app = AppDb::open(data.path()).unwrap();
+    assert_eq!(
+        app.settings().unwrap(),
+        AppSettings {
+            mcp_port: None,
+            theme: Theme::System
+        }
+    );
+    app.set_mcp_port(Some(4400)).unwrap();
+    app.set_theme(Theme::Dark).unwrap();
+    drop(app);
+
+    let app = AppDb::open(data.path()).unwrap();
+    assert_eq!(
+        app.settings().unwrap(),
+        AppSettings {
+            mcp_port: Some(4400),
+            theme: Theme::Dark
+        }
+    );
+    app.set_mcp_port(None).unwrap();
+    app.set_theme(Theme::System).unwrap();
+    assert_eq!(app.settings().unwrap(), AppSettings::default());
+    // Defaults are stored as no row at all.
+    let conn = Connection::open(data.path().join("app.db")).unwrap();
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM settings", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
+fn unreadable_app_settings_fall_back_to_defaults() {
+    let data = TempDir::new().unwrap();
+    let app = AppDb::open(data.path()).unwrap();
+    let conn = Connection::open(data.path().join("app.db")).unwrap();
+    conn.execute_batch(
+        "INSERT INTO settings VALUES ('mcp_port', '70000'), ('theme', 'sepia'), ('later', 'x');",
+    )
+    .unwrap();
+    assert_eq!(app.settings().unwrap(), AppSettings::default());
+    conn.execute("UPDATE settings SET value = '0' WHERE key = 'mcp_port'", [])
+        .unwrap();
+    assert_eq!(app.settings().unwrap().mcp_port, None);
+}
+
+#[test]
+fn an_app_database_from_before_settings_is_migrated() {
+    let data = TempDir::new().unwrap();
+    let conn = Connection::open(data.path().join("app.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE projects (
+           id TEXT PRIMARY KEY, name TEXT NOT NULL,
+           repo_path TEXT NOT NULL UNIQUE, last_opened_at TEXT
+         );
+         INSERT INTO projects (id, name, repo_path) VALUES ('old', 'Old', '/nowhere');
+         PRAGMA user_version = 1;",
+    )
+    .unwrap();
+    drop(conn);
+    let app = AppDb::open(data.path()).unwrap();
+    assert_eq!(app.project("old").unwrap().unwrap().name, "Old");
+    app.set_theme(Theme::Light).unwrap();
+    assert_eq!(app.settings().unwrap().theme, Theme::Light);
+}
+
+#[test]
+fn themes_parse() {
+    for theme in [Theme::System, Theme::Light, Theme::Dark] {
+        assert_eq!(theme.as_str().parse::<Theme>(), Ok(theme));
+    }
+    assert!("Dark".parse::<Theme>().is_err());
 }
 
 #[cfg(unix)]

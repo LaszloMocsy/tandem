@@ -18,7 +18,7 @@ use jiff::Timestamp;
 
 use crate::store::StoreError;
 
-pub use app::{AppDb, Project, is_valid_project_id};
+pub use app::{AppDb, AppSettings, Project, Theme, folder_name, is_valid_project_id};
 pub use project::{
     Changes, IndexedTask, Problem, ProjectIndex, delete_project_db, project_db_path,
 };

@@ -45,10 +45,7 @@ impl AppDb {
                 path: repo_path.clone(),
             })?
             .to_owned();
-        let name = repo_path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path_text.clone());
+        let name = folder_name(&repo_path);
 
         let tx = self
             .conn
@@ -121,6 +118,60 @@ impl AppDb {
         Ok(updated > 0)
     }
 
+    /// Stores the project's name, as `config.toml` gives it or else
+    /// [`folder_name`], so the list can show it without reading the repo.
+    /// Returns `false` if there is no such project.
+    pub fn set_name(&self, id: &str, name: &str) -> Result<bool, IndexError> {
+        let updated = self.conn.execute(
+            "UPDATE projects SET name = ?2 WHERE id = ?1",
+            params![id, name],
+        )?;
+        Ok(updated > 0)
+    }
+
+    /// The app's settings. A missing or unreadable value gets its default.
+    pub fn settings(&self) -> Result<AppSettings, IndexError> {
+        let mut settings = AppSettings::default();
+        let mut stmt = self.conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (key, value) = row?;
+            match key.as_str() {
+                MCP_PORT => settings.mcp_port = value.parse().ok().filter(|&port| port != 0),
+                THEME => settings.theme = value.parse().unwrap_or_default(),
+                _ => {}
+            }
+        }
+        Ok(settings)
+    }
+
+    /// Sets the MCP server's port; `None` goes back to the default.
+    pub fn set_mcp_port(&self, port: Option<u16>) -> Result<(), IndexError> {
+        self.set_setting(MCP_PORT, port.map(|port| port.to_string()).as_deref())
+    }
+
+    pub fn set_theme(&self, theme: Theme) -> Result<(), IndexError> {
+        let value = (theme != Theme::System).then(|| theme.as_str());
+        self.set_setting(THEME, value)
+    }
+
+    /// Stores a setting, or deletes it when `value` is `None`.
+    fn set_setting(&self, key: &str, value: Option<&str>) -> Result<(), IndexError> {
+        match value {
+            Some(value) => self.conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?,
+            None => self
+                .conn
+                .execute("DELETE FROM settings WHERE key = ?1", [key])?,
+        };
+        Ok(())
+    }
+
     /// Removes the project from the list. Its repo and database are left
     /// alone. Returns `false` if there is no such project.
     pub fn remove_project(&self, id: &str) -> Result<bool, IndexError> {
@@ -128,6 +179,59 @@ impl AppDb {
             .conn
             .execute("DELETE FROM projects WHERE id = ?1", [id])?
             > 0)
+    }
+}
+
+/// The name a project gets when its `config.toml` sets none: the repo
+/// folder's name.
+pub fn folder_name(repo_path: &Path) -> String {
+    repo_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| repo_path.display().to_string())
+}
+
+const MCP_PORT: &str = "mcp_port";
+const THEME: &str = "theme";
+
+/// The settings for the whole app, kept in `app.db`, never in a repo.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AppSettings {
+    /// The MCP server's port. `None` means the default.
+    pub mcp_port: Option<u16>,
+    pub theme: Theme,
+}
+
+/// The app's colour theme.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Theme {
+    /// Follow the system's light or dark appearance.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+}
+
+impl std::str::FromStr for Theme {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "system" => Ok(Self::System),
+            "light" => Ok(Self::Light),
+            "dark" => Ok(Self::Dark),
+            _ => Err(format!("`{s}` is not a theme; use system, light or dark")),
+        }
     }
 }
 

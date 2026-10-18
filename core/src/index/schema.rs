@@ -5,15 +5,24 @@ use rusqlite::Connection;
 
 use super::{IndexError, io_error};
 
-/// `app.db`: the project list.
-pub(super) const APP_MIGRATIONS: &[&str] = &["
+/// `app.db`: the project list and the app's settings. `projects.name` is a
+/// copy of the name in the project's `config.toml`, or its folder name.
+pub(super) const APP_MIGRATIONS: &[&str] = &[
+    "
 CREATE TABLE projects (
   id             TEXT PRIMARY KEY,
   name           TEXT NOT NULL,
   repo_path      TEXT NOT NULL UNIQUE,
   last_opened_at TEXT
 );
-"];
+",
+    "
+CREATE TABLE settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+",
+];
 
 /// `projects/<project-id>.db`: the task index and in-flight activity.
 ///
