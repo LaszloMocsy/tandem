@@ -1766,3 +1766,70 @@ fn a_read_only_project_refuses_set_name() {
         "format_version = 2\nname = \"Next\"\n"
     );
 }
+
+#[test]
+fn reset_local_state_rebuilds_from_files_and_loses_only_activity() {
+    let env = Env::new();
+    let events = env.service.subscribe();
+    let issued = env.service.register_agent(Some("claude-code")).unwrap();
+    let a = agent(&issued);
+    let id = env.todo("Task");
+    let other = env.todo("Other");
+    env.service.start_task(&a, id).unwrap();
+    env.service.log_progress(&a, id, "Halfway.").unwrap();
+    env.service.set_blocked(&a, id, "Which API?").unwrap();
+    let files = (env.file(id), env.file(other));
+    let before = env
+        .service
+        .list_tasks(&Actor::User, &TaskFilter::default())
+        .unwrap();
+    while events.try_recv().is_ok() {}
+
+    let changes = env.service.reset().unwrap();
+    assert_eq!(changes.changed, [id, other].into());
+    assert_eq!(events.try_recv().unwrap(), changes);
+    assert_eq!((env.file(id), env.file(other)), files);
+    assert_eq!(env.lease(id), None);
+    let detail = env.service.get_task(&Actor::User, id).unwrap();
+    assert!(detail.work_log.is_empty());
+    assert_eq!(detail.summary.blocked, None);
+    let after = env
+        .service
+        .list_tasks(&Actor::User, &TaskFilter::default())
+        .unwrap();
+    let strip = |tasks: Vec<TaskSummary>| -> Vec<_> {
+        tasks
+            .into_iter()
+            .map(|t| TaskSummary {
+                lease: None,
+                blocked: None,
+                ..t
+            })
+            .collect()
+    };
+    assert_eq!(strip(after), strip(before));
+
+    // The agent that started the task carries on with its id.
+    assert!(env.service.is_known_agent(&issued).unwrap());
+    env.service.log_progress(&a, id, "Still mine.").unwrap();
+    assert_eq!(env.lease(id).unwrap().0, issued);
+}
+
+#[test]
+fn after_a_rebuild_only_agents_with_a_task_in_progress_are_known() {
+    let env = Env::new();
+    let working = env.service.register_agent(Some("claude-code")).unwrap();
+    let done = env.service.register_agent(Some("claude-code")).unwrap();
+    let id = env.todo("Working");
+    let finished = env.todo("Finished");
+    env.service.start_task(&agent(&working), id).unwrap();
+    env.service.start_task(&agent(&done), finished).unwrap();
+    env.service
+        .finish_task(&agent(&done), finished, finish("Done."))
+        .unwrap();
+
+    env.service.reset().unwrap();
+    assert!(env.service.is_known_agent(&working).unwrap());
+    assert!(!env.service.is_known_agent(&done).unwrap());
+    assert!(!env.service.is_known_agent("claude-code-ffff").unwrap());
+}

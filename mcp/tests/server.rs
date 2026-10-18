@@ -474,6 +474,30 @@ async fn holder_tools_need_the_issued_agent_id() {
 }
 
 #[tokio::test]
+async fn an_agent_carries_on_after_reset_local_state() {
+    let env = Env::new().await;
+    let client = env.client("claude-code", Protocol::Latest).await;
+    let id = env.todo("Task");
+    let started = call(&client, "start_task", json!({ "id": id.as_str() }))
+        .await
+        .unwrap();
+    let agent = started["agent"].as_str().unwrap();
+
+    env.service.reset().unwrap();
+    // The issued ids are gone with the database, but the changelog shows
+    // this agent started the task, so its id still works.
+    let args = json!({ "id": id.as_str(), "message": "Still here.", "agent": agent });
+    call(&client, "log_progress", args).await.unwrap();
+    let lease = env
+        .service
+        .get_task(&Actor::User, id)
+        .unwrap()
+        .summary
+        .lease;
+    assert_eq!(lease.unwrap().agent_id, agent);
+}
+
+#[tokio::test]
 async fn errors_carry_the_specs_codes() {
     let env = Env::new().await;
     let client = env.client("claude-code", Protocol::Latest).await;

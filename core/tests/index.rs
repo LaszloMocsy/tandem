@@ -334,7 +334,9 @@ fn a_deleted_database_rebuilds_from_files() {
 
     // The Reset local state button does the same while the app runs.
     add_lease(&index, B);
-    let index = index.reset().unwrap();
+    let mut index = index;
+    let changes = index.reset().unwrap();
+    assert_eq!(changes.changed, ids(&[A, B, C]));
     assert_eq!(index.tasks().unwrap(), before);
     assert_eq!(leases(&index), Vec::<String>::new());
 }

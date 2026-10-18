@@ -165,17 +165,18 @@ impl ProjectIndex {
     }
 
     /// Deletes the project database and builds it again from the files, for
-    /// the Reset local state button. Leases, flags and working logs are lost.
-    pub fn reset(self) -> Result<Self, IndexError> {
-        let Self {
-            conn,
-            repo,
-            db_path,
-            ..
-        } = self;
-        conn.close().map_err(|(_, e)| e)?;
-        remove_db_files(&db_path)?;
-        Self::open_at(db_path, &repo)
+    /// the Reset local state button. Leases, flags, working logs and the
+    /// issued agent ids are lost. Returns the rebuild's changes: every task.
+    pub fn reset(&mut self) -> Result<Changes, IndexError> {
+        // Swap in a placeholder, so the old connection can be closed.
+        let conn = std::mem::replace(&mut self.conn, Connection::open_in_memory()?);
+        if let Err((conn, e)) = conn.close() {
+            self.conn = conn;
+            return Err(e.into());
+        }
+        remove_db_files(&self.db_path)?;
+        self.conn = schema::open(&self.db_path, schema::PROJECT_MIGRATIONS)?;
+        self.rescan()
     }
 
     pub fn access(&self) -> &Access {

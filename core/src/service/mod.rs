@@ -380,13 +380,38 @@ impl Service {
     }
 
     /// Whether `id` was issued by [`register_agent`](Self::register_agent).
+    /// After a rebuild, which forgets every issued id, an agent that
+    /// started a task still in progress is known too, so it can carry on
+    /// with its id and win back its lease.
     pub fn is_known_agent(&self, id: &str) -> Result<bool, ServiceError> {
-        Ok(self
-            .lock()
+        let index = self.lock();
+        let issued = index
             .connection()
             .query_row("SELECT 1 FROM agents WHERE agent_id = ?1", [id], |_| Ok(()))
             .optional()?
-            .is_some())
+            .is_some();
+        if issued {
+            return Ok(true);
+        }
+        Ok(index.tasks()?.iter().any(|task| {
+            task.status == Status::InProgress
+                && read_file(&self.dir, task.id).is_ok_and(|task| {
+                    transitions::last_hand_over(&task)
+                        .is_some_and(|entry| entry.event == "started" && entry.who == id)
+                })
+        }))
+    }
+
+    /// Deletes the project database and builds it again from the files,
+    /// for the Reset local state button. Leases, blocked flags, review
+    /// feedback, working logs and the issued agent ids are lost; an agent
+    /// still working on a task carries on with its id, as after any
+    /// rebuild. The task files are not touched.
+    pub fn reset(&self) -> Result<Changes, ServiceError> {
+        let mut index = self.lock();
+        let changes = index.reset()?;
+        self.emit(changes.clone());
+        Ok(changes)
     }
 
     /// The `.tandem/` folder.
