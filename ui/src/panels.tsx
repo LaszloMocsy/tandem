@@ -155,7 +155,7 @@ export function SetupPanel({ project, onClose }: { project: ProjectInfo; onClose
       {url === null ? (
         <p className="problem">
           The MCP server isn't running, so agents can't connect. It starts with the app; another
-          copy of Tandem may be using port 4317.
+          copy of Tandem may be using its port. Pick another port in Settings.
         </p>
       ) : (
         <>
@@ -182,6 +182,20 @@ export function SetupPanel({ project, onClose }: { project: ProjectInfo; onClose
 }
 
 function CopyBlock({ title, text, hint }: { title: string; text: string; hint: string }) {
+  return (
+    <section className="detail-section" aria-label={title}>
+      <div className="copy-head">
+        <h3>{title}</h3>
+        <CopyButton text={text} />
+      </div>
+      <p className="hint">{hint}</p>
+      <pre className="raw copy-text">{text}</pre>
+    </section>
+  )
+}
+
+/** Copies `text`, then says whether it worked for a moment. */
+export function CopyButton({ text, label }: { text: string; label?: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle')
 
   useEffect(() => {
@@ -191,19 +205,13 @@ function CopyBlock({ title, text, hint }: { title: string; text: string; hint: s
   }, [state])
 
   return (
-    <section className="detail-section" aria-label={title}>
-      <div className="copy-head">
-        <h3>{title}</h3>
-        <button
-          type="button"
-          className="link"
-          onClick={() => copyText(text).then(() => setState('copied'), () => setState('failed'))}
-        >
-          {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : 'Copy'}
-        </button>
-      </div>
-      <p className="hint">{hint}</p>
-      <pre className="raw copy-text">{text}</pre>
-    </section>
+    <button
+      type="button"
+      className="link"
+      aria-label={label}
+      onClick={() => copyText(text).then(() => setState('copied'), () => setState('failed'))}
+    >
+      {state === 'copied' ? 'Copied' : state === 'failed' ? 'Copy failed' : 'Copy'}
+    </button>
   )
 }

@@ -16,7 +16,8 @@ import { moveFor } from './moves.ts'
 import { AgentsPanel, SetupPanel } from './panels.tsx'
 import { ProjectSwitcher } from './ProjectSwitcher.tsx'
 import { useProjectActions } from './projects.ts'
-import { shortcutFor } from './shortcuts.ts'
+import { Settings, type SettingsApi, type SettingsTab } from './Settings.tsx'
+import { isSettingsShortcut, shortcutFor } from './shortcuts.ts'
 import { board, useBoard, type BoardStore } from './store.ts'
 import { applyTheme } from './theme.ts'
 import { Toolbar } from './Toolbar.tsx'
@@ -29,6 +30,7 @@ const LEASE_TICK_MS = 15_000
 
 /** The commands the app uses. */
 export type AppApi = PaneApi &
+  SettingsApi &
   Pick<
     Api,
     | 'listTasks'
@@ -69,6 +71,10 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
 
   const [selected, setSelected] = useState<string | null>(null)
   const close = useCallback(() => setSelected(null), [])
+  // The Settings page, in the board's place, and the tab it shows.
+  const [settings, setSettings] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('app')
+  const closeSettings = useCallback(() => setSettings(false), [])
   // The Agents or Setup panel, in the detail pane's place.
   const [panel, setPanel] = useState<'agents' | 'setup' | null>(null)
   const closePanel = useCallback(() => setPanel(null), [])
@@ -78,6 +84,7 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
   }, [])
   const togglePanel = (next: 'agents' | 'setup') => {
     setSelected(null)
+    setSettings(false)
     setPanel((current) => (current === next ? null : next))
   }
   // A task that is gone, or from another project, closes the pane.
@@ -174,9 +181,24 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
     }
   }
 
+  // Cmd or Ctrl+, opens and closes Settings, and Escape closes it.
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
-      if (event.defaultPrevented || project === null) return
+      if (event.defaultPrevented || document.querySelector('dialog[open]')) return
+      if (isSettingsShortcut(event)) {
+        event.preventDefault()
+        setSettings((open) => !open)
+      } else if (event.key === 'Escape' && settings) {
+        setSettings(false)
+      }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [settings])
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || project === null || settings) return
       if (document.querySelector('dialog[open]')) return
       const shortcut = shortcutFor(event)
       if (shortcut === 'search') {
@@ -197,7 +219,7 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [api, project, open, readOnly, run, openNewTask])
+  }, [api, project, open, readOnly, run, openNewTask, settings])
 
   return (
     <div className="app">
@@ -235,24 +257,34 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
             onNewTask={openNewTask}
           />
         )}
-        {project !== null && (
-          <nav className="panel-buttons" aria-label="Panels">
-            <button
-              type="button"
-              aria-pressed={panel === 'agents'}
-              onClick={() => togglePanel('agents')}
-            >
-              Agents
-            </button>
-            <button
-              type="button"
-              aria-pressed={panel === 'setup'}
-              onClick={() => togglePanel('setup')}
-            >
-              Setup
-            </button>
-          </nav>
-        )}
+        <nav className="panel-buttons" aria-label="Panels">
+          {project !== null && (
+            <>
+              <button
+                type="button"
+                aria-pressed={!settings && panel === 'agents'}
+                onClick={() => togglePanel('agents')}
+              >
+                Agents
+              </button>
+              <button
+                type="button"
+                aria-pressed={!settings && panel === 'setup'}
+                onClick={() => togglePanel('setup')}
+              >
+                Setup
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            aria-pressed={settings}
+            title="Settings (Cmd/Ctrl+,)"
+            onClick={() => setSettings((open) => !open)}
+          >
+            Settings
+          </button>
+        </nav>
       </header>
       {current?.readOnly && (
         <p className="read-only-notice" role="status">
@@ -280,7 +312,21 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
           </button>
         </div>
       )}
-      {project === null ? (
+      {settings ? (
+        <Settings
+          tab={settingsTab}
+          project={current}
+          api={api}
+          onTab={setSettingsTab}
+          onClose={closeSettings}
+          onProjectsChanged={() => void store.refreshProjects()}
+          onReset={(project) => {
+            void store.refetch()
+            setInfo(`Reset the local state of ${project.name}; the board was rebuilt from its files.`)
+          }}
+          onRemove={projectActions.askRemove}
+        />
+      ) : project === null ? (
         <Welcome
           projects={projects}
           now={now}
