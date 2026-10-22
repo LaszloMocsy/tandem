@@ -1,11 +1,12 @@
 ---
 id: itnff5i
 title: Scaffold the site/ Astro project
-status: finished
+status: done
 priority: high
 parent: ybd67we
 labels: [area:website]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description
