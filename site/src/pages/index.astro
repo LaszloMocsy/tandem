@@ -1,27 +1,16 @@
 ---
-import Download from '../components/Download.astro';
+import Agents from '../components/Agents.astro';
+import Features from '../components/Features.astro';
 import Hero from '../components/Hero.astro';
 import HowItWorks from '../components/HowItWorks.astro';
+import OpenSource from '../components/OpenSource.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 
 <BaseLayout title="Tandem: a task board you share with your coding agents">
   <Hero />
   <HowItWorks />
-  <section id="download" class="container closing" aria-labelledby="download-title">
-    <h2 id="download-title">Download Tandem</h2>
-    <Download id="closing" />
-  </section>
+  <Features />
+  <Agents />
+  <OpenSource />
 </BaseLayout>
-
-<style>
-  .closing {
-    padding-block: 64px 96px;
-    text-align: center;
-  }
-
-  h2 {
-    margin: 0 0 24px;
-    font-size: 1.75rem;
-  }
-</style>

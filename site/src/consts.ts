@@ -4,3 +4,4 @@ export const SITE_DESCRIPTION =
 export const REPO_URL = 'https://github.com/LaszloMocsy/tandem';
 export const RELEASES_URL = `${REPO_URL}/releases`;
 export const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`;
+export const TASKS_URL = `${REPO_URL}/tree/main/.tandem`;

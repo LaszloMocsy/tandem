@@ -1,0 +1,59 @@
+---
+import { LICENSE_URL, REPO_URL, TASKS_URL } from '../consts';
+import Download from './Download.astro';
+---
+
+<section id="download" class="closing" aria-labelledby="closing-title">
+  <div class="container inner">
+    <img src="/logo.svg" alt="" width="64" height="64" />
+    <h2 id="closing-title">Tandem is built with Tandem</h2>
+    <p class="lead">
+      Its own tasks live in the repo's <a href={TASKS_URL}><code>.tandem/</code> folder</a>, worked
+      on by agents and reviewed by hand, like the ones on your board will be. Tandem is open source
+      under the <a href={LICENSE_URL}>MIT license</a>.
+    </p>
+    <Download id="closing" />
+    <a class="github" href={REPO_URL}>View on GitHub</a>
+  </div>
+</section>
+
+<style>
+  .closing {
+    padding-block: clamp(64px, 12vw, 120px);
+    border-top: 1px solid var(--border);
+  }
+
+  .inner {
+    display: grid;
+    justify-items: center;
+    gap: 20px;
+    max-width: 720px;
+    text-align: center;
+  }
+
+  h2 {
+    margin: 0;
+    font-size: clamp(1.6rem, 4vw, 2.2rem);
+    letter-spacing: -0.015em;
+  }
+
+  .lead {
+    margin: 0 0 12px;
+    color: var(--muted);
+    text-wrap: balance;
+  }
+
+  .github {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .github:hover {
+    background: var(--chip);
+  }
+</style>

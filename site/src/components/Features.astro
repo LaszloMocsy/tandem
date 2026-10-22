@@ -1,0 +1,112 @@
+---
+// Feature cards. Every claim here must match docs/spec.md and the README.
+const features = [
+  {
+    title: 'Git is the history',
+    body: 'A task file changes only when something worth reading happens, and its changelog only grows. Commit review commits that one file and nothing else.',
+    who: 'human',
+  },
+  {
+    title: 'Claims are leases',
+    body: 'start_task claims a task for 15 minutes, renewed by every tool call that carries its agent id. If an agent crashes, its lease runs out and another agent can take the task over.',
+    who: 'agent',
+  },
+  {
+    title: 'Agents propose, you approve',
+    body: 'Tasks an agent creates wait in Backlog until you approve them. Agents only start tasks in Todo, and only you can mark finished work reviewed.',
+    who: 'human',
+  },
+  {
+    title: 'Local only',
+    body: 'The MCP server listens on 127.0.0.1, with one endpoint per project, and only while the app runs. There is no account to create.',
+    who: 'agent',
+  },
+  {
+    title: 'The files are the truth',
+    body: 'Leases and working logs live in a SQLite database in the app’s data folder, never in the repo. Delete it, and the board rebuilds from the files.',
+    who: 'agent',
+  },
+  {
+    title: 'Keyboard first',
+    body: 'N new task, / search, Enter opens a card, R marks it reviewed, A approves. Or drag cards between columns.',
+    who: 'human',
+  },
+] as const;
+---
+
+<section class="features" aria-labelledby="features-title">
+  <div class="container">
+    <h2 id="features-title">Built for working alongside agents</h2>
+    <ul>
+      {
+        features.map((f) => (
+          <li class={f.who}>
+            <h3>{f.title}</h3>
+            <p>{f.body}</p>
+          </li>
+        ))
+      }
+    </ul>
+  </div>
+</section>
+
+<style>
+  .features {
+    padding-block: clamp(56px, 10vw, 104px);
+    border-block: 1px solid var(--border);
+    background: var(--column);
+  }
+
+  h2 {
+    margin: 0 0 clamp(28px, 5vw, 48px);
+    font-size: clamp(1.6rem, 4vw, 2.2rem);
+    letter-spacing: -0.015em;
+    text-align: center;
+    text-wrap: balance;
+  }
+
+  ul {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+    gap: 16px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  li {
+    position: relative;
+    padding: 20px 20px 20px 24px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+
+  /* A thin edge in the colour of whoever the feature serves. */
+  li::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 4px;
+  }
+
+  li.agent::before {
+    background: var(--agent);
+  }
+
+  li.human::before {
+    background: var(--human);
+  }
+
+  h3 {
+    margin: 0 0 8px;
+    font-size: 1.05rem;
+  }
+
+  p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+</style>
