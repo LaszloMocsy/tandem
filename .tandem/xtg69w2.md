@@ -1,12 +1,13 @@
 ---
 id: xtg69w2
 title: Generate release notes from merged PRs
-status: finished
+status: done
 priority: medium
 parent: b85qh8f
 labels: [area:release, feat/versioning]
 depends_on: [tenmi47]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description

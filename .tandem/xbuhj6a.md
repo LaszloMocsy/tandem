@@ -1,11 +1,12 @@
 ---
 id: xbuhj6a
 title: Link to the repo and release notes from Settings → About
-status: finished
+status: done
 priority: low
 parent: b85qh8f
 labels: [area:release, area:ui, feat/versioning]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description

@@ -58,13 +58,16 @@ Changes to the board should also be tried in the running app with `cargo tauri d
 
 ## Branches
 
-Feature branches merge into a `version/vX.Y.Z` branch, and only version branches merge into `main`. The Version workflow checks every pull request into `main`: it must come from a `version/vX.Y.Z` branch whose name matches the version in `Cargo.toml`, `desktop/tauri.conf.json` and `Cargo.lock`, and that version must be higher than `main`'s. Run the same check locally with:
+Feature branches merge into a `version/vX.Y.Z` branch, and only version branches merge into `main`. Branch your feature from the version branch it will go into, and open its pull request against that branch. Every release, pre-releases included, gets its own version branch named after its exact version, such as `version/v0.2.0-alpha.1`. The Version workflow checks every pull request into `main`: it must come from a `version/vX.Y.Z` branch whose name matches the version in `Cargo.toml`, `desktop/tauri.conf.json` and `Cargo.lock`, and that version must be higher than `main`'s. Run the same check locally with:
 
 ```sh
 cargo xtask version check --base origin/main --branch "$(git branch --show-current)"
 ```
 
-For maintainers: the check only blocks merges once **Version** is a required status check for `main` (Settings → Branches → branch protection), ideally with "Require branches to be up to date before merging", so the comparison is against the latest `main`.
+For maintainers, once per repository:
+
+- Make **Version** a required status check for `main` (Settings → Branches → branch protection), ideally with "Require branches to be up to date before merging", so the comparison is against the latest `main`. Until then the check reports but doesn't block.
+- Create the `skip-release-notes` label, which keeps version pull requests out of the release notes (see Releasing).
 
 ## Releasing
 
@@ -82,7 +85,7 @@ The draft's notes list the pull requests merged since the previous release: sinc
 - Merge the version pull request into `main` with a merge commit, not a squash, which would hide the feature pull requests' commits.
 - Label the version pull request `skip-release-notes`, since its feature pull requests are already listed.
 
-Pushing a `v*` tag by hand still starts a release, for example to retry one.
+To retry a failed release, delete its draft and run the Release workflow on the tag again: `gh workflow run release.yml --ref vX.Y.Z`. Pushing a new `v*` tag by hand also starts a release.
 
 The builds are not signed yet; [Installing an unsigned build](README.md#installing-an-unsigned-build) explains what users see.
 
