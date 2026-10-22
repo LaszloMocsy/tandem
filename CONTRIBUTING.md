@@ -70,16 +70,13 @@ For maintainers: the check only blocks merges once **Version** is a required sta
 
 For maintainers:
 
-1. Set the new version with `cargo xtask version bump 0.2.0` (or `0.2.0-alpha.1`, `0.2.0-beta.1`). It updates `Cargo.toml` (`[workspace.package]`), `desktop/tauri.conf.json` and `Cargo.lock`, and refuses a version that isn't higher than the current one. Commit the result.
-2. Tag the commit and push the tag:
+1. Create `version/vX.Y.Z` from `main` and set the version with `cargo xtask version bump X.Y.Z` (or `X.Y.Z-alpha.N`, `X.Y.Z-beta.N`). It updates `Cargo.toml` (`[workspace.package]`), `desktop/tauri.conf.json` and `Cargo.lock`, and refuses a version that isn't higher than the current one. Commit the result.
+2. Merge the release's feature branches into the version branch, then open a pull request from it into `main`.
+3. Merging that pull request runs the Tag workflow: it tags the merge commit `vX.Y.Z` and starts the Release workflow for the tag. It refuses a tag that already exists.
+4. The Release workflow checks that the tag matches the version (`cargo xtask version check --tag`), then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
+5. Check the assets, edit the notes, and publish the draft.
 
-   ```sh
-   git tag v0.2.0
-   git push origin v0.2.0
-   ```
-
-3. The Release workflow checks that the tag matches the version (`cargo xtask version check --tag`), then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
-4. Check the assets, edit the notes, and publish the draft.
+Pushing a `v*` tag by hand still starts a release, for example to retry one.
 
 The builds are not signed yet; [Installing an unsigned build](README.md#installing-an-unsigned-build) explains what users see.
 

@@ -3,10 +3,12 @@ name: Release
 # Pushing a tag such as v0.1.0 builds macOS, Windows and Linux bundles into a
 # draft GitHub release, which you then review and publish by hand. Tags
 # vX.Y.Z-alpha.N and vX.Y.Z-beta.N build labelled ALPHA and BETA pre-releases;
-# any other tag fails.
+# any other tag fails. The Tag workflow starts it through workflow_dispatch
+# on the tag it creates; a dispatch on a branch fails.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -28,6 +30,14 @@ jobs:
       release-id: ${{ steps.create.outputs.id }}
       build-env: ${{ steps.env.outputs.env }}
     steps:
+      - name: Check this runs for a tag
+        if: github.ref_type != 'tag'
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          echo "::error::Release runs for a tag, not the branch $REF"
+          exit 1
+
       - uses: actions/checkout@v7
 
       # For the version tooling in xtask/.

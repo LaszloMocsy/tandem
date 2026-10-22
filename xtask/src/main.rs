@@ -175,7 +175,7 @@ fn bump(root: &Path, new: &str) -> Result<(), String> {
     println!("  1. Commit the bump on {expected}.");
     println!("  2. Merge feature branches into {expected}.");
     println!("  3. Open a pull request from {expected} into main.");
-    println!("  4. After it merges, tag the merge commit v{new} to start the release.");
+    println!("  4. Merging it tags the merge commit v{new} and starts the release.");
     Ok(())
 }
 
