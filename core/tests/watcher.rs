@@ -95,10 +95,14 @@ impl Env {
     }
 }
 
-/// Every event that arrives until `SETTLE` passes without one.
+/// Every event that arrives until `SETTLE` passes without one. Gives up
+/// after ten seconds, so an event loop fails the test instead of hanging it.
 fn drain(events: &Receiver<Changes>) -> Vec<Changes> {
+    let deadline = Instant::now() + Duration::from_secs(10);
     let mut out = Vec::new();
-    while let Ok(changes) = events.recv_timeout(SETTLE) {
+    while Instant::now() < deadline
+        && let Ok(changes) = events.recv_timeout(SETTLE)
+    {
         out.push(changes);
     }
     out
@@ -153,6 +157,21 @@ fn the_apps_own_write_causes_no_loop() {
         fs::metadata(env.path(id)).unwrap().modified().unwrap(),
         mtime
     );
+}
+
+#[test]
+fn reading_the_folder_causes_no_events() {
+    let env = Env::new();
+    let id = env.create("Task");
+    let _watcher = env.watch();
+    let events = env.service.subscribe();
+
+    // On Linux every open is an event, and a scan lists the folder and
+    // reads every file in it, so reacting to reads would scan forever.
+    env.service.rescan().unwrap();
+    fs::read_to_string(env.path(id)).unwrap();
+    env.service.name().unwrap();
+    assert_eq!(drain(&events), Vec::<Changes>::new());
 }
 
 #[test]

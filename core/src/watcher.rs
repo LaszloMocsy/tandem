@@ -10,6 +10,9 @@
 //!   for example during sleep or on network drives.
 //! - An event on `config.toml`, or on the folder itself, is passed on with
 //!   [`Service::config_changed`], so the app reads the project name again.
+//! - Reads are ignored. On Linux, opening a file or listing the folder is an
+//!   event too, and every scan lists the folder, so reacting to reads would
+//!   scan forever.
 //!
 //! The app's own writes need no special handling: the service indexes each
 //! file it writes, so the event for it finds the same hash and changes
@@ -18,14 +21,17 @@
 
 use std::collections::BTreeSet;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer};
+use notify::event::{AccessKind, AccessMode};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{
+    DebounceEventResult, DebouncedEvent, Debouncer, RecommendedCache, new_debouncer,
+};
 
 use crate::service::{Service, ServiceError};
 use crate::store::{CONFIG_FILE, TASK_DIR, TaskId};
@@ -89,7 +95,7 @@ pub enum WatchError {
 /// A running watcher for one project. Dropping it stops the watching and
 /// the sweep, and waits for the worker thread to finish.
 pub struct Watcher {
-    debouncer: Option<Debouncer<RecommendedWatcher>>,
+    debouncer: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
     stop: Sender<Message>,
     worker: Option<JoinHandle<()>>,
 }
@@ -113,13 +119,12 @@ impl Watcher {
             path: service.task_dir().to_owned(),
             source,
         };
-        let mut debouncer = new_debouncer(config.debounce, move |result| {
+        let mut debouncer = new_debouncer(config.debounce, None, move |result| {
             // Fails only once the worker has stopped.
             let _ = events.send(Message::Events(result));
         })
         .map_err(watch_error)?;
         debouncer
-            .watcher()
             .watch(service.task_dir(), RecursiveMode::NonRecursive)
             .map_err(watch_error)?;
         let worker = thread::Builder::new()
@@ -137,7 +142,9 @@ impl Watcher {
 impl Drop for Watcher {
     fn drop(&mut self) {
         // Stop new events first, then the worker.
-        self.debouncer.take();
+        if let Some(debouncer) = self.debouncer.take() {
+            debouncer.stop();
+        }
         let _ = self.stop.send(Message::Stop);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -165,7 +172,7 @@ fn run(
         match messages.recv_timeout(wait) {
             Ok(Message::Stop) | Err(RecvTimeoutError::Disconnected) => return,
             Ok(Message::Events(Ok(events))) => {
-                let paths = || events.iter().map(|e| e.path.as_path());
+                let paths = || changed_paths(&events);
                 if touches_config(paths()) {
                     service.config_changed();
                 }
@@ -181,8 +188,10 @@ fn run(
                 }
             }
             // The watcher may have dropped events.
-            Ok(Message::Events(Err(e))) => {
-                on_error(WatchError::Watch(e));
+            Ok(Message::Events(Err(errors))) => {
+                for e in errors {
+                    on_error(WatchError::Watch(e));
+                }
                 rescan(&mut on_error);
             }
             Err(RecvTimeoutError::Timeout) => {
@@ -202,7 +211,21 @@ enum Plan {
     Tasks(BTreeSet<TaskId>),
 }
 
-fn plan<'a>(paths: impl IntoIterator<Item = &'a std::path::Path>, burst: usize) -> Plan {
+/// The paths of a batch's events, leaving out reads: opening a file,
+/// listing the folder or closing a file opened for reading. Closing a file
+/// opened for writing counts, as it finishes a write.
+fn changed_paths(events: &[DebouncedEvent]) -> impl Iterator<Item = &Path> {
+    events
+        .iter()
+        .filter(|event| match event.kind {
+            EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+            EventKind::Access(_) => false,
+            _ => true,
+        })
+        .flat_map(|event| event.paths.iter().map(PathBuf::as_path))
+}
+
+fn plan<'a>(paths: impl IntoIterator<Item = &'a Path>, burst: usize) -> Plan {
     let mut ids = BTreeSet::new();
     for path in paths {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -225,7 +248,7 @@ fn plan<'a>(paths: impl IntoIterator<Item = &'a std::path::Path>, burst: usize) 
 
 /// Whether a batch of events may have changed `config.toml`: an event on
 /// the file, or on the folder, which may have been replaced with another.
-fn touches_config<'a>(paths: impl IntoIterator<Item = &'a std::path::Path>) -> bool {
+fn touches_config<'a>(paths: impl IntoIterator<Item = &'a Path>) -> bool {
     paths
         .into_iter()
         .filter_map(|path| path.file_name()?.to_str())
@@ -235,7 +258,6 @@ fn touches_config<'a>(paths: impl IntoIterator<Item = &'a std::path::Path>) -> b
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
 
     use super::*;
     use crate::service::{Actor, Config, NewTask};
@@ -264,6 +286,39 @@ mod tests {
         assert!(touches_config([dir.join("config.toml").as_path()]));
         assert!(touches_config([dir]));
         assert!(!touches_config([dir.join("config.toml.bak").as_path()]));
+    }
+
+    #[test]
+    fn reads_are_not_changes() {
+        use notify::Event;
+        use notify::event::{CreateKind, ModifyKind};
+
+        let dir = Path::new("/repo/.tandem");
+        let event = |kind, name: &str| {
+            DebouncedEvent::new(Event::new(kind).add_path(dir.join(name)), Instant::now())
+        };
+        let events = [
+            event(EventKind::Access(AccessKind::Open(AccessMode::Any)), ""),
+            event(EventKind::Access(AccessKind::Read), "config.toml"),
+            event(
+                EventKind::Access(AccessKind::Close(AccessMode::Read)),
+                "a7rq4ne.md",
+            ),
+            event(
+                EventKind::Access(AccessKind::Close(AccessMode::Write)),
+                "k3f9x2m.md",
+            ),
+            event(EventKind::Modify(ModifyKind::Any), "m2p8q4r.md"),
+            event(EventKind::Create(CreateKind::File), "z9y8x7w.md"),
+        ];
+        assert_eq!(
+            changed_paths(&events).collect::<Vec<_>>(),
+            [
+                dir.join("k3f9x2m.md"),
+                dir.join("m2p8q4r.md"),
+                dir.join("z9y8x7w.md"),
+            ]
+        );
     }
 
     #[test]
@@ -328,8 +383,10 @@ mod tests {
         };
 
         // A watcher error is reported, then a full scan runs.
-        tx.send(Message::Events(Err(notify::Error::generic("lost events"))))
-            .unwrap();
+        tx.send(Message::Events(Err(vec![notify::Error::generic(
+            "lost events",
+        )])))
+        .unwrap();
         let error = errors.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(matches!(error, WatchError::Watch(_)), "{error:?}");
         assert_eq!(
