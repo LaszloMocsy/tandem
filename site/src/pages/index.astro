@@ -1,0 +1,36 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+
+<BaseLayout title="Tandem: a task board you share with your coding agents">
+  <section class="container intro">
+    <h1>A task board you share with your coding agents.</h1>
+    <p>
+      Tasks are Markdown files in your repo. Agents claim and finish them through MCP, and you
+      review what they did.
+    </p>
+  </section>
+  <section id="how-it-works" class="container" aria-label="How it works"></section>
+  <section id="download" class="container" aria-label="Download"></section>
+</BaseLayout>
+
+<style>
+  .intro {
+    padding-block: 96px 64px;
+    max-width: 760px;
+    text-align: center;
+  }
+
+  h1 {
+    margin: 0 0 16px;
+    font-size: clamp(2rem, 5vw, 3.25rem);
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+  }
+
+  p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 1.15rem;
+  }
+</style>

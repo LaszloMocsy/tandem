@@ -1,0 +1,63 @@
+---
+import { REPO_URL } from '../consts';
+---
+
+<header class="nav">
+  <nav class="container nav-inner" aria-label="Main">
+    <a class="brand" href="/">
+      <img src="/logo.svg" alt="" width="28" height="28" />
+      <span>Tandem</span>
+    </a>
+    <ul>
+      <li><a href="/#how-it-works">How it works</a></li>
+      <li><a href="/#download">Download</a></li>
+      <li><a href={REPO_URL}>GitHub</a></li>
+    </ul>
+  </nav>
+</header>
+
+<style>
+  .nav {
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  .nav-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    min-height: 60px;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text);
+    font-weight: 650;
+    font-size: 1.05rem;
+    text-decoration: none;
+  }
+
+  ul {
+    display: flex;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  ul a {
+    display: block;
+    padding: 6px 10px;
+    border-radius: 8px;
+    color: var(--muted);
+    text-decoration: none;
+  }
+
+  ul a:hover {
+    color: var(--text);
+    background: var(--chip);
+  }
+</style>

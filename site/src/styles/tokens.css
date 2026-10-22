@@ -1,0 +1,52 @@
+/*
+ * Design tokens. Neutrals are copied from ui/src/index.css so the site
+ * matches the app; keep them in step. Brand colours come from the logo:
+ * coral for the human, blue-violet for the agent.
+ */
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --column: #eef0f3;
+  --border: #dfe2e7;
+  --text: #1c2026;
+  --muted: #69707c;
+  --chip: #e8ebef;
+  --accent: #3b6fd8;
+  --shadow: 0 8px 24px rgb(16 24 40 / 12%);
+
+  --human-from: #ffb47a;
+  --human-to: #ff6b5b;
+  --agent-from: #7fb2ff;
+  --agent-to: #5a5cff;
+  --human: linear-gradient(135deg, var(--human-from), var(--human-to));
+  --agent: linear-gradient(135deg, var(--agent-from), var(--agent-to));
+  /* Solid brand colours for text and focus rings, readable on --bg. */
+  --human-ink: #c2412f;
+  --agent-ink: #4446e0;
+
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  --radius: 10px;
+  --max-width: 1080px;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --surface: #22252b;
+    --column: #1c1f24;
+    --border: #2f333a;
+    --text: #e6e8eb;
+    --muted: #979ea9;
+    --chip: #2f333a;
+    --accent: #6f9bf0;
+    --shadow: 0 8px 24px rgb(0 0 0 / 45%);
+
+    --human-ink: #ff9a85;
+    --agent-ink: #9fa6ff;
+  }
+}
