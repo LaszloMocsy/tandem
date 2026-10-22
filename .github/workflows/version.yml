@@ -1,0 +1,40 @@
+name: Version
+
+# Only version/vX.Y.Z branches merge into main, each with a version higher
+# than main's. Feature branches merge into a version branch, which this
+# workflow doesn't run for. Make the Version check required for main in the
+# branch protection settings.
+on:
+  pull_request:
+    branches: [main]
+    # edited: re-run when a pull request is retargeted to main.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: version-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # The checkout is the merge commit; main's tip is the version to beat.
+      - name: Fetch main
+        run: git fetch --no-tags --depth=1 origin main
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The branch name is untrusted input, so it goes through env.
+      - name: Check the version
+        env:
+          BRANCH: ${{ github.head_ref }}
+        run: cargo --locked xtask version check --base origin/main --branch "$BRANCH"

@@ -1,5 +1,6 @@
 //! Repo tooling, run as `cargo xtask <command>` from anywhere in the repo.
 
+mod check;
 mod files;
 mod version;
 
@@ -14,8 +15,11 @@ usage: cargo xtask <command>
 
 commands:
   version                  print the app version
-  version check [--tag T]  check that Cargo.toml, desktop/tauri.conf.json and
-                           Cargo.lock agree, and with --tag that T is vVERSION
+  version check [--tag T] [--base REF] [--branch B]
+                           check that Cargo.toml, desktop/tauri.conf.json and
+                           Cargo.lock agree; with --tag, that T is vVERSION;
+                           with --base, that VERSION is higher than on git ref
+                           REF; with --branch, that B is version/vVERSION
   version bump VERSION     set the version in all three; VERSION is X.Y.Z,
                            X.Y.Z-alpha.N or X.Y.Z-beta.N and must be higher
   version env TAG          print the build environment for a release tag:
@@ -41,13 +45,18 @@ fn main() -> ExitCode {
 fn run(args: &[&str]) -> Result<(), String> {
     match args {
         ["version"] => println!("{}", current_version(&root())?),
-        ["version", "check"] => {
-            println!("{}", current_version(&root())?);
-        }
-        ["version", "check", "--tag", tag] => {
-            let current = current_version(&root())?;
-            if Version::parse_tag(tag)? != current {
-                return Err(format!("tag {tag} doesn't match the app version {current}"));
+        ["version", "check", options @ ..] => {
+            let options = check::Options::parse(options)?;
+            let root = root();
+            let current = current_version(&root)?;
+            if let Some(tag) = options.tag {
+                check::tag(current, tag)?;
+            }
+            if let Some(branch) = options.branch {
+                check::branch(current, branch)?;
+            }
+            if let Some(base) = options.base {
+                check::higher(current, version_at(&root, base)?, base)?;
             }
             println!("{current}");
         }
@@ -90,6 +99,22 @@ fn current_version(root: &Path) -> Result<Version, String> {
         return Err(format!("the version files disagree:\n{}", list.join("\n")));
     }
     Version::parse(&cargo).map_err(|e| format!("{CARGO_TOML}: {e}"))
+}
+
+/// The app version on git ref `rev`, from its Cargo.toml.
+fn version_at(root: &Path, rev: &str) -> Result<Version, String> {
+    let show = git(root, &["show", &format!("{rev}:{CARGO_TOML}")])?;
+    if !show.status.success() {
+        let stderr = String::from_utf8_lossy(&show.stderr);
+        return Err(format!(
+            "can't read {CARGO_TOML} on {rev}: {}",
+            stderr.trim()
+        ));
+    }
+    let cargo_toml =
+        String::from_utf8(show.stdout).map_err(|_| format!("{CARGO_TOML} on {rev} isn't UTF-8"))?;
+    Version::parse(&files::cargo_version(&cargo_toml)?)
+        .map_err(|e| format!("{CARGO_TOML} on {rev}: {e}"))
 }
 
 fn bump(root: &Path, new: &str) -> Result<(), String> {

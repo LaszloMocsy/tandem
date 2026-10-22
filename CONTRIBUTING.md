@@ -56,6 +56,16 @@ Changes to the board should also be tried in the running app with `cargo tauri d
 - Keep each commit to one topic, with its tests in the same commit.
 - When you work on a Tandem task, add a `Task: <id>` trailer to every commit for it.
 
+## Branches
+
+Feature branches merge into a `version/vX.Y.Z` branch, and only version branches merge into `main`. The Version workflow checks every pull request into `main`: it must come from a `version/vX.Y.Z` branch whose name matches the version in `Cargo.toml`, `desktop/tauri.conf.json` and `Cargo.lock`, and that version must be higher than `main`'s. Run the same check locally with:
+
+```sh
+cargo xtask version check --base origin/main --branch "$(git branch --show-current)"
+```
+
+For maintainers: the check only blocks merges once **Version** is a required status check for `main` (Settings → Branches → branch protection), ideally with "Require branches to be up to date before merging", so the comparison is against the latest `main`.
+
 ## Releasing
 
 For maintainers:

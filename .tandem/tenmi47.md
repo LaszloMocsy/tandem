@@ -1,11 +1,12 @@
 ---
 id: tenmi47
 title: Replace the version shell scripts with cargo xtask
-status: finished
+status: done
 priority: high
 parent: b85qh8f
 labels: [area:release, feat/versioning]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description
