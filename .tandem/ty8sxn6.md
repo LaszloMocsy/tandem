@@ -4,7 +4,7 @@ title: Encode the hero video and reach Lighthouse 95+
 status: todo
 priority: medium
 parent: ybd67we
-labels: [area:website]
+labels: [area:website, human]
 depends_on: [r3mbqsj, u6h7829, zy8iwii, 9cswthm]
 created: 2026-10-22
 ---
