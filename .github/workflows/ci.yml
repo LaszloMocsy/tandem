@@ -51,3 +51,46 @@ jobs:
       - run: bun run lint
       - run: bun run typecheck
       - run: bun run test
+
+  # Decides whether the site job runs: only when site/ or this workflow
+  # changes, so the Rust and ui/ jobs above are unaffected.
+  changes:
+    name: Changes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      site: ${{ steps.filter.outputs.site }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            site:
+              - 'site/**'
+              - '.github/workflows/ci.yml'
+
+  site:
+    name: Site
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+      - run: bun run check
+      - run: bun run test
+      # The build reads the GitHub releases; the token avoids rate limits.
+      - run: bun run build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
