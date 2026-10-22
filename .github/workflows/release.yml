@@ -1,7 +1,9 @@
 name: Release
 
 # Pushing a tag such as v0.1.0 builds macOS, Windows and Linux bundles into a
-# draft GitHub release, which you then review and publish by hand.
+# draft GitHub release, which you then review and publish by hand. Tags
+# vX.Y.Z-alpha.N and vX.Y.Z-beta.N build labelled ALPHA and BETA pre-releases;
+# any other tag fails.
 on:
   push:
     tags: ['v*']
@@ -24,8 +26,18 @@ jobs:
       contents: write
     outputs:
       release-id: ${{ steps.create.outputs.id }}
+      build-env: ${{ steps.env.outputs.env }}
     steps:
       - uses: actions/checkout@v7
+
+      # alpha, beta, or empty for a production release.
+      - name: Read the build environment from the tag
+        id: env
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          env=$(sh .github/scripts/build-env.sh "$TAG")
+          echo "env=$env" >> "$GITHUB_OUTPUT"
 
       - name: Check the tag matches the app version
         env:
@@ -43,6 +55,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ steps.env.outputs.env != '' }}
         run: |
           cat > notes.md <<EOF
           Download the bundle for your platform below.
@@ -50,7 +63,7 @@ jobs:
           These builds are not signed, so macOS and Windows warn before the first launch. See [Installing an unsigned build](https://github.com/$GITHUB_REPOSITORY#installing-an-unsigned-build) in the README.
           EOF
           id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
-            -f tag_name="$TAG" -f name="Tandem $TAG" -F draft=true -F body=@notes.md --jq .id)
+            -f tag_name="$TAG" -f name="Tandem $TAG" -F draft=true -F prerelease="$PRERELEASE" -F body=@notes.md --jq .id)
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
   build:
@@ -103,11 +116,17 @@ jobs:
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Compiled into the app and its frontend; empty for production.
+          TANDEM_ENV: ${{ needs.create-release.outputs.build-env }}
         with:
           # The Tauri project lives in desktop/, not the template's src-tauri/.
           projectPath: desktop
           releaseId: ${{ needs.create-release.outputs.release-id }}
           releaseDraft: true
-          args: --target ${{ matrix.target }}
+          # The MSI bundler refuses versions like 0.2.0-alpha.1, so Windows
+          # pre-releases ship the NSIS installer only.
+          args: >-
+            --target ${{ matrix.target }}
+            ${{ runner.os == 'Windows' && needs.create-release.outputs.build-env != '' && '--bundles nsis' || '' }}
           # The app has no updater.
           uploadUpdaterJson: false
