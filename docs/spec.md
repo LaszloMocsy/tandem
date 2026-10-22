@@ -413,7 +413,7 @@ tandem/
   site/                 # landing page: static Astro site
   .tandem/              # Tandem's own tasks, managed by Tandem
   docs/spec.md          # this spec, exported as Markdown
-  .github/workflows/    # ci.yml, release.yml
+  .github/workflows/    # ci.yml, release.yml, site-deploy.yml
   AGENTS.md  README.md  CONTRIBUTING.md  LICENSE
 ```
 
@@ -422,7 +422,7 @@ tandem/
 - **CI on every pull request:** `cargo fmt --check`, `cargo clippy`, `cargo test`, and frontend lint, typecheck and tests.
 - **Releases:** a tag `v*` runs `tauri-apps/tauri-action` to build macOS, Windows and Linux bundles into a draft GitHub release.
 - **Build environments:** the build fixes which environment it is, and it can't be changed at runtime or from the UI. `cargo tauri dev` is DEV, a tag `vX.Y.Z-alpha.N` is ALPHA, a tag `vX.Y.Z-beta.N` is BETA, and a tag `vX.Y.Z` (or a local release build) is production. The release workflow fails on any other tag and marks ALPHA and BETA releases as pre-releases; their Windows bundle is the NSIS installer only, since MSI refuses pre-release versions. DEV, ALPHA and BETA builds put the environment in the window title (`Tandem DEV`, `Tandem ALPHA`, `Tandem BETA`) and draw a 16px strip across the top of the window, orange, purple and blue, above every page and dialog. The strip's middle reads the environment in white, plus the version for ALPHA and BETA: `DEV build`, `ALPHA build (v0.2.0-alpha.1)`, and the page starts below it. Production shows neither.
-- **Landing page:** `site/` is a static Astro site managed with bun, hosted on Vercel at `tandem.laszlomocsy.com`. Vercel's Git integration uses `site/` as the project root and skips builds for commits that don't touch `site/**`; pushes to `main` deploy to production and pull requests get preview deployments. Publishing a GitHub release triggers a redeploy, so the download links always point at the latest release.
+- **Landing page:** `site/` is a static Astro site managed with bun, hosted on Vercel at `tandem.laszlomocsy.com`. Vercel's Git integration uses `site/` as the project root, and the `ignoreCommand` in `site/vercel.json` skips builds when `site/**` hasn't changed since the last deployment; pushes to `main` deploy to production and pull requests get preview deployments. Publishing a GitHub release runs `site-deploy.yml`, which builds `main` with the Vercel CLI and deploys it to production as a prebuilt deployment, so the skip can't cancel it and the download links always point at the latest release.
 - **Signing:** v1 ships unsigned builds; the README explains the macOS Gatekeeper and Windows SmartScreen warnings.
 - **README:** a short screen recording of an agent moving a card, quick start, agent setup, and a link to the task format in `docs/spec.md`.
 

@@ -6,53 +6,114 @@ name: Redeploy site
 # fires for pre-releases, which the page lists when they're newer than
 # production.
 #
-# The Vercel deploy hook builds the head of main. Its URL is stored as the
-# VERCEL_DEPLOY_HOOK_URL secret and works without other credentials, so it
-# must never be printed: it only reaches curl through an environment
-# variable, and GitHub masks it in logs.
+# This deploys with the Vercel CLI rather than a deploy hook. A hook build
+# goes through Vercel's Git build pipeline, so site/vercel.json's
+# ignoreCommand would cancel it: the release commit usually doesn't touch
+# site/. A prebuilt deploy uploads output built here, so no Git build runs and
+# nothing can skip it. This is Vercel's documented way to deploy on releases:
+# https://vercel.com/kb/guide/can-you-deploy-based-on-tags-releases-on-vercel
 #
-# Skipping unaffected builds: the project skips builds for commits that don't
-# touch site/. Vercel's docs describe that check per commit and don't say
-# whether it also applies to deploy-hook builds (checked 2026-10-22:
-# https://vercel.com/docs/monorepos#skipping-unaffected-projects and
-# https://vercel.com/docs/deploy-hooks). The release commit usually doesn't
-# touch site/, so if Vercel skips the hook's build, the deployment shows as
-# "Skipped" in the dashboard. Confirm on the first release after Vercel is set
-# up. If it's skipped, either turn the setting off (every push to main then
-# rebuilds the site) or replace the hook with a CLI deploy here
-# (`vercel deploy --prod` with a VERCEL_TOKEN secret), which isn't a Git
-# build and so isn't subject to the skip.
+# Setup: a VERCEL_TOKEN repository secret (an access token scoped to the
+# team that owns the project), and VERCEL_ORG_ID and VERCEL_PROJECT_ID
+# repository variables (`vercel link` writes both to .vercel/project.json).
+#
+# The token can deploy to production, so the site's own code (its
+# dependencies and the Astro build) never runs where the token is: the build
+# job uses it only to pull settings before anything from site/ is installed,
+# and the deploy job, on a fresh runner, only uploads the built output. The
+# third-party action is pinned to a commit SHA.
 on:
   release:
     types: [published]
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
   group: site-deploy
   cancel-in-progress: true
 
+env:
+  VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+
 jobs:
-  redeploy:
-    name: Trigger the Vercel deploy hook
+  build:
+    name: Build the site
     runs-on: ubuntu-26.04
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
-      - name: Call the deploy hook
+      - name: Check the Vercel settings
         env:
-          HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          missing=""
+          [ -n "$VERCEL_TOKEN" ] || missing="$missing secret VERCEL_TOKEN,"
+          [ -n "$VERCEL_ORG_ID" ] || missing="$missing variable VERCEL_ORG_ID,"
+          [ -n "$VERCEL_PROJECT_ID" ] || missing="$missing variable VERCEL_PROJECT_ID,"
+          if [ -n "$missing" ]; then
+            echo "::error title=Missing Vercel settings::Not set:${missing%,}. Create an access token in Vercel (Account Settings → Tokens) and add it as the VERCEL_TOKEN repository secret; add the project's orgId and projectId from .vercel/project.json (after \`vercel link\`) as the VERCEL_ORG_ID and VERCEL_PROJECT_ID repository variables."
+            exit 1
+          fi
+
+      # Production follows main, so deploy main's head, not the tag: the tag
+      # can be older than main, and deploying it would roll back site changes.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install the Vercel CLI
+        run: npm install --global vercel@65.1.0
+
+      # Run from the repo root: the project's Root Directory setting (site/)
+      # is resolved from here. GitHub masks the token in logs. This writes
+      # settings and env vars to .vercel/; the token itself isn't saved.
+      - name: Pull the production settings
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      # No Vercel token here: the build runs the site's dependencies. It
+      # reads the GitHub releases; the read-only token avoids rate limits.
+      - name: Build
+        run: vercel build --prod
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only the output and the project link; .vercel/ also holds the pulled
+      # env vars, which the deploy job doesn't need.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vercel-output
+          path: |
+            .vercel/output
+            .vercel/project.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    name: Deploy to production
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: vercel-output
+          path: .vercel
+
+      - name: Install the Vercel CLI
+        run: npm install --global vercel@65.1.0
+
+      - name: Deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          if [ -z "$HOOK_URL" ]; then
-            echo "::error title=Missing secret::VERCEL_DEPLOY_HOOK_URL is not set. Create a deploy hook for main in the Vercel project (Settings → Git → Deploy Hooks) and add its URL as a repository secret named VERCEL_DEPLOY_HOOK_URL."
-            exit 1
-          fi
-          echo "Release $TAG published; asking Vercel to rebuild the site."
-          # -f fails on HTTP errors; curl's messages name the host, not the URL.
-          response=$(curl -fsS --retry 3 -X POST "$HOOK_URL")
-          job=$(printf '%s' "$response" | jq -r '.job.id // empty')
-          if [ -z "$job" ]; then
-            echo "::error::The deploy hook answered without a job id."
-            exit 1
-          fi
-          echo "Vercel queued deployment job $job."
+          url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
+          echo "Release $TAG published; deployed the site to $url."
