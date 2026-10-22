@@ -1,12 +1,13 @@
 ---
 id: zy8iwii
 title: Features, agents and open-source sections
-status: finished
+status: done
 priority: medium
 parent: ybd67we
 labels: [area:website]
 depends_on: [itnff5i]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description
