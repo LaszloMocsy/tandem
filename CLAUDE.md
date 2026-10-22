@@ -10,6 +10,7 @@ core/            # tandem-board-core: store, index, service, watcher, git
 mcp/             # tandem-board-mcp: MCP tool handlers on top of core
 desktop/         # tandem-board-desktop: Tauri 2 shell, tauri.conf.json, commands
 ui/              # React + TypeScript + Vite frontend, managed with bun
+site/            # landing page: static Astro site, managed with bun, on Vercel
 docs/spec.md     # the v1 spec
 .github/workflows/ci.yml
 ```
