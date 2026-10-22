@@ -1,0 +1,378 @@
+---
+// Download buttons for the latest release, with an OS switcher that works
+// without JS. Used in the hero and the closing call to action; the script
+// below selects the visitor's OS and keeps every instance on the same tab.
+import { type ChannelRelease, type Downloads, getDownloads } from '../lib/releases';
+
+interface Props {
+  /** Unique per page, so each instance gets its own radio group. */
+  id: string;
+  /** Defaults to the releases fetched at build time. */
+  downloads?: Downloads;
+}
+
+const { id } = Astro.props;
+const downloads = Astro.props.downloads ?? (await getDownloads());
+const prod = downloads.production;
+const prereleases = [downloads.beta, downloads.alpha].filter(
+  (r): r is ChannelRelease => r !== null,
+);
+
+const OS_LIST = [
+  { key: 'macos', label: 'macOS' },
+  { key: 'windows', label: 'Windows' },
+  { key: 'linux', label: 'Linux' },
+] as const;
+
+const versionSuffix = prod?.version ? ` · v${prod.version}` : '';
+const channelName = (r: ChannelRelease) => (r.channel === 'beta' ? 'Beta' : 'Alpha');
+---
+
+<div class="download" data-download>
+  <fieldset class="tabs">
+    <legend class="visually-hidden">Operating system</legend>
+    {
+      OS_LIST.map((os) => (
+        <>
+          <input
+            class="visually-hidden"
+            type="radio"
+            name={`os-${id}`}
+            id={`${id}-${os.key}`}
+            value={os.key}
+            checked={os.key === 'macos'}
+          />
+          <label for={`${id}-${os.key}`}>{os.label}</label>
+        </>
+      ))
+    }
+  </fieldset>
+
+  <p class="desktop-note">Tandem is a desktop app.</p>
+
+  {/* macOS */}
+  <div class="panel" data-os="macos">
+    {
+      prod ? (
+        <>
+          <a class="button arch-arm" href={prod.files.macos.main.url}>
+            Download for macOS{versionSuffix}
+          </a>
+          <a class="button arch-x86" href={prod.files.macos.intel.url}>
+            Download for macOS{versionSuffix}
+          </a>
+          <p class="sub arch-arm">
+            For Apple silicon. Intel Mac? <a href={prod.files.macos.intel.url}>Download for Intel</a>
+          </p>
+          <p class="sub arch-x86">
+            For Intel. Apple silicon Mac?{' '}
+            <a href={prod.files.macos.main.url}>Download for Apple silicon</a>
+          </p>
+        </>
+      ) : (
+        <span class="button disabled">No stable release yet</span>
+      )
+    }
+    {
+      prereleases.length > 0 && (
+        <p class="prerelease">
+          Pre-releases:{' '}
+          {prereleases.map((r, i) => (
+            <>
+              {i > 0 && ' · '}
+              <a class="arch-arm" href={r.files.macos.main.url}>
+                {channelName(r)} v{r.version}
+              </a>
+              <a class="arch-x86" href={r.files.macos.intel.url}>
+                {channelName(r)} v{r.version}
+              </a>
+            </>
+          ))}
+        </p>
+      )
+    }
+    <details>
+      <summary>Unsigned build: opening it the first time</summary>
+      <p>
+        Tandem isn't signed or notarized yet, so macOS can't verify it. Drag Tandem to
+        Applications and open it. When macOS says it can't verify the app, close the message, open{' '}
+        <strong>System Settings → Privacy &amp; Security</strong>, and under Security choose{' '}
+        <strong>Open Anyway</strong> for Tandem, then confirm. You only do this once.
+      </p>
+      <p>
+        On Apple silicon, macOS may instead say Tandem "is damaged and can't be opened". The app is
+        fine; macOS says this about unsigned apps downloaded from the internet. Clear the download
+        quarantine in Terminal, then open Tandem again:
+      </p>
+      <pre><code>xattr -dr com.apple.quarantine /Applications/Tandem.app</code></pre>
+    </details>
+  </div>
+
+  {/* Windows */}
+  <div class="panel" data-os="windows">
+    {
+      prod ? (
+        <>
+          <a class="button" href={prod.files.windows.main.url}>
+            Download for Windows{versionSuffix}
+          </a>
+          <p class="sub">64-bit installer</p>
+        </>
+      ) : (
+        <span class="button disabled">No stable release yet</span>
+      )
+    }
+    {
+      prereleases.length > 0 && (
+        <p class="prerelease">
+          Pre-releases:{' '}
+          {prereleases.map((r, i) => (
+            <>
+              {i > 0 && ' · '}
+              <a href={r.files.windows.main.url}>
+                {channelName(r)} v{r.version}
+              </a>
+            </>
+          ))}
+        </p>
+      )
+    }
+    <details>
+      <summary>Unsigned build: opening it the first time</summary>
+      <p>
+        Tandem isn't signed yet. Run the installer. If SmartScreen shows "Windows protected your
+        PC", choose <strong>More info</strong>, then <strong>Run anyway</strong>.
+      </p>
+    </details>
+  </div>
+
+  {/* Linux */}
+  <div class="panel" data-os="linux">
+    {
+      prod ? (
+        <>
+          <a class="button" href={prod.files.linux.main.url}>
+            Download for Linux{versionSuffix}
+          </a>
+          <p class="sub">
+            AppImage. Also as <a href={prod.files.linux.deb.url}>.deb</a> and{' '}
+            <a href={prod.files.linux.rpm.url}>.rpm</a>
+          </p>
+        </>
+      ) : (
+        <span class="button disabled">No stable release yet</span>
+      )
+    }
+    {
+      prereleases.length > 0 && (
+        <p class="prerelease">
+          Pre-releases:{' '}
+          {prereleases.map((r, i) => (
+            <>
+              {i > 0 && ' · '}
+              <a href={r.files.linux.main.url}>
+                {channelName(r)} v{r.version}
+              </a>
+            </>
+          ))}
+        </p>
+      )
+    }
+    <details>
+      <summary>Installing on Linux</summary>
+      <p>
+        Install the <code>.deb</code> (<code>sudo apt install ./Tandem_*.deb</code>) or the{' '}
+        <code>.rpm</code>, or make the <code>.AppImage</code> executable
+        (<code>chmod +x Tandem_*.AppImage</code>) and run it.
+      </p>
+    </details>
+  </div>
+</div>
+
+<script>
+  import { type Os, detectOs } from '../lib/platform';
+
+  interface UAData {
+    platform: string;
+    mobile: boolean;
+    getHighEntropyValues?(hints: string[]): Promise<{ architecture?: string }>;
+  }
+
+  const uaData = (navigator as Navigator & { userAgentData?: UAData }).userAgentData;
+
+  const roots = document.querySelectorAll<HTMLElement>('[data-download]');
+
+  function select(os: Os) {
+    for (const root of roots) {
+      const input = root.querySelector<HTMLInputElement>(`input[value="${os}"]`);
+      if (input) input.checked = true;
+    }
+  }
+
+  const os = detectOs({
+    userAgent: navigator.userAgent,
+    maxTouchPoints: navigator.maxTouchPoints,
+    uaData,
+  });
+  if (os) select(os);
+  else for (const root of roots) root.dataset.platform = 'other';
+
+  // Chromium can tell Intel Macs apart; other browsers keep Apple silicon first.
+  if (os === 'macos' && uaData?.getHighEntropyValues) {
+    uaData
+      .getHighEntropyValues(['architecture'])
+      .then(({ architecture }) => {
+        if (architecture === 'x86') for (const root of roots) root.dataset.arch = 'x86';
+      })
+      .catch(() => {});
+  }
+
+  // Keep the hero and closing instances on the same tab.
+  for (const root of roots) {
+    root.addEventListener('change', (event) => {
+      const target = event.target as HTMLInputElement;
+      if (target.type === 'radio') select(target.value as Os);
+    });
+  }
+</script>
+
+<style>
+  .download {
+    display: grid;
+    gap: 14px;
+    justify-items: center;
+    text-align: center;
+  }
+
+  .tabs {
+    display: inline-flex;
+    gap: 2px;
+    margin: 0;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--column);
+  }
+
+  .tabs label {
+    padding: 6px 16px;
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 0.95rem;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .tabs label:hover {
+    color: var(--text);
+  }
+
+  .tabs input:checked + label {
+    background: var(--surface);
+    color: var(--text);
+    box-shadow: 0 1px 3px rgb(16 24 40 / 12%);
+  }
+
+  .tabs input:focus-visible + label {
+    outline: 2px solid var(--agent-ink);
+    outline-offset: 2px;
+  }
+
+  .desktop-note {
+    display: none;
+    margin: 0;
+    color: var(--muted);
+  }
+
+  .download[data-platform='other'] .desktop-note {
+    display: block;
+  }
+
+  .panel {
+    display: none;
+    gap: 10px;
+    justify-items: center;
+    max-width: 560px;
+  }
+
+  .download:has(input[value='macos']:checked) .panel[data-os='macos'],
+  .download:has(input[value='windows']:checked) .panel[data-os='windows'],
+  .download:has(input[value='linux']:checked) .panel[data-os='linux'] {
+    display: grid;
+  }
+
+  /* Apple silicon first; the script flags Intel Macs with data-arch="x86". */
+  .download:not([data-arch='x86']) .arch-x86,
+  .download[data-arch='x86'] .arch-arm {
+    display: none;
+  }
+
+  .button {
+    display: inline-block;
+    padding: 12px 22px;
+    border-radius: var(--radius);
+    background: #4446e0;
+    color: #ffffff;
+    font-weight: 600;
+    text-decoration: none;
+    box-shadow: var(--shadow);
+  }
+
+  .button:hover {
+    background: #3537c4;
+  }
+
+  .button.disabled {
+    background: var(--chip);
+    color: var(--muted);
+    box-shadow: none;
+    cursor: default;
+  }
+
+  .sub,
+  .prerelease {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+
+  .prerelease {
+    font-size: 0.8rem;
+  }
+
+  .sub a,
+  .prerelease a {
+    color: inherit;
+  }
+
+  .sub a:hover,
+  .prerelease a:hover {
+    color: var(--text);
+  }
+
+  details {
+    max-width: 520px;
+    color: var(--muted);
+    font-size: 0.9rem;
+    text-align: left;
+  }
+
+  summary {
+    cursor: pointer;
+    text-align: center;
+  }
+
+  details p {
+    margin: 10px 0 0;
+  }
+
+  pre {
+    overflow-x: auto;
+    margin: 10px 0 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+  }
+</style>

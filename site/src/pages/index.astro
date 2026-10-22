@@ -1,4 +1,5 @@
 ---
+import Download from '../components/Download.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 
@@ -9,28 +10,44 @@ import BaseLayout from '../layouts/BaseLayout.astro';
       Tasks are Markdown files in your repo. Agents claim and finish them through MCP, and you
       review what they did.
     </p>
+    <Download id="hero" />
   </section>
   <section id="how-it-works" class="container" aria-label="How it works"></section>
-  <section id="download" class="container" aria-label="Download"></section>
+  <section id="download" class="container closing" aria-labelledby="download-title">
+    <h2 id="download-title">Download Tandem</h2>
+    <Download id="closing" />
+  </section>
 </BaseLayout>
 
 <style>
   .intro {
+    display: grid;
+    gap: 32px;
     padding-block: 96px 64px;
     max-width: 760px;
     text-align: center;
   }
 
   h1 {
-    margin: 0 0 16px;
+    margin: 0;
     font-size: clamp(2rem, 5vw, 3.25rem);
     line-height: 1.1;
     letter-spacing: -0.02em;
   }
 
-  p {
+  .intro > p {
     margin: 0;
     color: var(--muted);
     font-size: 1.15rem;
+  }
+
+  .closing {
+    padding-block: 64px 96px;
+    text-align: center;
+  }
+
+  h2 {
+    margin: 0 0 24px;
+    font-size: 1.75rem;
   }
 </style>
