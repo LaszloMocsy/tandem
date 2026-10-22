@@ -55,3 +55,16 @@ CI runs the fmt, clippy, test, lint, typecheck and frontend test commands above 
   - LF line endings and exactly one trailing newline.
   - Write atomically: a temp file in `.tandem/`, then rename.
   - If a file fails to parse, mark it invalid and never overwrite it.
+
+## Tandem Tasks
+
+This repo tracks work in `.tandem/` through the `tandem` MCP server.
+
+- Before starting work, call `start_task` on the task (use `next_task` if none was given), and pass the agent id it returns as `agent` to every later tandem call for that task.
+- Never edit task frontmatter or the Changelog section by hand. Use the tandem tools.
+- Include the task file in your first commit (status in_progress) and your final commit (status finished).
+- Add a `Task: <id>` trailer to every commit for that task.
+- Use `log_progress` for notes and `set_blocked` when you need a decision from me.
+- Split large work into child tasks with `create_task` and `parent`. New tasks wait in backlog until I approve them; only start tasks in todo.
+- Call `finish_task` with a short summary before the final commit. Tick each acceptance criterion you met and explain each one you didn't. Never mark tasks reviewed.
+- If the tandem server is unreachable, ask me to open the app instead of editing files.
