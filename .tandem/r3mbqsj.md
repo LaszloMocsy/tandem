@@ -1,12 +1,13 @@
 ---
 id: r3mbqsj
 title: Download component with OS detection and switcher
-status: finished
+status: done
 priority: high
 parent: ybd67we
 labels: [area:website]
 depends_on: [tvszkej]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description
