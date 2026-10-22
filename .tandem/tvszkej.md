@@ -1,12 +1,13 @@
 ---
 id: tvszkej
 title: Release fetcher with channels and per-OS files
-status: finished
+status: done
 priority: high
 parent: ybd67we
 labels: [area:website]
 depends_on: [itnff5i]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description
