@@ -128,9 +128,7 @@ impl Repo {
             .status()
             .map_err(|e| format!("can't run cargo: {e}"))?;
         if !status.success() {
-            return Err(format!(
-                "cargo update --workspace failed; {CARGO_TOML} and {TAURI_CONF} are already changed"
-            ));
+            return Err("cargo update --workspace failed".to_owned());
         }
         Ok(())
     }

@@ -116,13 +116,39 @@ fn confirm(question: &str) -> Result<bool, String> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
+/// Changes all three version files or none: if any step fails, the files
+/// go back to how they were, so a later run still finds them agreeing.
 fn write(repo: &Repo, current: Version, new: Version) -> Result<(), String> {
     let (old, new) = (current.to_string(), new.to_string());
-    let cargo_toml = files::set_cargo_version(&repo.read(CARGO_TOML, None)?, &new)?;
-    let tauri_conf = files::set_tauri_version(&repo.read(TAURI_CONF, None)?, &old, &new)?;
-    repo.write(CARGO_TOML, &cargo_toml)?;
-    repo.write(TAURI_CONF, &tauri_conf)?;
-    repo.update_lock()?;
-    repo.version(None)?;
-    Ok(())
+    let originals = [
+        (CARGO_TOML, repo.read(CARGO_TOML, None)?),
+        (TAURI_CONF, repo.read(TAURI_CONF, None)?),
+        (CARGO_LOCK, repo.read(CARGO_LOCK, None)?),
+    ];
+    let cargo_toml = files::set_cargo_version(&originals[0].1, &new)?;
+    let tauri_conf = files::set_tauri_version(&originals[1].1, &old, &new)?;
+
+    let result = repo
+        .write(CARGO_TOML, &cargo_toml)
+        .and_then(|()| repo.write(TAURI_CONF, &tauri_conf))
+        .and_then(|()| repo.update_lock())
+        .and_then(|()| repo.version(None).map(drop));
+    let Err(err) = result else {
+        return Ok(());
+    };
+    let failed: Vec<_> = originals
+        .iter()
+        .filter_map(|(file, contents)| repo.write(file, contents).err())
+        .collect();
+    if failed.is_empty() {
+        Err(format!(
+            "{err}\nLeft {} as they were.",
+            VERSION_FILES.join(", ")
+        ))
+    } else {
+        Err(format!(
+            "{err}\nCouldn't restore the version files:\n  {}",
+            failed.join("\n  ")
+        ))
+    }
 }
