@@ -1,10 +1,11 @@
 ---
 id: ybd67we
 title: Landing page (#9)
-status: todo
+status: done
 priority: medium
 labels: [area:website, human]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description
@@ -20,14 +21,20 @@ Decisions:
 - Docs link stays out of the nav until #10 ships.
 
 ## Acceptance criteria
-- [ ] `bun run build` in `site/` produces a static site with no client JS beyond what the page needs
-- [ ] Download links always point at the latest release, with no manual edits per release
+- [x] `bun run build` in `site/` produces a static site with no client JS beyond what the page needs
+- [x] Download links always point at the latest release, with no manual edits per release
 - [ ] Lighthouse scores 95+ for performance and accessibility
-- [ ] PRs that touch `site/` get a Vercel preview deployment, and pushes to `main` deploy to `tandem.laszlomocsy.com`
-- [ ] Spec "Repo and open-source setup" is updated with `site/`
+- [x] PRs that touch `site/` get a Vercel preview deployment, and pushes to `main` deploy to `tandem.laszlomocsy.com`
+- [x] Spec "Repo and open-source setup" is updated with `site/`
 
 ## Changelog
 
 ### 2026-10-22 · claude-code · created
 
 ### 2026-10-22 · László Mócsy · approved
+
+### 2026-10-22 · László Mócsy · started
+
+### 2026-10-22 · László Mócsy · finished
+Created a brand new landing page for the application
+Unmet: 3 (not implemented)
