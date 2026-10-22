@@ -1,11 +1,12 @@
 ---
 id: t38dkrm
 title: Add site/ to the spec's repo layout
-status: finished
+status: done
 priority: low
 parent: ybd67we
 labels: [area:website]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description
