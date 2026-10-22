@@ -35,6 +35,7 @@ const api: SettingsApi = {
   setProjectName: never,
   resetProject: never,
   listAgents: never,
+  openLink: never,
 }
 
 function appView(settings: AppSettings, portText = String(settings.mcpPort), portError = null) {
@@ -48,6 +49,8 @@ function appView(settings: AppSettings, portText = String(settings.mcpPort), por
       onPortText={noop}
       onApplyPort={noop}
       onTheme={noop}
+      linkError={null}
+      onOpenLink={noop}
     />,
   )
 }
@@ -112,6 +115,8 @@ test('the App tab shows the running version, with the build for non-production b
         onPortText={noop}
         onApplyPort={noop}
         onTheme={noop}
+        linkError={null}
+        onOpenLink={noop}
         env={env}
         version={version}
       />,
@@ -123,6 +128,10 @@ test('the App tab shows the running version, with the build for non-production b
   )
   expect(view('dev', '0.1.0')).toContain('<code>Tandem v0.1.0 (DEV build)</code>')
   expect(view('production', '0.2.0')).toContain('aria-label="Copy version"')
+  // Release notes link to this version's release; a dev build's version may not be out yet.
+  expect(view('production', '0.2.0')).toContain('>Release notes</button>')
+  expect(view('dev', '0.1.0')).toContain('>Releases</button>')
+  expect(view('dev', '0.1.0')).toContain('>Repository</button>')
   // Without overrides it describes the running build, which tests run as dev.
   expect(appView(running)).toContain(`<code>Tandem v${APP_VERSION} (DEV build)</code>`)
 })

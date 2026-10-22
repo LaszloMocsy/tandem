@@ -13,11 +13,14 @@ use tandem_board_core::service::{Actor, Service};
 use tandem_board_core::store::TaskId;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_opener::OpenerExt;
 
+use crate::build_env::BuildEnv;
 use crate::dto::{
     AgentInfo, DeleteCheck, Finish, NewTask, TaskDetail, TaskEdit, TaskFilter, TaskSummary, Written,
 };
 use crate::error::Error;
+use crate::links::Link;
 use crate::projects::{AppSettingsInfo, Opened, ProjectInfo, Projects};
 
 type Result<T> = std::result::Result<T, Error>;
@@ -128,6 +131,18 @@ pub async fn choose_folder(app: AppHandle) -> Result<Option<String>> {
             .into_path()
             .map_err(|e| Error::new("invalid_argument", e.to_string()))?;
         Ok(Some(path.display().to_string()))
+    })
+    .await
+}
+
+/// Opens one of the app's links, such as the release notes, in the browser.
+#[tauri::command]
+pub async fn open_link(app: AppHandle, link: Link) -> Result<()> {
+    let url = link.url(BuildEnv::current(), &app.package_info().version.to_string());
+    blocking(move || {
+        app.opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| Error::internal(&e))
     })
     .await
 }

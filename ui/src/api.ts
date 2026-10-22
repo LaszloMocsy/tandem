@@ -24,6 +24,9 @@ export interface ProjectInfo {
 
 export type Theme = 'system' | 'light' | 'dark'
 
+/** A page the app opens in the browser; the desktop app builds its URL. */
+export type Link = 'repository' | 'releaseNotes'
+
 /** The app's settings, for every project on this machine. */
 export interface AppSettings {
   /** The port the MCP server is set to use. */
@@ -281,6 +284,8 @@ export const api = {
   removeProject: (project: string) => call<boolean>('remove_project', { project }),
   /** Asks for a folder with the system dialog; `null` if cancelled. */
   chooseFolder: () => call<string | null>('choose_folder'),
+  /** Opens the repository or the running version's release notes in the browser. */
+  openLink: (link: Link) => call<null>('open_link', { link }),
   /**
    * Sets the project's name in `.tandem/config.toml`; a blank name removes
    * it, so the folder name is used. Refused with `read_only` on a read-only

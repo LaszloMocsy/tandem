@@ -2,6 +2,7 @@ mod build_env;
 mod commands;
 mod dto;
 mod error;
+mod links;
 mod mcp;
 mod projects;
 
@@ -24,6 +25,7 @@ pub fn run() {
     let setup_cancel = cancel.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             open_main_window(app)?;
             let data_dir = app.path().app_data_dir()?;
@@ -56,6 +58,7 @@ pub fn run() {
             commands::open_project,
             commands::remove_project,
             commands::choose_folder,
+            commands::open_link,
             commands::get_app_settings,
             commands::set_mcp_port,
             commands::set_theme,
