@@ -1,0 +1,58 @@
+name: Redeploy site
+
+# The landing page reads the GitHub releases at build time, so publishing a
+# release must rebuild it to update the download links. Releases start as
+# drafts (see release.yml), so `published` is the event that matters; it also
+# fires for pre-releases, which the page lists when they're newer than
+# production.
+#
+# The Vercel deploy hook builds the head of main. Its URL is stored as the
+# VERCEL_DEPLOY_HOOK_URL secret and works without other credentials, so it
+# must never be printed: it only reaches curl through an environment
+# variable, and GitHub masks it in logs.
+#
+# Skipping unaffected builds: the project skips builds for commits that don't
+# touch site/. Vercel's docs describe that check per commit and don't say
+# whether it also applies to deploy-hook builds (checked 2026-10-22:
+# https://vercel.com/docs/monorepos#skipping-unaffected-projects and
+# https://vercel.com/docs/deploy-hooks). The release commit usually doesn't
+# touch site/, so if Vercel skips the hook's build, the deployment shows as
+# "Skipped" in the dashboard. Confirm on the first release after Vercel is set
+# up. If it's skipped, either turn the setting off (every push to main then
+# rebuilds the site) or replace the hook with a CLI deploy here
+# (`vercel deploy --prod` with a VERCEL_TOKEN secret), which isn't a Git
+# build and so isn't subject to the skip.
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: site-deploy
+  cancel-in-progress: true
+
+jobs:
+  redeploy:
+    name: Trigger the Vercel deploy hook
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Call the deploy hook
+        env:
+          HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if [ -z "$HOOK_URL" ]; then
+            echo "::error title=Missing secret::VERCEL_DEPLOY_HOOK_URL is not set. Create a deploy hook for main in the Vercel project (Settings → Git → Deploy Hooks) and add its URL as a repository secret named VERCEL_DEPLOY_HOOK_URL."
+            exit 1
+          fi
+          echo "Release $TAG published; asking Vercel to rebuild the site."
+          # -f fails on HTTP errors; curl's messages name the host, not the URL.
+          response=$(curl -fsS --retry 3 -X POST "$HOOK_URL")
+          job=$(printf '%s' "$response" | jq -r '.job.id // empty')
+          if [ -z "$job" ]; then
+            echo "::error::The deploy hook answered without a job id."
+            exit 1
+          fi
+          echo "Vercel queued deployment job $job."
