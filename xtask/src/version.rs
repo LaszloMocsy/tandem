@@ -88,6 +88,18 @@ impl Version {
     }
 }
 
+/// The tag that release notes for `tag` start from: the highest earlier
+/// production tag for a production release, so its notes cover every
+/// pre-release since the last one, or the highest earlier tag of any kind for
+/// a pre-release. Tags that aren't release tags are ignored.
+pub fn previous_tag<'a>(tag: Version, tags: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    tags.into_iter()
+        .filter_map(|t| Some((Version::parse_tag(t).ok()?, t)))
+        .filter(|(v, _)| *v < tag && (tag.pre.is_some() || v.pre.is_none()))
+        .max_by_key(|(v, _)| *v)
+        .map(|(_, t)| t)
+}
+
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> Ordering {
         self.key().cmp(&other.key())
@@ -178,6 +190,49 @@ mod tests {
         for tag in ["0.2.0", "v", "", "V0.2.0", "vv0.2.0", "v0.2.0-rc.1"] {
             assert!(Version::parse_tag(tag).is_err(), "accepted {tag:?}");
         }
+    }
+
+    #[test]
+    fn production_notes_start_from_the_last_production_tag() {
+        let tags = [
+            "v0.1.0",
+            "v0.2.0-alpha.1",
+            "v0.2.0-beta.1",
+            "v0.2.0",
+            "v0.3.0-alpha.1",
+            "v0.3.0-alpha.2",
+            "v0.3.0-beta.1",
+            "v0.3.0",
+            "v1.0.0",
+            "nightly",
+            "v0.2.5-rc.1",
+        ];
+        let prev = |tag: &str| previous_tag(Version::parse_tag(tag).unwrap(), tags);
+        assert_eq!(prev("v0.3.0"), Some("v0.2.0"));
+        assert_eq!(prev("v0.2.0"), Some("v0.1.0"));
+        assert_eq!(prev("v0.1.0"), None);
+        // A tag that isn't in the list yet works the same.
+        assert_eq!(prev("v0.4.0"), Some("v0.3.0"));
+    }
+
+    #[test]
+    fn pre_release_notes_start_from_the_last_tag_of_any_kind() {
+        let tags = [
+            "v0.1.0",
+            "v0.2.0-alpha.1",
+            "v0.2.0-alpha.2",
+            "v0.2.0-beta.1",
+            "v0.2.0",
+        ];
+        let prev = |tag: &str| previous_tag(Version::parse_tag(tag).unwrap(), tags);
+        assert_eq!(prev("v0.2.0-alpha.1"), Some("v0.1.0"));
+        assert_eq!(prev("v0.2.0-alpha.2"), Some("v0.2.0-alpha.1"));
+        assert_eq!(prev("v0.2.0-beta.1"), Some("v0.2.0-alpha.2"));
+        assert_eq!(prev("v0.3.0-alpha.1"), Some("v0.2.0"));
+        assert_eq!(
+            previous_tag(Version::parse("0.1.0-alpha.1").unwrap(), tags),
+            None
+        );
     }
 
     #[test]

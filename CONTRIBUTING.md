@@ -76,6 +76,12 @@ For maintainers:
 4. The Release workflow checks that the tag matches the version (`cargo xtask version check --tag`), then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
 5. Check the assets, edit the notes, and publish the draft.
 
+The draft's notes list the pull requests merged since the previous release: since the last production release for a production version, so they cover its alpha and beta releases too, or since the last release of any kind for a pre-release. `.github/release.yml` groups them by label: `enhancement` under New features, `bug` under Fixes, `documentation` under Documentation, and the rest under Other changes. So that the feature pull requests show up:
+
+- Label feature pull requests as you merge them into the version branch.
+- Merge the version pull request into `main` with a merge commit, not a squash, which would hide the feature pull requests' commits.
+- Label the version pull request `skip-release-notes`, since its feature pull requests are already listed.
+
 Pushing a `v*` tag by hand still starts a release, for example to retry one.
 
 The builds are not signed yet; [Installing an unsigned build](README.md#installing-an-unsigned-build) explains what users see.

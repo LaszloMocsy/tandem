@@ -23,7 +23,10 @@ commands:
   version bump VERSION     set the version in all three; VERSION is X.Y.Z,
                            X.Y.Z-alpha.N or X.Y.Z-beta.N and must be higher
   version env TAG          print the build environment for a release tag:
-                           alpha, beta, or nothing for production";
+                           alpha, beta, or nothing for production
+  version previous-tag TAG print the tag release notes for TAG start from: the
+                           last production tag for a production TAG, the last
+                           tag of any kind for a pre-release; nothing if none";
 
 /// The files that hold the app version, relative to the repo root.
 const CARGO_TOML: &str = "Cargo.toml";
@@ -61,6 +64,15 @@ fn run(args: &[&str]) -> Result<(), String> {
             println!("{current}");
         }
         ["version", "bump", new] => bump(&root(), new)?,
+        ["version", "previous-tag", tag] => {
+            let tag = Version::parse_tag(tag)?;
+            let tags = git(&root(), &["tag", "--list", "v*"])?;
+            if !tags.status.success() {
+                return Err("can't list the git tags".to_owned());
+            }
+            let tags = String::from_utf8_lossy(&tags.stdout);
+            println!("{}", version::previous_tag(tag, tags.lines()).unwrap_or(""));
+        }
         ["version", "env", tag] => {
             let channel = Version::parse_tag(tag)?.channel();
             println!("{}", channel.map_or("", |c| c.name()));

@@ -1,12 +1,13 @@
 ---
 id: wybnwb4
 title: Tag automatically when a version branch merges into main
-status: finished
+status: done
 priority: medium
 parent: b85qh8f
 labels: [area:release, feat/versioning]
 depends_on: [tenmi47]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description
