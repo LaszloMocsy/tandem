@@ -18,6 +18,13 @@ export function buildEnvLabel(env: BuildEnv, version: string): string {
   return env === 'dev' ? label : `${label} (v${version})`
 }
 
+/** The version line in Settings → About, such as `Tandem v0.2.0` or
+ * `Tandem v0.2.0-beta.1 (BETA build)`, ready to paste into a bug report. */
+export function versionText(env: BuildEnv, version: string): string {
+  const text = `Tandem v${version}`
+  return env === 'production' ? text : `${text} (${env.toUpperCase()} build)`
+}
+
 /** Marks the page with `env` and its label, or clears both in production. */
 export function applyBuildEnv(
   env: BuildEnv = BUILD_ENV,

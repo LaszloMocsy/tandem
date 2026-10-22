@@ -1,5 +1,6 @@
 import { useEffect, useId, useState, type KeyboardEvent } from 'react'
-import type { Api, AppSettings, ProjectInfo, Theme } from './api.ts'
+import type { Api, AppSettings, Link, ProjectInfo, Theme } from './api.ts'
+import { APP_VERSION, BUILD_ENV, type BuildEnv, versionText } from './buildEnv.ts'
 import { Dialog, ResetLocalStateForm } from './dialogs.tsx'
 import { errorMessage } from './edit.ts'
 import { CopyButton } from './panels.tsx'
@@ -12,7 +13,13 @@ export type SettingsTab = 'app' | 'project'
 /** The commands the Settings page uses. */
 export type SettingsApi = Pick<
   Api,
-  'getAppSettings' | 'setMcpPort' | 'setTheme' | 'setProjectName' | 'resetProject' | 'listAgents'
+  | 'getAppSettings'
+  | 'setMcpPort'
+  | 'setTheme'
+  | 'setProjectName'
+  | 'resetProject'
+  | 'listAgents'
+  | 'openLink'
 >
 
 const THEMES: { theme: Theme; label: string }[] = [
@@ -119,6 +126,7 @@ function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () =>
   const [portText, setPortText] = useState<string | null>(null)
   const [portError, setPortError] = useState<string | null>(null)
   const [themeError, setThemeError] = useState<string | null>(null)
+  const [linkError, setLinkError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {
@@ -161,6 +169,15 @@ function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () =>
     }
   }
 
+  async function openLink(link: Link) {
+    setLinkError(null)
+    try {
+      await api.openLink(link)
+    } catch (error) {
+      setLinkError(errorMessage(error))
+    }
+  }
+
   if (settings === null) {
     return loadError ? (
       <p className="field-error" role="alert">
@@ -183,11 +200,13 @@ function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () =>
       }}
       onApplyPort={(port) => void applyPort(port)}
       onTheme={(theme) => void chooseTheme(theme)}
+      linkError={linkError}
+      onOpenLink={(link) => void openLink(link)}
     />
   )
 }
 
-/** The App tab: the MCP server's port and the theme. */
+/** The App tab: the MCP server's port, the theme, and the running version. */
 export function AppSettingsView({
   settings,
   portText,
@@ -197,6 +216,10 @@ export function AppSettingsView({
   onPortText,
   onApplyPort,
   onTheme,
+  linkError,
+  onOpenLink,
+  env = BUILD_ENV,
+  version = APP_VERSION,
 }: {
   settings: AppSettings
   portText: string
@@ -206,8 +229,14 @@ export function AppSettingsView({
   onPortText: (text: string) => void
   onApplyPort: (port: number) => void
   onTheme: (theme: Theme) => void
+  linkError: string | null
+  onOpenLink: (link: Link) => void
+  /** The build to describe in About; the running one unless a test says otherwise. */
+  env?: BuildEnv
+  version?: string
 }) {
   const parsed = parsePort(portText)
+  const about = versionText(env, version)
   const port = 'port' in parsed ? parsed.port : null
   // The same port again only makes sense to retry a server that isn't running.
   const unchanged = port === settings.mcpPort && settings.mcpUrl !== null
@@ -294,6 +323,32 @@ export function AppSettingsView({
           </p>
         )}
         <p className="hint">System follows your computer's light or dark appearance.</p>
+      </section>
+      <section className="settings-section" aria-label="About">
+        <h3>About</h3>
+        <dl className="settings-values">
+          <dt>Version</dt>
+          <dd>
+            <code>{about}</code>
+            <CopyButton text={about} label="Copy version" />
+          </dd>
+        </dl>
+        <div className="settings-row">
+          <button type="button" className="link" onClick={() => onOpenLink('releaseNotes')}>
+            {env === 'dev' ? 'Releases' : 'Release notes'}
+          </button>
+          <button type="button" className="link" onClick={() => onOpenLink('repository')}>
+            Repository
+          </button>
+        </div>
+        {linkError && (
+          <p className="field-error" role="alert">
+            {linkError}
+          </p>
+        )}
+        <p className="hint">
+          Include the version when you report a bug. Links open in your browser.
+        </p>
       </section>
     </>
   )

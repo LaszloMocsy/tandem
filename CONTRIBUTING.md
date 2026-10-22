@@ -56,20 +56,46 @@ Changes to the board should also be tried in the running app with `cargo tauri d
 - Keep each commit to one topic, with its tests in the same commit.
 - When you work on a Tandem task, add a `Task: <id>` trailer to every commit for it.
 
+## Branches
+
+Feature branches merge into a `version/vX.Y.Z` branch, and only version branches merge into `main`. Branch your feature from the version branch it will go into, and open its pull request against that branch. Every release, pre-releases included, gets its own version branch named after its exact version, such as `version/v0.2.0-alpha.1`. The Version workflow checks every pull request into `main`: it must come from a `version/vX.Y.Z` branch whose name matches the version in `Cargo.toml`, `desktop/tauri.conf.json` and `Cargo.lock`, and that version must be higher than `main`'s. A feature pull request into a version branch must keep that branch's version. Run the same check locally for your branch's pull request, or any other by number (it uses `gh`):
+
+```sh
+cargo xtask version check pr
+cargo xtask version check pr 12
+```
+
+For maintainers, once per repository:
+
+- Make **Version** a required status check for `main` (Settings → Branches → branch protection), ideally with "Require branches to be up to date before merging", so the comparison is against the latest `main`. Until then the check reports but doesn't block.
+- Create the `skip-release-notes` label, which keeps version pull requests out of the release notes (see Releasing).
+
 ## Releasing
 
 For maintainers:
 
-1. Set the new version in both `Cargo.toml` (`[workspace.package]`) and `desktop/tauri.conf.json`, run `cargo build` to update `Cargo.lock`, and commit.
-2. Tag the commit and push the tag:
+1. Create the version branch and set the version in one step, then commit the result:
 
    ```sh
-   git tag v0.2.0
-   git push origin v0.2.0
+   cargo xtask version --next minor --create-branch             # 0.1.0 -> 0.2.0 on version/v0.2.0
+   cargo xtask version --next minor --pre alpha --create-branch # 0.1.0 -> 0.2.0-alpha.1
+   cargo xtask version --next beta --create-branch              # 0.2.0-alpha.2 -> 0.2.0-beta.1
+   cargo xtask version --next release --create-branch           # 0.2.0-beta.1 -> 0.2.0
    ```
 
-3. The Release workflow checks that the tag matches both versions, then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
-4. Check the assets, edit the notes, and publish the draft.
+   It updates `Cargo.toml` (`[workspace.package]`), `desktop/tauri.conf.json` and `Cargo.lock`. Add `--dry-run` to see the change first, or use `--exact X.Y.Z` to set a version directly; lowering one asks first. `cargo xtask version` lists every option.
+2. Merge the release's feature branches into the version branch, then open a pull request from it into `main`.
+3. Merging that pull request runs the Tag workflow: it tags the merge commit `vX.Y.Z` and starts the Release workflow for the tag. It refuses a tag that already exists.
+4. The Release workflow checks that the tag matches the version (`cargo xtask version check release`), then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
+5. Check the assets, edit the notes, and publish the draft.
+
+The draft's notes list the pull requests merged since the previous release: since the last production release for a production version, so they cover its alpha and beta releases too, or since the last release of any kind for a pre-release. `.github/release.yml` groups them by label: `enhancement` under New features, `bug` under Fixes, `documentation` under Documentation, and the rest under Other changes. So that the feature pull requests show up:
+
+- Label feature pull requests as you merge them into the version branch.
+- Merge the version pull request into `main` with a merge commit, not a squash, which would hide the feature pull requests' commits.
+- Label the version pull request `skip-release-notes`, since its feature pull requests are already listed.
+
+To retry a failed release, delete its draft and run the Release workflow on the tag again: `gh workflow run release.yml --ref vX.Y.Z`. Pushing a new `v*` tag by hand also starts a release.
 
 The builds are not signed yet; [Installing an unsigned build](README.md#installing-an-unsigned-build) explains what users see.
 

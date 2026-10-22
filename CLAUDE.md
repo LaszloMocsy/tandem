@@ -5,10 +5,11 @@ Tandem is a local Tauri desktop app with a kanban board for tasks that you and A
 ## Layout
 
 ```txt
-Cargo.toml       # workspace: core, mcp, desktop
+Cargo.toml       # workspace: core, mcp, desktop, xtask
 core/            # tandem-board-core: store, index, service, watcher, git
 mcp/             # tandem-board-mcp: MCP tool handlers on top of core
 desktop/         # tandem-board-desktop: Tauri 2 shell, tauri.conf.json, commands
+xtask/           # repo tooling, run as `cargo xtask`: version checks and bumps
 ui/              # React + TypeScript + Vite frontend, managed with bun
 site/            # landing page: static Astro site, managed with bun, on Vercel
 docs/spec.md     # the v1 spec
@@ -33,6 +34,15 @@ bun install
 bun run lint        # oxlint
 bun run typecheck   # tsc -b
 bun run test        # vitest
+```
+
+Version tooling, from anywhere in the repo (see CONTRIBUTING.md for the release flow):
+
+```sh
+cargo xtask version                       # list every command and option
+cargo xtask version current               # print the app version
+cargo xtask version --next minor --dry-run   # preview a change; --next/--exact set it in all three files
+cargo xtask version check pr              # the checks CI runs on this branch's pull request
 ```
 
 App, from the repo root (needs the Tauri CLI: `cargo install tauri-cli --version "^2"`):

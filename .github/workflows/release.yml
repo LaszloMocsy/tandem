@@ -3,10 +3,12 @@ name: Release
 # Pushing a tag such as v0.1.0 builds macOS, Windows and Linux bundles into a
 # draft GitHub release, which you then review and publish by hand. Tags
 # vX.Y.Z-alpha.N and vX.Y.Z-beta.N build labelled ALPHA and BETA pre-releases;
-# any other tag fails.
+# any other tag fails. The Tag workflow starts it through workflow_dispatch
+# on the tag it creates; a dispatch on a branch fails.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 concurrency:
   group: release-${{ github.ref }}
@@ -28,28 +30,43 @@ jobs:
       release-id: ${{ steps.create.outputs.id }}
       build-env: ${{ steps.env.outputs.env }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Check this runs for a tag
+        if: github.ref_type != 'tag'
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          echo "::error::Release runs for a tag, not the branch $REF"
+          exit 1
 
-      # alpha, beta, or empty for a production release.
+      # Every tag, so the release notes can start from the previous release.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # For the version tooling in xtask/.
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+
+      # alpha, beta, or empty for a production release. Fails on any other tag.
       - name: Read the build environment from the tag
         id: env
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          env=$(sh .github/scripts/build-env.sh "$TAG")
+          env=$(cargo --locked xtask version env "$TAG")
           echo "env=$env" >> "$GITHUB_OUTPUT"
 
+      # Cargo.toml, tauri.conf.json and Cargo.lock must agree with the tag.
       - name: Check the tag matches the app version
         env:
           TAG: ${{ github.ref_name }}
-        run: |
-          app=$(jq -r .version desktop/tauri.conf.json)
-          crates=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-          if [ "$TAG" != "v$app" ] || [ "$TAG" != "v$crates" ]; then
-            echo "::error::Tag $TAG does not match tauri.conf.json ($app) and Cargo.toml ($crates)"
-            exit 1
-          fi
+        run: cargo --locked xtask version check release "$TAG"
 
+      # GitHub generates the notes from the pull requests merged since the
+      # previous release, grouped by .github/release.yml: since the last
+      # production tag for a production release, so it covers the
+      # pre-releases too, or since the last tag for a pre-release.
       - name: Create the draft release
         id: create
         env:
@@ -57,11 +74,19 @@ jobs:
           TAG: ${{ github.ref_name }}
           PRERELEASE: ${{ steps.env.outputs.env != '' }}
         run: |
+          previous=$(cargo --locked xtask version previous-tag "$TAG")
+          args=(-f tag_name="$TAG")
+          if [ -n "$previous" ]; then args+=(-f previous_tag_name="$previous"); fi
+          changes=$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" "${args[@]}" --jq .body)
+
           cat > notes.md <<EOF
           Download the bundle for your platform below.
 
           These builds are not signed, so macOS and Windows warn before the first launch. See [Installing an unsigned build](https://github.com/$GITHUB_REPOSITORY#installing-an-unsigned-build) in the README.
+
           EOF
+          printf '%s\n' "$changes" >> notes.md
+
           id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
             -f tag_name="$TAG" -f name="Tandem $TAG" -F draft=true -F prerelease="$PRERELEASE" -F body=@notes.md --jq .id)
           echo "id=$id" >> "$GITHUB_OUTPUT"

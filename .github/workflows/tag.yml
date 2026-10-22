@@ -1,0 +1,68 @@
+name: Tag
+
+# Merging a version/vX.Y.Z pull request into main tags the merge commit
+# vX.Y.Z and starts the Release workflow for that tag.
+#
+# A tag pushed with GITHUB_TOKEN doesn't trigger other workflows, so this
+# starts Release through workflow_dispatch on the tag instead, the one event
+# GITHUB_TOKEN may trigger. No extra token or secret is needed.
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+
+permissions: {}
+
+concurrency:
+  group: tag-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+# The rust-toolchain action is pinned to a commit SHA and there's no build
+# cache, since this workflow can push tags.
+
+jobs:
+  tag:
+    name: Tag and start the release
+    if: github.event.pull_request.merged && startsWith(github.head_ref, 'version/')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+
+      # On the merge commit, the version files must agree with each other and
+      # with the version/vX.Y.Z branch name. The pull request is read from the
+      # Actions environment; since it's merged, main isn't compared.
+      - name: Read the version
+        id: version
+        run: |
+          version=$(cargo --locked xtask version check pr)
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists; it was left as it is"
+            exit 1
+          fi
+          git tag "$TAG" "$SHA"
+          git push origin "refs/tags/$TAG"
+
+      - name: Start the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          echo "Tagged $TAG and started the Release workflow for it."
