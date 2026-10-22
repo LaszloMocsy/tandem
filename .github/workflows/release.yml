@@ -61,7 +61,7 @@ jobs:
       - name: Check the tag matches the app version
         env:
           TAG: ${{ github.ref_name }}
-        run: cargo --locked xtask version check --tag "$TAG"
+        run: cargo --locked xtask version check release "$TAG"
 
       # GitHub generates the notes from the pull requests merged since the
       # previous release, grouped by .github/release.yml: since the last

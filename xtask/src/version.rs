@@ -20,6 +20,20 @@ impl Channel {
     }
 }
 
+/// What `cargo xtask version --next` moves to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Major,
+    Minor,
+    Patch,
+    /// The next alpha of the same pre-release.
+    Alpha,
+    /// The next beta of the same pre-release.
+    Beta,
+    /// The production version a pre-release leads to.
+    Release,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Version {
     pub major: u64,
@@ -76,6 +90,78 @@ impl Version {
         self.pre.map(|(channel, _)| channel)
     }
 
+    /// The version after this one at `level`. `major`, `minor` and `patch`
+    /// raise the numbers and start a pre-release when `pre` is given:
+    /// `0.1.0` → `0.2.0`, or `0.2.0-alpha.1` with `pre`. `alpha` and `beta`
+    /// continue a pre-release, and `release` ends one: `0.2.0-beta.2` →
+    /// `0.2.0`. A result that isn't higher, or is ambiguous, is an error.
+    pub fn next(self, level: Level, pre: Option<Channel>) -> Result<Version, String> {
+        let overflow = || format!("{self} can't go any higher");
+        let core = |major, minor, patch| Version {
+            major,
+            minor,
+            patch,
+            pre: pre.map(|channel| (channel, 1)),
+        };
+        if pre.is_some() && matches!(level, Level::Alpha | Level::Beta | Level::Release) {
+            return Err(format!(
+                "--pre only goes with --next major, minor or patch, not {}",
+                level.name()
+            ));
+        }
+        let next = match level {
+            Level::Major => core(self.major.checked_add(1).ok_or_else(overflow)?, 0, 0),
+            Level::Minor => core(
+                self.major,
+                self.minor.checked_add(1).ok_or_else(overflow)?,
+                0,
+            ),
+            Level::Patch => core(
+                self.major,
+                self.minor,
+                self.patch.checked_add(1).ok_or_else(overflow)?,
+            ),
+            Level::Alpha | Level::Beta => {
+                let channel = if level == Level::Alpha {
+                    Channel::Alpha
+                } else {
+                    Channel::Beta
+                };
+                let Some((current, n)) = self.pre else {
+                    return Err(format!(
+                        "{self} isn't a pre-release, so the next {0} is ambiguous; use \
+                         --next major, minor or patch with --pre {0}",
+                        channel.name()
+                    ));
+                };
+                let n = match current.cmp(&channel) {
+                    Ordering::Less => 1,
+                    Ordering::Equal => n.checked_add(1).ok_or_else(overflow)?,
+                    Ordering::Greater => {
+                        return Err(format!(
+                            "{self} is already past {}; use --next beta or release",
+                            channel.name()
+                        ));
+                    }
+                };
+                Version {
+                    pre: Some((channel, n)),
+                    ..self
+                }
+            }
+            Level::Release => {
+                if self.pre.is_none() {
+                    return Err(format!(
+                        "{self} is already a release; use --next major, minor or patch"
+                    ));
+                }
+                Version { pre: None, ..self }
+            }
+        };
+        debug_assert!(next > self, "{next} isn't higher than {self}");
+        Ok(next)
+    }
+
     /// Orders pre-releases before their production version, alpha before
     /// beta, as SemVer precedence does for these forms.
     fn key(&self) -> (u64, u64, u64, u8, u64) {
@@ -98,6 +184,19 @@ pub fn previous_tag<'a>(tag: Version, tags: impl IntoIterator<Item = &'a str>) -
         .filter(|(v, _)| *v < tag && (tag.pre.is_some() || v.pre.is_none()))
         .max_by_key(|(v, _)| *v)
         .map(|(_, t)| t)
+}
+
+impl Level {
+    pub fn name(self) -> &'static str {
+        match self {
+            Level::Major => "major",
+            Level::Minor => "minor",
+            Level::Patch => "patch",
+            Level::Alpha => "alpha",
+            Level::Beta => "beta",
+            Level::Release => "release",
+        }
+    }
 }
 
 impl Ord for Version {
@@ -232,6 +331,62 @@ mod tests {
         assert_eq!(
             previous_tag(Version::parse("0.1.0-alpha.1").unwrap(), tags),
             None
+        );
+    }
+
+    #[test]
+    fn next_raises_the_numbers() {
+        let next = |s: &str, level, pre| v(s).next(level, pre).unwrap().to_string();
+        assert_eq!(next("0.1.0", Level::Major, None), "1.0.0");
+        assert_eq!(next("0.1.0", Level::Minor, None), "0.2.0");
+        assert_eq!(next("0.1.0", Level::Patch, None), "0.1.1");
+        assert_eq!(next("1.2.3", Level::Minor, None), "1.3.0");
+        assert_eq!(
+            next("0.1.0", Level::Minor, Some(Channel::Alpha)),
+            "0.2.0-alpha.1"
+        );
+        assert_eq!(
+            next("0.1.0", Level::Major, Some(Channel::Beta)),
+            "1.0.0-beta.1"
+        );
+        // From a pre-release the numbers still go up; `release` ends it instead.
+        assert_eq!(next("0.2.0-beta.1", Level::Patch, None), "0.2.1");
+        assert_eq!(
+            next("0.2.0-beta.1", Level::Minor, Some(Channel::Alpha)),
+            "0.3.0-alpha.1"
+        );
+    }
+
+    #[test]
+    fn next_continues_and_ends_pre_releases() {
+        let next = |s: &str, level| v(s).next(level, None).unwrap().to_string();
+        assert_eq!(next("0.2.0-alpha.1", Level::Alpha), "0.2.0-alpha.2");
+        assert_eq!(next("0.2.0-alpha.9", Level::Alpha), "0.2.0-alpha.10");
+        assert_eq!(next("0.2.0-alpha.3", Level::Beta), "0.2.0-beta.1");
+        assert_eq!(next("0.2.0-beta.1", Level::Beta), "0.2.0-beta.2");
+        assert_eq!(next("0.2.0-alpha.2", Level::Release), "0.2.0");
+        assert_eq!(next("0.2.0-beta.2", Level::Release), "0.2.0");
+    }
+
+    #[test]
+    fn next_refuses_ambiguous_or_lower_results() {
+        let err = |s: &str, level, pre| v(s).next(level, pre).unwrap_err();
+        assert!(err("0.1.0", Level::Alpha, None).contains("ambiguous"));
+        assert!(err("0.1.0", Level::Beta, None).contains("ambiguous"));
+        assert!(err("0.2.0-beta.2", Level::Alpha, None).contains("already past alpha"));
+        assert!(err("0.2.0", Level::Release, None).contains("already a release"));
+        assert!(err("0.2.0-alpha.1", Level::Release, Some(Channel::Beta)).contains("--pre"));
+        assert!(err("0.2.0-alpha.1", Level::Alpha, Some(Channel::Alpha)).contains("--pre"));
+        let max = Version {
+            major: u64::MAX,
+            minor: 0,
+            patch: 0,
+            pre: None,
+        };
+        assert!(
+            max.next(Level::Major, None)
+                .unwrap_err()
+                .contains("can't go any higher")
         );
     }
 

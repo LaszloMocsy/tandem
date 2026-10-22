@@ -23,18 +23,14 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
+      # The merge commit, so the version files are checked as they'd land.
       - uses: actions/checkout@v7
-
-      # The checkout is the merge commit; main's tip is the version to beat.
-      - name: Fetch main
-        run: git fetch --no-tags --depth=1 origin main
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      # The branch name is untrusted input, so it goes through env.
+      # Reads the pull request from the Actions environment and fetches main
+      # to compare against.
       - name: Check the version
-        env:
-          BRANCH: ${{ github.head_ref }}
-        run: cargo --locked xtask version check --base origin/main --branch "$BRANCH"
+        run: cargo --locked xtask version check pr

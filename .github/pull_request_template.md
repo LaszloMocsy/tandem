@@ -11,7 +11,7 @@
 
 ## Release
 
-- [ ] The version is set with `cargo xtask version bump X.Y.Z` and is higher than main's
+- [ ] The version is set with `cargo xtask version --next` or `--exact`, and `cargo xtask version check pr` passes
 - [ ] Every feature branch for this release is merged into the version branch
 - [ ] The feature pull requests have clear titles and an `enhancement`, `bug` or `documentation` label; they become the release notes
 - [ ] This pull request is labelled `skip-release-notes`, and will be merged with a merge commit, not a squash

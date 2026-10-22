@@ -38,15 +38,13 @@ jobs:
         with:
           toolchain: stable
 
-      # The version files on the merge commit must agree with each other and
-      # with the branch name. The branch name is untrusted input, so it goes
-      # through env.
+      # On the merge commit, the version files must agree with each other and
+      # with the version/vX.Y.Z branch name. The pull request is read from the
+      # Actions environment; since it's merged, main isn't compared.
       - name: Read the version
         id: version
-        env:
-          BRANCH: ${{ github.head_ref }}
         run: |
-          version=$(cargo --locked xtask version check --branch "$BRANCH")
+          version=$(cargo --locked xtask version check pr)
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
       - name: Create the tag

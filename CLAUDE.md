@@ -39,9 +39,10 @@ bun run test        # vitest
 Version tooling, from anywhere in the repo (see CONTRIBUTING.md for the release flow):
 
 ```sh
-cargo xtask version                       # print the app version
-cargo xtask version bump X.Y.Z            # set it in Cargo.toml, tauri.conf.json and Cargo.lock
-cargo xtask version check --base origin/main --branch "$(git branch --show-current)"
+cargo xtask version                       # list every command and option
+cargo xtask version current               # print the app version
+cargo xtask version --next minor --dry-run   # preview a change; --next/--exact set it in all three files
+cargo xtask version check pr              # the checks CI runs on this branch's pull request
 ```
 
 App, from the repo root (needs the Tauri CLI: `cargo install tauri-cli --version "^2"`):

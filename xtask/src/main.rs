@@ -1,42 +1,36 @@
 //! Repo tooling, run as `cargo xtask <command>` from anywhere in the repo.
+//! `cargo xtask version` prints what it can do.
 
+mod change;
 mod check;
+mod cli;
 mod files;
+mod repo;
 mod version;
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
-use std::{env, fs};
+use std::env;
+use std::process::ExitCode;
 
-use version::Version;
+use clap::{CommandFactory, Parser};
 
-const USAGE: &str = "\
-usage: cargo xtask <command>
-
-commands:
-  version                  print the app version
-  version check [--tag T] [--base REF] [--branch B]
-                           check that Cargo.toml, desktop/tauri.conf.json and
-                           Cargo.lock agree; with --tag, that T is vVERSION;
-                           with --base, that VERSION is higher than on git ref
-                           REF; with --branch, that B is version/vVERSION
-  version bump VERSION     set the version in all three; VERSION is X.Y.Z,
-                           X.Y.Z-alpha.N or X.Y.Z-beta.N and must be higher
-  version env TAG          print the build environment for a release tag:
-                           alpha, beta, or nothing for production
-  version previous-tag TAG print the tag release notes for TAG start from: the
-                           last production tag for a production TAG, the last
-                           tag of any kind for a pre-release; nothing if none";
-
-/// The files that hold the app version, relative to the repo root.
-const CARGO_TOML: &str = "Cargo.toml";
-const TAURI_CONF: &str = "desktop/tauri.conf.json";
-const CARGO_LOCK: &str = "Cargo.lock";
+use crate::check::PullRequest;
+use crate::cli::{CheckArgs, CheckCommand, Cli, Command, VersionCommand};
+use crate::repo::Repo;
+use crate::version::Version;
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match run(&args) {
+    let Command::Version(args) = Cli::parse().command;
+    let repo = Repo::here();
+    let result = match args.command {
+        None if args.change.requested() => change::run(&repo, &args.change),
+        None => print_version_help(),
+        Some(VersionCommand::Current) => repo.version(None).map(|v| println!("{v}")),
+        Some(VersionCommand::Check(check)) => run_check(&repo, check),
+        Some(VersionCommand::Env { tag }) => Version::parse_tag(&tag)
+            .map(|tag| println!("{}", tag.channel().map_or("", |c| c.name()))),
+        Some(VersionCommand::PreviousTag { tag }) => previous_tag(&repo, &tag),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("xtask: {message}");
@@ -45,170 +39,132 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &[&str]) -> Result<(), String> {
-    match args {
-        ["version"] => println!("{}", current_version(&root())?),
-        ["version", "check", options @ ..] => {
-            let options = check::Options::parse(options)?;
-            let root = root();
-            let current = current_version(&root)?;
-            if let Some(tag) = options.tag {
-                check::tag(current, tag)?;
+fn print_version_help() -> Result<(), String> {
+    let mut cli = Cli::command();
+    cli.build();
+    let version = cli
+        .find_subcommand_mut("version")
+        .expect("the version command exists");
+    version.print_help().map_err(|e| e.to_string())
+}
+
+/// Runs a check and prints the version it checked, for scripts to use.
+fn run_check(repo: &Repo, args: CheckArgs) -> Result<(), String> {
+    let current = match args.command {
+        None => {
+            let current = repo.version(None)?;
+            if let Some(rev) = &args.against {
+                check::higher(current, repo.cargo_version_at(rev)?, rev)?;
             }
-            if let Some(branch) = options.branch {
-                check::branch(current, branch)?;
-            }
-            if let Some(base) = options.base {
-                check::higher(current, version_at(&root, base)?, base)?;
-            }
-            println!("{current}");
+            current
         }
-        ["version", "bump", new] => bump(&root(), new)?,
-        ["version", "previous-tag", tag] => {
-            let tag = Version::parse_tag(tag)?;
-            let tags = git(&root(), &["tag", "--list", "v*"])?;
-            if !tags.status.success() {
-                return Err("can't list the git tags".to_owned());
-            }
-            let tags = String::from_utf8_lossy(&tags.stdout);
-            println!("{}", version::previous_tag(tag, tags.lines()).unwrap_or(""));
+        Some(CheckCommand::Pr { number }) => check_pr(repo, number)?,
+        Some(CheckCommand::Release { tag }) => {
+            let current = repo.version(None)?;
+            let tag = match tag.or_else(actions_tag) {
+                Some(tag) => tag,
+                None => {
+                    let tags = repo.git_stdout(&["tag", "--points-at", "HEAD", "--list", "v*"])?;
+                    check::release_tag_on_head(current, tags.lines())?.to_owned()
+                }
+            };
+            check::release(current, &tag)?;
+            current
         }
-        ["version", "env", tag] => {
-            let channel = Version::parse_tag(tag)?.channel();
-            println!("{}", channel.map_or("", |c| c.name()));
-        }
-        ["help" | "--help" | "-h"] => println!("{USAGE}"),
-        _ => return Err(format!("unknown command\n\n{USAGE}")),
-    }
+    };
+    println!("{current}");
     Ok(())
 }
 
-/// The repo root: the workspace this crate belongs to.
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask lives in the repo root")
-        .to_owned()
+/// Checks pull request `number`, or else the one GitHub Actions runs for, or
+/// else the current branch's, and returns the version on its head.
+fn check_pr(repo: &Repo, number: Option<u64>) -> Result<Version, String> {
+    let (pr, head) = match number {
+        Some(number) => {
+            let pr = gh_pull_request(repo, Some(number))?;
+            let head = repo.fetch(&format!("pull/{number}/head"))?;
+            (pr, Some(head))
+        }
+        None => match actions_pull_request()? {
+            Some(pr) => (pr, None),
+            None => (gh_pull_request(repo, None)?, None),
+        },
+    };
+    let version = repo.version(head.as_deref())?;
+    let base = if pr.needs_base_version() {
+        // A full ref, so a branch name can't pass for a git option.
+        let base = repo.fetch(&format!("refs/heads/{}", pr.base))?;
+        Some(repo.cargo_version_at(&base)?)
+    } else {
+        None
+    };
+    pr.check(version, base)?;
+    eprintln!(
+        "{} -> {}{}: version {version} is fine",
+        pr.head,
+        pr.base,
+        if pr.merged { " (merged)" } else { "" }
+    );
+    Ok(version)
 }
 
-fn read(root: &Path, file: &str) -> Result<String, String> {
-    fs::read_to_string(root.join(file)).map_err(|e| format!("can't read {file}: {e}"))
+/// The pull request GitHub Actions runs for, from its environment.
+fn actions_pull_request() -> Result<Option<PullRequest>, String> {
+    let event = env::var("GITHUB_EVENT_NAME").unwrap_or_default();
+    if env::var("GITHUB_ACTIONS").as_deref() != Ok("true") || !event.starts_with("pull_request") {
+        return Ok(None);
+    }
+    let var = |name: &str| env::var(name).map_err(|_| format!("{name} isn't set"));
+    let payload = std::fs::read_to_string(var("GITHUB_EVENT_PATH")?)
+        .map_err(|e| format!("can't read the event payload: {e}"))?;
+    let payload: serde_json::Value =
+        serde_json::from_str(&payload).map_err(|e| format!("the event payload isn't JSON: {e}"))?;
+    Ok(Some(PullRequest {
+        head: var("GITHUB_HEAD_REF")?,
+        base: var("GITHUB_BASE_REF")?,
+        merged: payload["pull_request"]["merged"].as_bool().unwrap_or(false),
+    }))
 }
 
-/// The app version, after checking that every file holds the same one.
-fn current_version(root: &Path) -> Result<Version, String> {
-    let cargo = files::cargo_version(&read(root, CARGO_TOML)?)?;
-    let tauri = files::tauri_version(&read(root, TAURI_CONF)?)?;
-    let mut found = vec![
-        (CARGO_TOML.to_owned(), cargo.clone()),
-        (TAURI_CONF.to_owned(), tauri),
-    ];
-    for (name, version) in files::lock_versions(&read(root, CARGO_LOCK)?, env!("CARGO_PKG_NAME"))? {
-        found.push((format!("{CARGO_LOCK} ({name})"), version));
-    }
-    if found.iter().any(|(_, v)| *v != cargo) {
-        let list: Vec<_> = found.iter().map(|(f, v)| format!("  {f}: {v}")).collect();
-        return Err(format!("the version files disagree:\n{}", list.join("\n")));
-    }
-    Version::parse(&cargo).map_err(|e| format!("{CARGO_TOML}: {e}"))
+/// Pull request `number`, or the current branch's, through gh.
+fn gh_pull_request(repo: &Repo, number: Option<u64>) -> Result<PullRequest, String> {
+    let number = number.map(|n| n.to_string());
+    let mut args = vec!["pr", "view"];
+    args.extend(number.as_deref());
+    args.extend(["--json", "headRefName,baseRefName,state"]);
+    let json = repo.gh(&args).map_err(|e| match &number {
+        Some(_) => e,
+        None => format!("{e}\nopen a pull request for this branch, or pass its number"),
+    })?;
+    let pr: serde_json::Value =
+        serde_json::from_str(&json).map_err(|e| format!("gh returned bad JSON: {e}"))?;
+    let field = |name: &str| {
+        pr[name]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("gh didn't return {name}"))
+    };
+    Ok(PullRequest {
+        head: field("headRefName")?,
+        base: field("baseRefName")?,
+        merged: field("state")? == "MERGED",
+    })
 }
 
-/// The app version on git ref `rev`, from its Cargo.toml.
-fn version_at(root: &Path, rev: &str) -> Result<Version, String> {
-    let show = git(root, &["show", &format!("{rev}:{CARGO_TOML}")])?;
-    if !show.status.success() {
-        let stderr = String::from_utf8_lossy(&show.stderr);
-        return Err(format!(
-            "can't read {CARGO_TOML} on {rev}: {}",
-            stderr.trim()
-        ));
+/// The tag GitHub Actions runs for, if it runs for one.
+fn actions_tag() -> Option<String> {
+    let actions = env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
+    let tag = env::var("GITHUB_REF_TYPE").as_deref() == Ok("tag");
+    if actions && tag {
+        env::var("GITHUB_REF_NAME").ok()
+    } else {
+        None
     }
-    let cargo_toml =
-        String::from_utf8(show.stdout).map_err(|_| format!("{CARGO_TOML} on {rev} isn't UTF-8"))?;
-    Version::parse(&files::cargo_version(&cargo_toml)?)
-        .map_err(|e| format!("{CARGO_TOML} on {rev}: {e}"))
 }
 
-fn bump(root: &Path, new: &str) -> Result<(), String> {
-    let new = Version::parse(new.strip_prefix('v').unwrap_or(new))?;
-    let current = current_version(root)?;
-    if new <= current {
-        return Err(format!("{new} is not higher than the current {current}"));
-    }
-
-    // A clean start keeps the bump's diff to the version lines.
-    let dirty = git(
-        root,
-        &[
-            "diff", "--quiet", "HEAD", "--", CARGO_TOML, CARGO_LOCK, TAURI_CONF,
-        ],
-    )?;
-    if !dirty.status.success() {
-        return Err(format!(
-            "{CARGO_TOML}, {CARGO_LOCK} or {TAURI_CONF} has uncommitted changes"
-        ));
-    }
-
-    let (old, new_str) = (current.to_string(), new.to_string());
-    let cargo_toml = files::set_cargo_version(&read(root, CARGO_TOML)?, &new_str)?;
-    let tauri_conf = files::set_tauri_version(&read(root, TAURI_CONF)?, &old, &new_str)?;
-    write(root, CARGO_TOML, &cargo_toml)?;
-    write(root, TAURI_CONF, &tauri_conf)?;
-
-    // Rewrites only the workspace crates' entries; dependencies stay as they are.
-    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    let status = Command::new(cargo)
-        .args([
-            "update",
-            "--workspace",
-            "--offline",
-            "--quiet",
-            "--manifest-path",
-        ])
-        .arg(root.join(CARGO_TOML))
-        .status()
-        .map_err(|e| format!("can't run cargo: {e}"))?;
-    if !status.success() {
-        return Err(format!(
-            "cargo update --workspace failed; {CARGO_TOML} and {TAURI_CONF} are already bumped"
-        ));
-    }
-    current_version(root)?;
-
-    println!("Bumped {current} -> {new} in {CARGO_TOML}, {TAURI_CONF} and {CARGO_LOCK}.");
-    let branch = git(root, &["branch", "--show-current"])?;
-    let branch = String::from_utf8_lossy(&branch.stdout);
-    let expected = format!("version/v{new}");
-    if branch.trim() != expected {
-        println!("Note: you're on '{}', not '{expected}'.", branch.trim());
-    }
-    println!();
-    println!("Next:");
-    println!("  1. Commit the bump on {expected}.");
-    println!("  2. Merge feature branches into {expected}.");
-    println!("  3. Open a pull request from {expected} into main.");
-    println!("  4. Merging it tags the merge commit v{new} and starts the release.");
+fn previous_tag(repo: &Repo, tag: &str) -> Result<(), String> {
+    let tag = Version::parse_tag(tag)?;
+    let tags = repo.git_stdout(&["tag", "--list", "v*"])?;
+    println!("{}", version::previous_tag(tag, tags.lines()).unwrap_or(""));
     Ok(())
-}
-
-fn git(root: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .output()
-        .map_err(|e| format!("can't run git: {e}"))
-}
-
-/// Writes through a temp file and a rename, so a failed write leaves the file
-/// as it was.
-fn write(root: &Path, file: &str, contents: &str) -> Result<(), String> {
-    let path = root.join(file);
-    let tmp = path.with_extension("xtask-tmp");
-    fs::write(&tmp, contents)
-        .and_then(|()| fs::rename(&tmp, &path))
-        .map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("can't write {file}: {e}")
-        })
 }
