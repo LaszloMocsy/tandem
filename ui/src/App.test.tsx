@@ -49,6 +49,8 @@ test('with no project open, shows the welcome screen', () => {
   expect(html).toContain('Tandem')
   expect(html).toContain('Welcome to Tandem')
   expect(html).toContain('New board')
+  // Settings are there before any board is.
+  expect(html).toContain('title="Settings (Cmd/Ctrl+,)">Settings</button>')
 })
 
 test('with a project open, its name is the project switcher', async () => {

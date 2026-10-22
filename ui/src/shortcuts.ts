@@ -1,5 +1,5 @@
-// The board's single-key shortcuts. Enter, which opens the focused card,
-// is handled by the card itself.
+// The board's single-key shortcuts, and Cmd or Ctrl+, for Settings. Enter,
+// which opens the focused card, is handled by the card itself.
 
 export type Shortcut = 'newTask' | 'search' | 'markReviewed' | 'approve'
 
@@ -21,6 +21,16 @@ export function shortcutFor(event: {
   if (event.metaKey || event.ctrlKey || event.altKey) return null
   if (isEditable(event.target)) return null
   return KEYS[event.key.toLowerCase()] ?? null
+}
+
+/** Cmd or Ctrl+, opens Settings, as in most Mac apps, even while typing. */
+export function isSettingsShortcut(event: {
+  key: string
+  metaKey: boolean
+  ctrlKey: boolean
+  altKey: boolean
+}): boolean {
+  return (event.metaKey || event.ctrlKey) && !event.altKey && event.key === ','
 }
 
 function isEditable(target: EventTarget | null): boolean {

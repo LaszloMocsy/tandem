@@ -9,6 +9,16 @@ use tandem_board_core::store::{self, Priority, Status, TaskId};
 /// The `tasks-changed` event.
 pub const TASKS_CHANGED: &str = "tasks-changed";
 
+/// The `projects-changed` event: a project's entry in the list changed,
+/// such as its name after an edit to its `config.toml`.
+pub const PROJECTS_CHANGED: &str = "projects-changed";
+
+/// The payload of `projects-changed`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectsChanged {
+    pub project: String,
+}
+
 /// The payload of `tasks-changed`: the tasks of one project that changed,
 /// from the board, an agent or an outside edit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

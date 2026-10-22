@@ -1279,7 +1279,7 @@ fn every_change_is_sent_to_subscribers_once() {
     let changed = |id: TaskId| {
         Some(Changes {
             changed: [id].into(),
-            removed: Default::default(),
+            ..Changes::default()
         })
     };
 
@@ -1313,8 +1313,8 @@ fn every_change_is_sent_to_subscribers_once() {
     assert_eq!(
         next(),
         Some(Changes {
-            changed: Default::default(),
             removed: [id].into(),
+            ..Changes::default()
         })
     );
 
@@ -1701,4 +1701,135 @@ fn a_read_only_project_refuses_delete_task() {
     let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
     let id: TaskId = "k3f9x2m".parse().unwrap();
     assert_eq!(code(service.delete_task(id)), "read_only");
+}
+
+#[test]
+fn the_project_name_is_set_and_cleared_in_config_toml() {
+    let env = Env::new();
+    let config = env.repo.path().join(".tandem/config.toml");
+    assert_eq!(env.service.name().unwrap(), None);
+
+    assert_eq!(
+        env.service.set_name("  Tandem board ").unwrap().as_deref(),
+        Some("Tandem board")
+    );
+    assert_eq!(env.service.name().unwrap().as_deref(), Some("Tandem board"));
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "format_version = 1\nname = \"Tandem board\"\n"
+    );
+
+    assert_eq!(env.service.set_name("").unwrap(), None);
+    assert_eq!(env.service.name().unwrap(), None);
+    assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
+}
+
+#[test]
+fn a_bad_project_name_is_refused_and_nothing_is_written() {
+    let env = Env::new();
+    let config = env.repo.path().join(".tandem/config.toml");
+    let err = env.service.set_name("two\nlines").unwrap_err();
+    assert_eq!(err.code(), "invalid_argument");
+    assert_eq!(
+        code(env.service.set_name(&"x".repeat(101))),
+        "invalid_argument"
+    );
+    assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
+}
+
+#[test]
+fn a_config_broken_after_open_is_never_overwritten() {
+    let env = Env::new();
+    let config = env.repo.path().join(".tandem/config.toml");
+    fs::write(&config, "format_version = 1\nname = [\n").unwrap();
+    assert_eq!(env.service.name().unwrap(), None);
+    assert_eq!(code(env.service.set_name("Tandem")), "read_only");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "format_version = 1\nname = [\n"
+    );
+}
+
+#[test]
+fn a_read_only_project_refuses_set_name() {
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    fs::create_dir(repo.path().join(".tandem")).unwrap();
+    let config = repo.path().join(".tandem/config.toml");
+    fs::write(&config, "format_version = 2\nname = \"Next\"\n").unwrap();
+    let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
+    // A newer format's name isn't trusted either.
+    assert_eq!(service.name().unwrap(), None);
+    assert_eq!(code(service.set_name("Tandem")), "read_only");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        "format_version = 2\nname = \"Next\"\n"
+    );
+}
+
+#[test]
+fn reset_local_state_rebuilds_from_files_and_loses_only_activity() {
+    let env = Env::new();
+    let events = env.service.subscribe();
+    let issued = env.service.register_agent(Some("claude-code")).unwrap();
+    let a = agent(&issued);
+    let id = env.todo("Task");
+    let other = env.todo("Other");
+    env.service.start_task(&a, id).unwrap();
+    env.service.log_progress(&a, id, "Halfway.").unwrap();
+    env.service.set_blocked(&a, id, "Which API?").unwrap();
+    let files = (env.file(id), env.file(other));
+    let before = env
+        .service
+        .list_tasks(&Actor::User, &TaskFilter::default())
+        .unwrap();
+    while events.try_recv().is_ok() {}
+
+    let changes = env.service.reset().unwrap();
+    assert_eq!(changes.changed, [id, other].into());
+    assert_eq!(events.try_recv().unwrap(), changes);
+    assert_eq!((env.file(id), env.file(other)), files);
+    assert_eq!(env.lease(id), None);
+    let detail = env.service.get_task(&Actor::User, id).unwrap();
+    assert!(detail.work_log.is_empty());
+    assert_eq!(detail.summary.blocked, None);
+    let after = env
+        .service
+        .list_tasks(&Actor::User, &TaskFilter::default())
+        .unwrap();
+    let strip = |tasks: Vec<TaskSummary>| -> Vec<_> {
+        tasks
+            .into_iter()
+            .map(|t| TaskSummary {
+                lease: None,
+                blocked: None,
+                ..t
+            })
+            .collect()
+    };
+    assert_eq!(strip(after), strip(before));
+
+    // The agent that started the task carries on with its id.
+    assert!(env.service.is_known_agent(&issued).unwrap());
+    env.service.log_progress(&a, id, "Still mine.").unwrap();
+    assert_eq!(env.lease(id).unwrap().0, issued);
+}
+
+#[test]
+fn after_a_rebuild_only_agents_with_a_task_in_progress_are_known() {
+    let env = Env::new();
+    let working = env.service.register_agent(Some("claude-code")).unwrap();
+    let done = env.service.register_agent(Some("claude-code")).unwrap();
+    let id = env.todo("Working");
+    let finished = env.todo("Finished");
+    env.service.start_task(&agent(&working), id).unwrap();
+    env.service.start_task(&agent(&done), finished).unwrap();
+    env.service
+        .finish_task(&agent(&done), finished, finish("Done."))
+        .unwrap();
+
+    env.service.reset().unwrap();
+    assert!(env.service.is_known_agent(&working).unwrap());
+    assert!(!env.service.is_known_agent(&done).unwrap());
+    assert!(!env.service.is_known_agent("claude-code-ffff").unwrap());
 }

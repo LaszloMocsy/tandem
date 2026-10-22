@@ -27,8 +27,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::index::{Changes, Problem, ProjectIndex, rescan_in, rescan_task_in, timestamp_text};
 use crate::store::{
-    Access, ChangelogItem, Criterion, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR, Task,
-    TaskId, Unmet, UnmetCriterion, parse_task_file, task_path,
+    self, Access, ChangelogItem, Criterion, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR,
+    Task, TaskId, Unmet, UnmetCriterion, parse_task_file, task_path,
 };
 
 pub use delete::DeleteCheck;
@@ -380,13 +380,38 @@ impl Service {
     }
 
     /// Whether `id` was issued by [`register_agent`](Self::register_agent).
+    /// After a rebuild, which forgets every issued id, an agent that
+    /// started a task still in progress is known too, so it can carry on
+    /// with its id and win back its lease.
     pub fn is_known_agent(&self, id: &str) -> Result<bool, ServiceError> {
-        Ok(self
-            .lock()
+        let index = self.lock();
+        let issued = index
             .connection()
             .query_row("SELECT 1 FROM agents WHERE agent_id = ?1", [id], |_| Ok(()))
             .optional()?
-            .is_some())
+            .is_some();
+        if issued {
+            return Ok(true);
+        }
+        Ok(index.tasks()?.iter().any(|task| {
+            task.status == Status::InProgress
+                && read_file(&self.dir, task.id).is_ok_and(|task| {
+                    transitions::last_hand_over(&task)
+                        .is_some_and(|entry| entry.event == "started" && entry.who == id)
+                })
+        }))
+    }
+
+    /// Deletes the project database and builds it again from the files,
+    /// for the Reset local state button. Leases, blocked flags, review
+    /// feedback, working logs and the issued agent ids are lost; an agent
+    /// still working on a task carries on with its id, as after any
+    /// rebuild. The task files are not touched.
+    pub fn reset(&self) -> Result<Changes, ServiceError> {
+        let mut index = self.lock();
+        let changes = index.reset()?;
+        self.emit(changes.clone());
+        Ok(changes)
     }
 
     /// The `.tandem/` folder.
@@ -406,6 +431,38 @@ impl Service {
     /// Why the project is read-only, if it is.
     pub fn read_only(&self) -> Option<&ReadOnly> {
         self.read_only.as_ref()
+    }
+
+    /// The name `config.toml` gives the project, if any; see
+    /// [`store::project_name`].
+    pub fn name(&self) -> Result<Option<String>, ServiceError> {
+        Ok(store::project_name(self.repo())?)
+    }
+
+    /// Sets the project name in `config.toml`, or removes it when `name`
+    /// is blank, so the app falls back to the folder name. Only the `name`
+    /// line changes; see [`store::set_project_name`]. Returns the name now
+    /// set.
+    pub fn set_name(&self, name: &str) -> Result<Option<String>, ServiceError> {
+        let name = store::normalize_project_name(name)
+            .map_err(|e| ServiceError::InvalidArgument(e.to_string()))?;
+        let _index = self.lock();
+        self.check_writable()?;
+        match store::set_project_name(self.repo(), name.as_deref()) {
+            Ok(_) => Ok(name),
+            Err(StoreError::ConfigReadOnly { reason, .. }) => Err(ServiceError::ReadOnly(reason)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Tells subscribers that `config.toml` may have changed, for a watcher
+    /// event on it, so the app can read the project name again.
+    pub fn config_changed(&self) {
+        let _index = self.lock();
+        self.emit(Changes {
+            config: true,
+            ..Changes::default()
+        });
     }
 
     /// A full rescan, for a burst of watcher events or the periodic sweep.
@@ -522,7 +579,7 @@ impl Call<'_> {
     fn touched(&self, id: TaskId) {
         self.changes.borrow_mut().merge(Changes {
             changed: [id].into(),
-            removed: Default::default(),
+            ..Changes::default()
         });
     }
 

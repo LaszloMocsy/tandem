@@ -86,11 +86,19 @@ pub struct Changes {
     pub changed: BTreeSet<TaskId>,
     /// Rows deleted because their file is gone.
     pub removed: BTreeSet<TaskId>,
+    /// Whether `config.toml` may have changed, as when a pull renames the
+    /// project. Only the watcher sets it; scans never read the config.
+    pub config: bool,
 }
 
 impl Changes {
     pub fn is_empty(&self) -> bool {
-        self.changed.is_empty() && self.removed.is_empty()
+        self.changed.is_empty() && self.removed.is_empty() && !self.config
+    }
+
+    /// Whether any task changed, so the board needs to refetch.
+    pub fn has_tasks(&self) -> bool {
+        !self.changed.is_empty() || !self.removed.is_empty()
     }
 
     /// Adds later changes: a task removed and then changed again counts as
@@ -104,6 +112,7 @@ impl Changes {
             self.removed.remove(&id);
             self.changed.insert(id);
         }
+        self.config |= later.config;
     }
 }
 
@@ -165,17 +174,18 @@ impl ProjectIndex {
     }
 
     /// Deletes the project database and builds it again from the files, for
-    /// the Reset local state button. Leases, flags and working logs are lost.
-    pub fn reset(self) -> Result<Self, IndexError> {
-        let Self {
-            conn,
-            repo,
-            db_path,
-            ..
-        } = self;
-        conn.close().map_err(|(_, e)| e)?;
-        remove_db_files(&db_path)?;
-        Self::open_at(db_path, &repo)
+    /// the Reset local state button. Leases, flags, working logs and the
+    /// issued agent ids are lost. Returns the rebuild's changes: every task.
+    pub fn reset(&mut self) -> Result<Changes, IndexError> {
+        // Swap in a placeholder, so the old connection can be closed.
+        let conn = std::mem::replace(&mut self.conn, Connection::open_in_memory()?);
+        if let Err((conn, e)) = conn.close() {
+            self.conn = conn;
+            return Err(e.into());
+        }
+        remove_db_files(&self.db_path)?;
+        self.conn = schema::open(&self.db_path, schema::PROJECT_MIGRATIONS)?;
+        self.rescan()
     }
 
     pub fn access(&self) -> &Access {
@@ -600,16 +610,19 @@ mod tests {
         let mut changes = Changes {
             changed: [a, b].into(),
             removed: [c].into(),
+            config: false,
         };
         changes.merge(Changes {
             changed: [c].into(),
             removed: [b].into(),
+            config: true,
         });
         assert_eq!(
             changes,
             Changes {
                 changed: [a, c].into(),
                 removed: [b].into(),
+                config: true,
             }
         );
     }

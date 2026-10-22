@@ -473,6 +473,63 @@ function TaskList({ ids, tasks }: { ids: readonly string[]; tasks: readonly Task
 }
 
 /**
+ * Reset local state: the board's database is deleted and rebuilt from the
+ * task files. `working` lists the tasks agents hold now, which lose their
+ * working logs; `null` while that is checked.
+ */
+export function ResetLocalStateForm({
+  project,
+  working,
+  busy,
+  error,
+  onSubmit,
+  onCancel,
+}: {
+  project: ProjectInfo
+  working: readonly WorkingTask[] | null
+  busy: boolean
+  error: string | null
+  onSubmit: () => void
+  onCancel: () => void
+}) {
+  return (
+    <form onSubmit={onSubmitted(onSubmit)}>
+      <h3>Reset local state of “{project.name}”?</h3>
+      <p className="dialog-callout safe">
+        The task files stay as they are. Tandem rebuilds the board from <code>.tandem/</code>.
+      </p>
+      <p className="dialog-callout danger">
+        Leases, blocked flags, review feedback and working logs are lost. They exist only on this
+        machine, so they can't be brought back.
+      </p>
+      {working !== null && working.length > 0 && (
+        <div className="dialog-callout warning" role="status">
+          <p>
+            Agents are working on {working.length === 1 ? 'this task' : 'these tasks'}. They keep
+            working with the same agent id, but lose the notes logged so far.
+          </p>
+          <ul className="working">
+            {working.map((task) => (
+              <li key={task.id}>
+                <code>{task.id}</code> {task.title}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <FormError error={error} />
+      <Actions
+        submit={working === null ? 'Checking agents…' : 'Reset local state'}
+        ready={working !== null}
+        busy={busy}
+        danger
+        onCancel={onCancel}
+      />
+    </form>
+  )
+}
+
+/**
  * Deleting a task's file. Blocked while an agent works on it or another
  * task links to it; `check` is `null` while that is being checked.
  */

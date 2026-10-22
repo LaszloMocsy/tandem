@@ -70,24 +70,7 @@ impl Env {
     }
 
     async fn client(&self, name: &str, protocol: Protocol) -> Client {
-        let transport = StreamableHttpClientTransport::from_uri(self.url());
-        let info = ClientConfig::new(
-            ClientCapabilities::default(),
-            Implementation::new(name, "1.0"),
-        );
-        let lifecycle = match protocol {
-            Protocol::Latest => ClientLifecycleMode::Discover {
-                preferred_versions: vec![ProtocolVersion::V_2026_07_28],
-            },
-            Protocol::Legacy => ClientLifecycleMode::Initialize,
-        };
-        let info = match protocol {
-            Protocol::Latest => info,
-            Protocol::Legacy => info.with_protocol_version(ProtocolVersion::V_2025_11_25),
-        };
-        info.serve_with_lifecycle(transport, lifecycle)
-            .await
-            .unwrap_or_else(|e| panic!("{protocol:?} client failed to start: {e}"))
+        connect(self.url(), name, protocol).await
     }
 
     /// A task you created, so it is in todo.
@@ -113,6 +96,28 @@ impl Drop for Env {
     fn drop(&mut self) {
         self.cancel.cancel();
     }
+}
+
+/// A client named `name` connected to the endpoint at `url`.
+async fn connect(url: String, name: &str, protocol: Protocol) -> Client {
+    let transport = StreamableHttpClientTransport::from_uri(url);
+    let info = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new(name, "1.0"),
+    );
+    let lifecycle = match protocol {
+        Protocol::Latest => ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        },
+        Protocol::Legacy => ClientLifecycleMode::Initialize,
+    };
+    let info = match protocol {
+        Protocol::Latest => info,
+        Protocol::Legacy => info.with_protocol_version(ProtocolVersion::V_2025_11_25),
+    };
+    info.serve_with_lifecycle(transport, lifecycle)
+        .await
+        .unwrap_or_else(|e| panic!("{protocol:?} client failed to start: {e}"))
 }
 
 /// Calls a tool: `Ok` with the structured result, or `Err` with the error.
@@ -474,6 +479,30 @@ async fn holder_tools_need_the_issued_agent_id() {
 }
 
 #[tokio::test]
+async fn an_agent_carries_on_after_reset_local_state() {
+    let env = Env::new().await;
+    let client = env.client("claude-code", Protocol::Latest).await;
+    let id = env.todo("Task");
+    let started = call(&client, "start_task", json!({ "id": id.as_str() }))
+        .await
+        .unwrap();
+    let agent = started["agent"].as_str().unwrap();
+
+    env.service.reset().unwrap();
+    // The issued ids are gone with the database, but the changelog shows
+    // this agent started the task, so its id still works.
+    let args = json!({ "id": id.as_str(), "message": "Still here.", "agent": agent });
+    call(&client, "log_progress", args).await.unwrap();
+    let lease = env
+        .service
+        .get_task(&Actor::User, id)
+        .unwrap()
+        .summary
+        .lease;
+    assert_eq!(lease.unwrap().agent_id, agent);
+}
+
+#[tokio::test]
 async fn errors_carry_the_specs_codes() {
     let env = Env::new().await;
     let client = env.client("claude-code", Protocol::Latest).await;
@@ -678,6 +707,79 @@ async fn projects_can_be_added_and_removed_while_serving() {
     assert!(!env.endpoints.remove("other"));
     assert_eq!(ping(other_url).await, 404);
     assert!(ping(env.url()).await.is_success());
+}
+
+#[tokio::test]
+async fn the_endpoints_move_to_a_new_server_and_old_sessions_end() {
+    let data = TempDir::new().unwrap();
+    let repo = TempDir::new().unwrap();
+    let service =
+        Arc::new(Service::open(data.path(), "demo", repo.path(), Config::default()).unwrap());
+    let app = CancellationToken::new();
+    let endpoints = Endpoints::new(&app);
+    endpoints.insert("demo", service);
+    let serve = |cancel: CancellationToken| {
+        let endpoints = endpoints.clone();
+        async move {
+            let server = McpServer::bind("127.0.0.1:0".parse().unwrap(), endpoints, cancel)
+                .await
+                .unwrap();
+            let url = format!(
+                "http://{}{}",
+                server.local_addr().unwrap(),
+                endpoint_path("demo")
+            );
+            tokio::spawn(server.run());
+            url
+        }
+    };
+    let (old, new) = (app.child_token(), app.child_token());
+    let old_url = serve(old.clone()).await;
+    // A legacy client's session, by hand, so nothing reconnects for us.
+    let post = |url: &str, session: Option<&str>, body: Value| {
+        let mut request = reqwest::Client::new()
+            .post(url)
+            .header("Accept", "application/json, text/event-stream")
+            .header("Content-Type", "application/json")
+            .header("MCP-Protocol-Version", "2025-11-25");
+        if let Some(session) = session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        request.body(body.to_string()).send()
+    };
+    let initialize = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "curl", "version": "1" },
+        },
+    });
+    let response = post(&old_url, None, initialize).await.unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    let session = response.headers()["mcp-session-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let initialized = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let response = post(&old_url, Some(&session), initialized.clone())
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+
+    // Changing the port: a second server on the same endpoints, then the
+    // open sessions end and the first server stops.
+    let new_url = serve(new).await;
+    endpoints.end_sessions();
+    let response = post(&old_url, Some(&session), initialized).await.unwrap();
+    assert_eq!(response.status(), 404);
+    old.cancel();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(reqwest::Client::new().post(&old_url).send().await.is_err());
+    // The same project answers at the new address.
+    let client = connect(new_url, "claude-code", Protocol::Latest).await;
+    call(&client, "list_tasks", json!({})).await.unwrap();
+    app.cancel();
 }
 
 #[tokio::test]

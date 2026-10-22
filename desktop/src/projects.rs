@@ -9,7 +9,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -18,15 +17,17 @@ use std::thread;
 use jiff::SignedDuration;
 use serde::Serialize;
 use tandem_board_core::git;
-use tandem_board_core::index::{AppDb, Changes, Project, delete_project_db};
+use tandem_board_core::index::{AppDb, Changes, Project, Theme, delete_project_db, folder_name};
 use tandem_board_core::service::{Config, Service};
 use tandem_board_core::store::TASK_DIR;
 use tandem_board_core::watcher::{Watcher, WatcherConfig};
-use tandem_board_mcp::{Endpoints, endpoint_path};
+use tandem_board_mcp::{DEFAULT_ADDR, endpoint_path};
 
 use crate::error::{Error, describe, report};
+use crate::mcp::Mcp;
 
-/// Called with a project id and the tasks that changed in it.
+/// Called with a project id and what changed in it. When `config.toml`
+/// changed, the project's name in the list is up to date by then.
 pub type OnChange = Arc<dyn Fn(&str, &Changes) + Send + Sync>;
 
 /// A project as the project switcher shows it.
@@ -45,6 +46,22 @@ pub struct ProjectInfo {
     pub read_only: Option<String>,
     /// The project's MCP endpoint, while it is open and the server runs.
     pub mcp_url: Option<String>,
+}
+
+/// The app's settings, as the Settings page shows them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsInfo {
+    /// The port the MCP server is set to use.
+    pub mcp_port: u16,
+    pub default_mcp_port: u16,
+    /// Where the server listens, such as `http://127.0.0.1:4317`, while it
+    /// runs.
+    pub mcp_url: Option<String>,
+    /// Why the server isn't running, when it isn't.
+    pub mcp_error: Option<String>,
+    /// `system`, `light` or `dark`.
+    pub theme: &'static str,
 }
 
 /// What opening a folder did.
@@ -67,12 +84,14 @@ pub enum Opened {
 /// Every project in `app.db`, and the open ones.
 pub struct Projects {
     data_dir: PathBuf,
-    app_db: Mutex<AppDb>,
+    /// Shared with each project's event thread, which keeps its name up to
+    /// date.
+    app_db: Arc<Mutex<AppDb>>,
     open: Mutex<BTreeMap<String, OpenProject>>,
     /// Why a project failed to open on launch.
     failed: Mutex<BTreeMap<String, String>>,
-    endpoints: Endpoints,
-    mcp_addr: Option<SocketAddr>,
+    /// The MCP server, with an endpoint for every open project.
+    mcp: Mcp,
     on_change: OnChange,
 }
 
@@ -84,23 +103,69 @@ struct OpenProject {
 }
 
 impl Projects {
-    /// Opens `app.db` in `data_dir`. Open projects get an endpoint in
-    /// `endpoints`, served at `mcp_addr` if the server is running.
-    pub fn new(
-        data_dir: &Path,
-        endpoints: Endpoints,
-        mcp_addr: Option<SocketAddr>,
-        on_change: OnChange,
-    ) -> Result<Self, Error> {
+    /// Opens `app.db` in `data_dir`. Open projects get an endpoint on
+    /// `mcp`; [`start_mcp`](Self::start_mcp) starts the server.
+    pub fn new(data_dir: &Path, mcp: Mcp, on_change: OnChange) -> Result<Self, Error> {
         Ok(Self {
             data_dir: data_dir.to_owned(),
-            app_db: Mutex::new(AppDb::open(data_dir)?),
+            app_db: Arc::new(Mutex::new(AppDb::open(data_dir)?)),
             open: Mutex::default(),
             failed: Mutex::default(),
-            endpoints,
-            mcp_addr,
+            mcp,
             on_change,
         })
+    }
+
+    /// Starts the MCP server on the port from the settings, as on launch.
+    /// A failure, such as another copy of the app holding the port, is
+    /// reported and shown in Settings; the board works without the server.
+    pub fn start_mcp(&self) -> Result<(), Error> {
+        let port = self.mcp_port()?;
+        if let Err(e) = self.mcp.start(port) {
+            eprintln!("tandem: MCP server not started: {}", e.message);
+        }
+        Ok(())
+    }
+
+    pub fn app_settings(&self) -> Result<AppSettingsInfo, Error> {
+        let settings = lock(&self.app_db).settings()?;
+        Ok(AppSettingsInfo {
+            mcp_port: settings.mcp_port.unwrap_or(DEFAULT_ADDR.port()),
+            default_mcp_port: DEFAULT_ADDR.port(),
+            mcp_url: self.mcp.addr().map(|addr| format!("http://{addr}")),
+            mcp_error: self.mcp.error(),
+            theme: settings.theme.as_str(),
+        })
+    }
+
+    pub fn theme(&self) -> Result<Theme, Error> {
+        Ok(lock(&self.app_db).settings()?.theme)
+    }
+
+    pub fn set_theme(&self, theme: Theme) -> Result<AppSettingsInfo, Error> {
+        lock(&self.app_db).set_theme(theme)?;
+        self.app_settings()
+    }
+
+    /// Moves the MCP server to `port` and saves it in the settings. Every
+    /// project's MCP URL changes with it. If the port can't be used, the
+    /// server stays where it was and the setting is unchanged.
+    pub fn set_mcp_port(&self, port: u16) -> Result<AppSettingsInfo, Error> {
+        if port == 0 {
+            return Err(Error::new(
+                "invalid_argument",
+                "the port must be between 1 and 65535",
+            ));
+        }
+        self.mcp.start(port)?;
+        let saved = (port != DEFAULT_ADDR.port()).then_some(port);
+        lock(&self.app_db).set_mcp_port(saved)?;
+        self.app_settings()
+    }
+
+    fn mcp_port(&self) -> Result<u16, Error> {
+        let settings = lock(&self.app_db).settings()?;
+        Ok(settings.mcp_port.unwrap_or(DEFAULT_ADDR.port()))
     }
 
     /// Opens every project in the list whose `.tandem/` folder still
@@ -179,15 +244,15 @@ impl Projects {
             check_no_agents_working(&service)?;
             // Close the endpoint so no agent can claim a task, then check
             // again for a claim that landed in between.
-            self.endpoints.remove(id);
+            self.mcp.endpoints().remove(id);
             if let Err(e) = check_no_agents_working(&service) {
-                self.endpoints.insert(id, service);
+                self.mcp.endpoints().insert(id, service);
                 return Err(e);
             }
         }
         lock(&self.open).remove(id);
         lock(&self.failed).remove(id);
-        self.endpoints.remove(id);
+        self.mcp.endpoints().remove(id);
         let removed = lock(&self.app_db).remove_project(id)?;
         if removed {
             // The project is gone from the list either way, so a database
@@ -198,6 +263,27 @@ impl Projects {
             }
         }
         Ok(removed)
+    }
+
+    /// Sets the project's name in its `config.toml`, or removes it when
+    /// `name` is blank so the folder name is used; see
+    /// [`Service::set_name`]. Returns the project as the list shows it.
+    pub fn set_name(&self, id: &str, name: &str) -> Result<ProjectInfo, Error> {
+        let service = self.service(id)?;
+        service.set_name(name)?;
+        let project = lock(&self.app_db)
+            .project(id)?
+            .ok_or_else(|| Error::project_not_found(id))?;
+        cache_name(&self.app_db, &project.id, &project.repo_path, &service)?;
+        let project = lock(&self.app_db).project(id)?.unwrap_or(project);
+        Ok(self.info(&project))
+    }
+
+    /// Deletes the project's database and rebuilds it from the files; see
+    /// [`Service::reset`]. Leases and working logs are lost.
+    pub fn reset(&self, id: &str) -> Result<(), Error> {
+        self.service(id)?.reset()?;
+        Ok(())
     }
 
     /// The service of an open project.
@@ -231,15 +317,28 @@ impl Projects {
                 project.repo_path.display()
             );
         }
+        // The name may have changed while the app was closed.
+        if let Err(e) = cache_name(&self.app_db, &project.id, &project.repo_path, &service) {
+            eprintln!("tandem: cannot read the name of {}: {e}", project.id);
+        }
 
-        // Subscribe before the watcher starts, so no change is missed.
+        // Subscribe before the watcher starts, so no change is missed. The
+        // thread holds a weak handle, so it ends with the project.
         let changes = service.subscribe();
         let on_change = Arc::clone(&self.on_change);
-        let id = project.id.clone();
+        let app_db = Arc::clone(&self.app_db);
+        let weak = Arc::downgrade(&service);
+        let (id, repo) = (project.id.clone(), project.repo_path.clone());
         thread::Builder::new()
             .name(format!("tandem-events-{id}"))
             .spawn(move || {
                 for changes in changes {
+                    if changes.config
+                        && let Some(service) = weak.upgrade()
+                        && let Err(e) = cache_name(&app_db, &id, &repo, &service)
+                    {
+                        eprintln!("tandem: cannot read the name of {id}: {e}");
+                    }
                     on_change(&id, &changes);
                 }
             })
@@ -249,7 +348,9 @@ impl Projects {
         let watcher = Watcher::start(Arc::clone(&service), WatcherConfig::default(), move |e| {
             report(&format!("watching {}", path.display()), &e);
         })?;
-        self.endpoints.insert(&project.id, Arc::clone(&service));
+        self.mcp
+            .endpoints()
+            .insert(&project.id, Arc::clone(&service));
         open.insert(
             project.id.clone(),
             OpenProject {
@@ -278,7 +379,7 @@ impl Projects {
                 .and_then(|service| service.read_only())
                 .map(ToString::to_string),
             mcp_url: service
-                .and(self.mcp_addr)
+                .and(self.mcp.addr())
                 .map(|addr| format!("http://{addr}{}", endpoint_path(&project.id))),
         }
     }
@@ -294,6 +395,19 @@ impl Projects {
             Err(e) => describe(&e),
         }
     }
+}
+
+/// Stores the project's name, from its `config.toml` or else its folder,
+/// in the project list.
+fn cache_name(
+    app_db: &Mutex<AppDb>,
+    id: &str,
+    repo: &Path,
+    service: &Service,
+) -> Result<(), Error> {
+    let name = service.name()?.unwrap_or_else(|| folder_name(repo));
+    lock(app_db).set_name(id, &name)?;
+    Ok(())
 }
 
 /// Refuses with `agents_working` if an agent holds a live lease on any of
@@ -349,10 +463,13 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    use std::net::SocketAddr;
     use tandem_board_core::index::project_db_path;
     use tandem_board_core::service::{Actor, NewTask};
     use tandem_board_core::store::TaskId;
     use tempfile::TempDir;
+
+    use tandem_board_mcp::Endpoints;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -361,6 +478,8 @@ mod tests {
         data: TempDir,
         cancel: CancellationToken,
         endpoints: Endpoints,
+        /// Where the MCP server listens, on a free port.
+        addr: SocketAddr,
         events: mpsc::Receiver<(String, Changes)>,
         projects: Projects,
     }
@@ -369,12 +488,13 @@ mod tests {
         fn new(data: TempDir) -> Self {
             let cancel = CancellationToken::new();
             let endpoints = Endpoints::new(&cancel);
+            let mcp = Mcp::new(endpoints.clone(), cancel.clone());
+            let addr = mcp.start(0).unwrap();
             let (tx, events) = mpsc::channel();
             let tx = Mutex::new(tx);
             let projects = Projects::new(
                 data.path(),
-                endpoints.clone(),
-                Some("127.0.0.1:4317".parse().unwrap()),
+                mcp,
                 Arc::new(move |id: &str, changes: &Changes| {
                     let _ = lock(&tx).send((id.to_owned(), changes.clone()));
                 }),
@@ -384,6 +504,7 @@ mod tests {
                 data,
                 cancel,
                 endpoints,
+                addr,
                 events,
                 projects,
             }
@@ -450,7 +571,7 @@ mod tests {
         assert!(info.last_opened_at.is_some());
         assert_eq!(
             info.mcp_url.as_deref(),
-            Some(format!("http://127.0.0.1:4317/p/{}/mcp", info.id).as_str())
+            Some(format!("http://{}/p/{}/mcp", env.addr, info.id).as_str())
         );
         assert_eq!(env.projects.list().unwrap(), std::slice::from_ref(&info));
         assert_eq!(env.endpoints.project_ids(), [info.id]);
@@ -645,5 +766,160 @@ mod tests {
         assert!(env.projects.remove(&id).unwrap());
         assert!(env.projects.list().unwrap().is_empty());
         assert!(!project_db_path(env.data.path(), &id).exists());
+    }
+
+    #[test]
+    fn changing_the_port_moves_every_mcp_url_and_is_saved() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let id = project(env.open(repo.path(), true)).id;
+        let settings = env.projects.app_settings().unwrap();
+        assert_eq!(settings.mcp_port, DEFAULT_ADDR.port());
+        assert_eq!(settings.default_mcp_port, DEFAULT_ADDR.port());
+        assert_eq!(settings.mcp_url, Some(format!("http://{}", env.addr)));
+
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = free.local_addr().unwrap().port();
+        drop(free);
+        let settings = env.projects.set_mcp_port(port).unwrap();
+        assert_eq!(settings.mcp_port, port);
+        let url = format!("http://127.0.0.1:{port}");
+        assert_eq!(settings.mcp_url.as_deref(), Some(url.as_str()));
+        assert_eq!(settings.mcp_error, None);
+        let info = env.projects.list().unwrap().remove(0);
+        assert_eq!(info.mcp_url, Some(format!("{url}/p/{id}/mcp")));
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+
+        // The port is kept for the next launch.
+        let env = env.relaunch();
+        env.projects.start_mcp().unwrap();
+        assert_eq!(env.projects.app_settings().unwrap().mcp_url, Some(url));
+        let app = AppDb::open(env.data.path()).unwrap();
+        assert_eq!(app.settings().unwrap().mcp_port, Some(port));
+    }
+
+    #[test]
+    fn a_port_that_cannot_be_used_changes_nothing() {
+        let env = Env::new(TempDir::new().unwrap());
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+
+        let error = env.projects.set_mcp_port(port).unwrap_err();
+        assert_eq!(error.code, "port_in_use");
+        let settings = env.projects.app_settings().unwrap();
+        assert_eq!(settings.mcp_port, DEFAULT_ADDR.port());
+        assert_eq!(settings.mcp_url, Some(format!("http://{}", env.addr)));
+        assert_eq!(
+            env.projects.set_mcp_port(0).unwrap_err().code,
+            "invalid_argument"
+        );
+    }
+
+    #[test]
+    fn the_theme_is_saved() {
+        let env = Env::new(TempDir::new().unwrap());
+        assert_eq!(env.projects.app_settings().unwrap().theme, "system");
+        assert_eq!(env.projects.set_theme(Theme::Dark).unwrap().theme, "dark");
+        let env = env.relaunch();
+        assert_eq!(env.projects.theme().unwrap(), Theme::Dark);
+    }
+
+    #[test]
+    fn the_name_comes_from_config_toml_or_the_folder() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let folder = folder_name(&repo.path().canonicalize().unwrap());
+        let config = repo.path().join(TASK_DIR).join("config.toml");
+        fs::create_dir(repo.path().join(TASK_DIR)).unwrap();
+        fs::write(&config, "format_version = 1\nname = \"From the team\"\n").unwrap();
+
+        let info = project(env.open(repo.path(), false));
+        assert_eq!(info.name, "From the team");
+        let id = info.id;
+
+        let info = env.projects.set_name(&id, " Renamed ").unwrap();
+        assert_eq!(info.name, "Renamed");
+        assert_eq!(env.projects.list().unwrap()[0].name, "Renamed");
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "format_version = 1\nname = \"Renamed\"\n"
+        );
+        // The id stays, so agent configs keep working.
+        assert_eq!(info.id, id);
+
+        assert_eq!(env.projects.set_name(&id, "").unwrap().name, folder);
+        assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
+        assert_eq!(
+            env.projects.set_name("missing", "x").unwrap_err().code,
+            "project_not_found"
+        );
+    }
+
+    #[test]
+    fn an_outside_edit_to_the_name_reaches_the_list() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let id = project(env.open(repo.path(), true)).id;
+        // Let the watcher start.
+        thread::sleep(Duration::from_millis(300));
+
+        let config = repo.path().join(TASK_DIR).join("config.toml");
+        fs::write(&config, "format_version = 1\nname = \"Pulled\"\n").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let (project, changes) = env
+                .events
+                .recv_timeout(deadline - std::time::Instant::now())
+                .expect("the watcher reports the config change");
+            if project == id && changes.config {
+                break;
+            }
+        }
+        // Updated before the event is passed on.
+        assert_eq!(env.projects.list().unwrap()[0].name, "Pulled");
+    }
+
+    #[test]
+    fn a_read_only_project_cannot_be_renamed() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let config = repo.path().join(TASK_DIR).join("config.toml");
+        fs::create_dir(repo.path().join(TASK_DIR)).unwrap();
+        fs::write(&config, "format_version = 99\n").unwrap();
+        let id = project(env.open(repo.path(), false)).id;
+        assert_eq!(
+            env.projects.set_name(&id, "Tandem").unwrap_err().code,
+            "read_only"
+        );
+        assert_eq!(
+            fs::read_to_string(&config).unwrap(),
+            "format_version = 99\n"
+        );
+    }
+
+    #[test]
+    fn reset_local_state_keeps_the_tasks_and_drops_leases() {
+        let env = Env::new(TempDir::new().unwrap());
+        let repo = TempDir::new().unwrap();
+        let id = project(env.open(repo.path(), true)).id;
+        let service = env.projects.service(&id).unwrap();
+        let task = create(&service, "Kept");
+        service
+            .start_task(&Actor::agent("claude-code-7f2a"), task)
+            .unwrap();
+        // A live lease blocks Remove, but not Reset.
+        assert_eq!(env.projects.remove(&id).unwrap_err().code, "agents_working");
+
+        env.projects.reset(&id).unwrap();
+        let tasks = service
+            .list_tasks(&Actor::User, &Default::default())
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].lease, None);
+        assert!(env.projects.remove(&id).unwrap());
+        assert_eq!(
+            env.projects.reset(&id).unwrap_err().code,
+            "project_not_found"
+        );
     }
 }

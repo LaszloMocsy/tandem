@@ -41,6 +41,7 @@ type Mcp = StreamableHttpService<TandemTools, LocalSessionManager>;
 
 /// One project's endpoint, and the token that ends its sessions.
 struct Endpoint {
+    service: Arc<Service>,
     mcp: Mcp,
     cancel: CancellationToken,
 }
@@ -66,20 +67,40 @@ impl Endpoints {
     /// Serves `service` at the project's endpoint, replacing any endpoint
     /// it already had.
     pub fn insert(&self, project_id: &str, service: Arc<Service>) {
+        let old = self
+            .write()
+            .insert(project_id.to_owned(), self.endpoint(service));
+        if let Some(old) = old {
+            old.cancel.cancel();
+        }
+    }
+
+    /// Ends every open session, as moving the server to another port does,
+    /// so no agent keeps working through a server that has stopped
+    /// listening. The endpoints stay; clients reconnect to the new address.
+    pub fn end_sessions(&self) {
+        let mut projects = self.write();
+        for endpoint in projects.values_mut() {
+            let fresh = self.endpoint(Arc::clone(&endpoint.service));
+            std::mem::replace(endpoint, fresh).cancel.cancel();
+        }
+    }
+
+    fn endpoint(&self, service: Arc<Service>) -> Endpoint {
         let cancel = self.cancel.child_token();
         let config = StreamableHttpServerConfig::default()
             .enforce_origin_validation()
             .with_cancellation_token(cancel.clone());
+        let tools = Arc::clone(&service);
         let mcp = StreamableHttpService::new(
-            move || Ok(TandemTools::new(Arc::clone(&service))),
+            move || Ok(TandemTools::new(Arc::clone(&tools))),
             Arc::new(LocalSessionManager::default()),
             config,
         );
-        let old = self
-            .write()
-            .insert(project_id.to_owned(), Endpoint { mcp, cancel });
-        if let Some(old) = old {
-            old.cancel.cancel();
+        Endpoint {
+            service,
+            mcp,
+            cancel,
         }
     }
 

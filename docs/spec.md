@@ -33,7 +33,7 @@ Each task is one Markdown file with YAML frontmatter, stored flat in `.tandem/` 
 
 ```txt
 .tandem/
-  config.toml    # format_version, created on init
+  config.toml    # format_version and the board's name, created on init
   README.md      # format reference for humans and agents, created on init
   a7rq4ne.md     # a parent task
   k3f9x2m.md
@@ -42,13 +42,16 @@ Each task is one Markdown file with YAML frontmatter, stored flat in `.tandem/` 
 
 **IDs** are 7 random characters from a 32-character alphabet (lowercase letters and digits without `0 o 1 l`), such as `k3f9x2m`. That gives about 34 billion possible ids, so tasks created on different branches practically never clash; the app still checks before creating one. The filename is exactly `<id>.md`. The app reads only files whose name matches that pattern, so `README.md` and anything else in the folder is ignored. People and agents find tasks through the app or the MCP tools, by id, title, label or text, never by filename.
 
-**Format version.** `.tandem/config.toml` records which version of this file format the folder uses. The app creates it on init, and it is committed like the tasks.
+**Project settings.** `.tandem/config.toml` holds the settings the whole team shares. The app creates it on init, and it is committed like the tasks.
 
 ```toml
 format_version = 1
+name = "Tandem"
 ```
 
-On open, the app compares it with the versions it supports. An older version gets a one-time migration that rewrites the files, which you then commit. A newer version opens the project read-only and asks you to update the app. A missing file is treated as version 1 and written.
+`format_version` records which version of this file format the folder uses. On open, the app compares it with the versions it supports. An older version gets a one-time migration that rewrites the files, which you then commit. A newer version opens the project read-only and asks you to update the app. A missing file is treated as version 1 and written.
+
+`name` is the board's display name, set in Settings. It is optional: without it, the app uses the repo folder's name. Writes to `config.toml` follow the task-file write rules: they keep the other keys, comments and order, change only the `name` line, and write atomically. An invalid `config.toml` opens the project read-only and is never overwritten.
 
 **Example file:**
 
@@ -149,15 +152,20 @@ Deleting is refused while an agent holds a live lease on the task, and while ano
 
 ## SQLite schema
 
-SQLite lives in the app's data directory, never in the repo: one global `app.db` for the project list, plus one database per project at `projects/<project-id>.db`. Both use WAL mode. Every row in a project database is either rebuilt from files or deliberately short-lived.
+SQLite lives in the app's data directory, never in the repo: one global `app.db` for the project list and the app settings, plus one database per project at `projects/<project-id>.db`. Both use WAL mode. Every row in a project database is either rebuilt from files or deliberately short-lived.
 
 ```sql
 -- app.db
 CREATE TABLE projects (
-  id             TEXT PRIMARY KEY,   -- short slug, used in the MCP URL
-  name           TEXT NOT NULL,
+  id             TEXT PRIMARY KEY,   -- short slug, used in the MCP URL; unique on this machine
+  name           TEXT NOT NULL,      -- copy of config.toml's name, or the folder name
   repo_path      TEXT NOT NULL UNIQUE,
   last_opened_at TEXT
+);
+
+CREATE TABLE settings (              -- app settings, such as mcp_port and theme
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 -- projects/<project-id>.db
@@ -222,11 +230,11 @@ CREATE TABLE agents (
 - **After any index change:** re-check the whole graph for parent loops, dependency loops and missing parents. It is a linear pass, so it needs no separate trigger.
 - Drop any lease whose task is no longer `in_progress` in its file, for example after switching branches.
 - Delete working-log rows for missing tasks after 30 days.
-- A Reset local state button in settings deletes the project database and rescans.
+- A Reset local state button in Settings deletes the project database and rescans. An agent working on a task carries on with its id, as after any rebuild.
 
 ## MCP server
 
-The app serves MCP over Streamable HTTP on `127.0.0.1:4317` (configurable), with one endpoint per project: `http://127.0.0.1:4317/p/<project-id>/mcp`. It binds to localhost only and needs the app to be running. If the call fails to connect, the agent tells you to open the app.
+The app serves MCP over Streamable HTTP on `127.0.0.1:4317` (the port is set in Settings), with one endpoint per project: `http://127.0.0.1:4317/p/<project-id>/mcp`. It binds to localhost only and needs the app to be running. If the call fails to connect, the agent tells you to open the app.
 
 **Agent identity:** issued by the server. `start_task` creates a new agent id from the MCP client name and a random suffix (such as `claude-code-7f2a`) and returns it; agents cannot choose their own. The tools only the lease holder may call take it back as a required `agent` argument, and the other tools accept it optionally. A call without it is attributed to the client name from `clientInfo`, such as `claude-code`. Identity doesn't depend on MCP sessions, so clients on protocol 2026-07-28, which has none, and older clients with sessions work the same way. **Leases** last 15 minutes and are extended by every tool call that passes the holder's id, so agents never need to send a separate heartbeat.
 
@@ -382,7 +390,12 @@ One window: a project switcher, a five-column board, and a detail pane that slid
 
 **Setup panel.** The project's MCP URL with copy buttons for the Claude Code command, `.mcp.json` and the `AGENTS.md` snippet.
 
-**Also in v1:** a new-task dialog, filter by label or parent, text search, and shortcuts: `N` new task, `/` search, `Enter` open card, `R` mark reviewed, `A` approve.
+**Settings.** A page with two tabs, opened from the top bar or with `Cmd/Ctrl+,`:
+
+- **App**, stored in `app.db`, never in a repo: the MCP server port, and the theme (system, light or dark). Changing the port restarts the server and updates every project's MCP URL; agent configs with the old URL need updating. If the new port is taken, the server keeps running on the old one.
+- **Project**, for the board on screen. The name is saved in `.tandem/config.toml`, so the team shares it. Local values, never committed: the project id and MCP URL with copy buttons, **Reset local state**, with a confirmation that leases and working logs will be lost, and **Remove**, as in the project switcher.
+
+**Also in v1:** a new-task dialog, filter by label or parent, text search, and shortcuts: `N` new task, `/` search, `Enter` open card, `R` mark reviewed, `A` approve, `Cmd/Ctrl+,` settings.
 
 ## Repo and open-source setup
 
