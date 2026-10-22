@@ -108,7 +108,7 @@ body {
 .app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(100vh - var(--env-strip-height, 0px));
 }
 
 .topbar {
@@ -963,6 +963,53 @@ button {
 
 .dialog::backdrop {
   background: rgb(0 0 0 / 35%);
+}
+
+/* The build environment strip, across the top edge of every non-production
+   build with its label in the middle (see buildEnv.ts). The page starts below
+   it. The colours keep white text readable (4.5:1) in both themes. */
+:root[data-env] {
+  --env-strip-height: 16px;
+}
+
+:root[data-env='dev'] {
+  --env-strip: #b95500;
+}
+
+:root[data-env='alpha'] {
+  --env-strip: #7a45c9;
+}
+
+:root[data-env='beta'] {
+  --env-strip: #2566d6;
+}
+
+:root[data-env] body {
+  padding-top: var(--env-strip-height);
+}
+
+:root[data-env]::after {
+  content: attr(data-env-label);
+  position: fixed;
+  z-index: 2147483647;
+  inset: 0 0 auto;
+  height: var(--env-strip-height);
+  background: var(--env-strip);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: var(--env-strip-height);
+  letter-spacing: 0.04em;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Modal dialogs sit in the top layer, above any z-index, so their backdrop
+   leaves the strip's band undimmed. The height is literal: ::backdrop doesn't
+   inherit custom properties everywhere. */
+:root[data-env] .dialog::backdrop {
+  background: linear-gradient(transparent 0 16px, rgb(0 0 0 / 35%) 16px);
 }
 
 .dialog h3 {

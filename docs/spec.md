@@ -420,6 +420,7 @@ tandem/
 
 - **CI on every pull request:** `cargo fmt --check`, `cargo clippy`, `cargo test`, and frontend lint, typecheck and tests.
 - **Releases:** a tag `v*` runs `tauri-apps/tauri-action` to build macOS, Windows and Linux bundles into a draft GitHub release.
+- **Build environments:** the build fixes which environment it is, and it can't be changed at runtime or from the UI. `cargo tauri dev` is DEV, a tag `vX.Y.Z-alpha.N` is ALPHA, a tag `vX.Y.Z-beta.N` is BETA, and a tag `vX.Y.Z` (or a local release build) is production. The release workflow fails on any other tag and marks ALPHA and BETA releases as pre-releases; their Windows bundle is the NSIS installer only, since MSI refuses pre-release versions. DEV, ALPHA and BETA builds put the environment in the window title (`Tandem DEV`, `Tandem ALPHA`, `Tandem BETA`) and draw a 16px strip across the top of the window, orange, purple and blue, above every page and dialog. The strip's middle reads the environment in white, plus the version for ALPHA and BETA: `DEV build`, `ALPHA build (v0.2.0-alpha.1)`, and the page starts below it. Production shows neither.
 - **Signing:** v1 ships unsigned builds; the README explains the macOS Gatekeeper and Windows SmartScreen warnings.
 - **README:** a short screen recording of an agent moving a card, quick start, agent setup, and a link to the task format in `docs/spec.md`.
 

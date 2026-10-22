@@ -1,3 +1,4 @@
+mod build_env;
 mod commands;
 mod dto;
 mod error;
@@ -11,6 +12,7 @@ use tandem_board_mcp::Endpoints;
 use tauri::{Emitter, Manager, RunEvent};
 use tokio_util::sync::CancellationToken;
 
+use crate::build_env::BuildEnv;
 use crate::dto::{PROJECTS_CHANGED, ProjectsChanged, TASKS_CHANGED, TasksChanged};
 use crate::error::report;
 use crate::mcp::Mcp;
@@ -23,6 +25,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(move |app| {
+            open_main_window(app)?;
             let data_dir = app.path().app_data_dir()?;
             let mcp = Mcp::new(Endpoints::new(&setup_cancel), setup_cancel.clone());
             let handle = app.handle().clone();
@@ -84,6 +87,22 @@ pub fn run() {
                 cancel.cancel();
             }
         });
+}
+
+/// Opens the main window from its config, titled with the build environment.
+/// It's built here rather than by Tauri, so the plain title never flashes.
+fn open_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .expect("tauri.conf.json defines the main window");
+    tauri::WebviewWindowBuilder::from_config(app, config)?
+        .title(BuildEnv::current().title())
+        .build()?;
+    Ok(())
 }
 
 /// Gives the windows the theme, so their title bars match the page. The
