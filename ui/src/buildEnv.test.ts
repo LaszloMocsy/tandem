@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { APP_VERSION, applyBuildEnv, BUILD_ENV, type BuildEnv } from './buildEnv.ts'
+import { APP_VERSION, applyBuildEnv, BUILD_ENV, type BuildEnv, versionText } from './buildEnv.ts'
 
 function marked(env: BuildEnv, version: string): DOMStringMap {
   const root = { dataset: {} as DOMStringMap }
@@ -29,4 +29,11 @@ test('production builds show no strip', () => {
 test('tests run on the dev server, so the build is dev', () => {
   expect(BUILD_ENV).toBe('dev')
   expect(APP_VERSION).toMatch(/^\d+\.\d+\.\d+/)
+})
+
+test('the version text names non-production builds', () => {
+  expect(versionText('production', '0.2.0')).toBe('Tandem v0.2.0')
+  expect(versionText('alpha', '0.2.0-alpha.1')).toBe('Tandem v0.2.0-alpha.1 (ALPHA build)')
+  expect(versionText('beta', '0.2.0-beta.3')).toBe('Tandem v0.2.0-beta.3 (BETA build)')
+  expect(versionText('dev', '0.1.0')).toBe('Tandem v0.1.0 (DEV build)')
 })

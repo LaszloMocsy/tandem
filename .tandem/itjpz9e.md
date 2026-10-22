@@ -1,12 +1,13 @@
 ---
 id: itjpz9e
 title: CI check and PR template for PRs into main
-status: finished
+status: done
 priority: high
 parent: b85qh8f
 labels: [area:release, feat/versioning]
 depends_on: [tenmi47]
 created: 2026-10-22
+reviewed_at: 2026-10-22
 ---
 
 ## Description

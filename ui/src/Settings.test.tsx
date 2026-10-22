@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
 import type { AppSettings, ProjectInfo } from './api.ts'
+import { APP_VERSION, type BuildEnv } from './buildEnv.ts'
 import { ResetLocalStateForm } from './dialogs.tsx'
 import { AppSettingsView, ProjectSettingsView, Settings, type SettingsApi } from './Settings.tsx'
 import { isSettingsShortcut } from './shortcuts.ts'
@@ -97,6 +98,33 @@ test('a port that is not a number is refused before it is sent', () => {
   expect(html).toContain('The port must be between 1 and 65535.')
   expect(html).toMatch(/aria-invalid="true"/)
   expect(html).toMatch(/<button type="submit" class="primary" disabled="">Apply/)
+})
+
+test('the App tab shows the running version, with the build for non-production builds', () => {
+  const view = (env: BuildEnv, version: string) =>
+    renderToStaticMarkup(
+      <AppSettingsView
+        settings={running}
+        portText="4317"
+        portError={null}
+        themeError={null}
+        busy={false}
+        onPortText={noop}
+        onApplyPort={noop}
+        onTheme={noop}
+        env={env}
+        version={version}
+      />,
+    )
+  expect(view('production', '0.2.0')).toContain('<code>Tandem v0.2.0</code>')
+  expect(view('beta', '0.2.0-beta.1')).toContain('<code>Tandem v0.2.0-beta.1 (BETA build)</code>')
+  expect(view('alpha', '0.2.0-alpha.3')).toContain(
+    '<code>Tandem v0.2.0-alpha.3 (ALPHA build)</code>',
+  )
+  expect(view('dev', '0.1.0')).toContain('<code>Tandem v0.1.0 (DEV build)</code>')
+  expect(view('production', '0.2.0')).toContain('aria-label="Copy version"')
+  // Without overrides it describes the running build, which tests run as dev.
+  expect(appView(running)).toContain(`<code>Tandem v${APP_VERSION} (DEV build)</code>`)
 })
 
 test('the Project tab shows the name, the local values and the actions', () => {

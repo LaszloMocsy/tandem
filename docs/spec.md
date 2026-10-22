@@ -392,7 +392,7 @@ One window: a project switcher, a five-column board, and a detail pane that slid
 
 **Settings.** A page with two tabs, opened from the top bar or with `Cmd/Ctrl+,`:
 
-- **App**, stored in `app.db`, never in a repo: the MCP server port, and the theme (system, light or dark). Changing the port restarts the server and updates every project's MCP URL; agent configs with the old URL need updating. If the new port is taken, the server keeps running on the old one.
+- **App**, stored in `app.db`, never in a repo: the MCP server port, and the theme (system, light or dark). Changing the port restarts the server and updates every project's MCP URL; agent configs with the old URL need updating. If the new port is taken, the server keeps running on the old one. The App tab's About section shows the running version with a copy button, such as `Tandem v0.2.0`, with the build added for the others: `Tandem v0.2.0-beta.1 (BETA build)`. It comes from `tauri.conf.json` at build time, like the strip's label.
 - **Project**, for the board on screen. The name is saved in `.tandem/config.toml`, so the team shares it. Local values, never committed: the project id and MCP URL with copy buttons, **Reset local state**, with a confirmation that leases and working logs will be lost, and **Remove**, as in the project switcher.
 
 **Also in v1:** a new-task dialog, filter by label or parent, text search, and shortcuts: `N` new task, `/` search, `Enter` open card, `R` mark reviewed, `A` approve, `Cmd/Ctrl+,` settings.
