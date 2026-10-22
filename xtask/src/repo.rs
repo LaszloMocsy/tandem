@@ -1,7 +1,9 @@
 //! The repo: reading and writing the version files, and running git and gh.
 
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{self, Command, Output};
 use std::{env, fs};
 
 use crate::files;
@@ -103,8 +105,9 @@ impl Repo {
     /// file as it was.
     pub fn write(&self, file: &str, contents: &str) -> Result<(), String> {
         let path = self.root.join(file);
-        let tmp = path.with_extension("xtask-tmp");
-        fs::write(&tmp, contents)
+        let (tmp, mut out) = create_temp(&path).map_err(|e| format!("can't write {file}: {e}"))?;
+        out.write_all(contents.as_bytes())
+            .and_then(|()| out.sync_all())
             .and_then(|()| fs::rename(&tmp, &path))
             .map_err(|e| {
                 let _ = fs::remove_file(&tmp);
@@ -171,4 +174,26 @@ impl Repo {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+}
+
+/// Creates a new temp file next to `path`. It never opens a path that
+/// already exists, so an unrelated file or a symlink at a temp name is left
+/// alone; on a collision it tries the next name.
+fn create_temp(path: &Path) -> io::Result<(PathBuf, File)> {
+    let name = path
+        .file_name()
+        .expect("version files have a file name")
+        .to_string_lossy();
+    for attempt in 0..100 {
+        let tmp = path.with_file_name(format!(".{name}.{}.{attempt}.xtask-tmp", process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free temp file name",
+    ))
 }
