@@ -220,6 +220,22 @@ fn a_deleted_file_is_removed() {
     assert_eq!(drain(&events), Vec::<Changes>::new());
 }
 
+#[test]
+fn a_file_deleted_right_after_the_app_wrote_it_is_removed() {
+    let env = Env::new();
+    let _watcher = env.watch();
+    let events = env.service.subscribe();
+
+    // The create and the delete land in the same debounce window. The
+    // index already has the task, so the delete must still come through.
+    let id = env.create("Short-lived");
+    fs::remove_file(env.path(id)).unwrap();
+    assert_eq!(events.try_recv().unwrap(), changed(&[id]));
+    let removed = events.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(removed.removed, [id].into());
+    assert_eq!(drain(&events), Vec::<Changes>::new());
+}
+
 /// Runs git in `repo`, asserting it succeeds. Signing and hooks from your
 /// own git config are off, through the repo's config.
 fn git(repo: &Path, args: &[&str]) {
