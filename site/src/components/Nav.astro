@@ -6,7 +6,7 @@ import { REPO_URL } from '../consts';
   <nav class="container nav-inner" aria-label="Main">
     <a class="brand" href="/">
       <img src="/logo.svg" alt="" width="28" height="28" />
-      <span>Tandem</span>
+      <span class="wordmark">Tandem</span>
     </a>
     <ul>
       <li><a href="/#how-it-works">How it works</a></li>
@@ -31,6 +31,7 @@ import { REPO_URL } from '../consts';
   }
 
   .brand {
+    flex: none;
     display: inline-flex;
     align-items: center;
     gap: 10px;
@@ -51,9 +52,26 @@ import { REPO_URL } from '../consts';
   ul a {
     display: block;
     padding: 6px 10px;
+    white-space: nowrap;
     border-radius: 8px;
     color: var(--muted);
     text-decoration: none;
+  }
+
+  /* On narrow screens the logo stands alone; the link keeps its name. */
+  @media (max-width: 420px) {
+    .wordmark {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    ul a {
+      padding-inline: 7px;
+    }
   }
 
   ul a:hover {

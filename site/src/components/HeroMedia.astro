@@ -1,0 +1,95 @@
+---
+// The hero's product shot. Until the recording lands it shows a screenshot of
+// the board, light or dark to match the system. Pass `video` to play the loop
+// instead: it starts muted with the poster, loads nothing up front, and
+// only the poster shows with reduced motion.
+import { getImage } from 'astro:assets';
+import boardDark from '../assets/hero/board-dark.png';
+import boardLight from '../assets/hero/board-light.png';
+
+interface Props {
+  video?: { webm: string; mp4: string; poster: ImageMetadata };
+}
+
+const { video } = Astro.props;
+const alt =
+  'The Tandem board: Backlog, Todo, In progress, Review and Done columns, with two cards held by live agents.';
+const widths = [720, 1440];
+const sizes = '(min-width: 1100px) 1040px, calc(100vw - 40px)';
+
+const [light, dark, poster] = await Promise.all([
+  getImage({ src: boardLight, format: 'webp', widths }),
+  getImage({ src: boardDark, format: 'webp', widths }),
+  video ? getImage({ src: video.poster, format: 'webp' }) : undefined,
+]);
+---
+
+<figure class="media">
+  {
+    video && poster ? (
+      <>
+        <video
+          class="motion"
+          muted
+          loop
+          playsinline
+          autoplay
+          preload="none"
+          poster={poster.src}
+          width={video.poster.width}
+          height={video.poster.height}
+          aria-label={alt}
+        >
+          <source src={video.webm} type='video/webm; codecs="av01.0.05M.08"' />
+          <source src={video.mp4} type="video/mp4" />
+        </video>
+        <img class="still" src={poster.src} alt={alt} width={video.poster.width} height={video.poster.height} />
+      </>
+    ) : (
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset={dark.srcSet.attribute} sizes={sizes} type="image/webp" />
+        <img
+          src={light.src}
+          srcset={light.srcSet.attribute}
+          sizes={sizes}
+          alt={alt}
+          width={boardLight.width}
+          height={boardLight.height}
+          fetchpriority="high"
+          decoding="async"
+        />
+      </picture>
+    )
+  }
+</figure>
+
+<style>
+  .media {
+    margin: 0;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+
+  img,
+  video {
+    width: 100%;
+    height: auto;
+  }
+
+  .still {
+    display: none;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .motion {
+      display: none;
+    }
+
+    .still {
+      display: block;
+    }
+  }
+</style>

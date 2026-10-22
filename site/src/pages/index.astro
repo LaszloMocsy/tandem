@@ -1,18 +1,13 @@
 ---
 import Download from '../components/Download.astro';
+import Hero from '../components/Hero.astro';
+import HowItWorks from '../components/HowItWorks.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 
 <BaseLayout title="Tandem: a task board you share with your coding agents">
-  <section class="container intro">
-    <h1>A task board you share with your coding agents.</h1>
-    <p>
-      Tasks are Markdown files in your repo. Agents claim and finish them through MCP, and you
-      review what they did.
-    </p>
-    <Download id="hero" />
-  </section>
-  <section id="how-it-works" class="container" aria-label="How it works"></section>
+  <Hero />
+  <HowItWorks />
   <section id="download" class="container closing" aria-labelledby="download-title">
     <h2 id="download-title">Download Tandem</h2>
     <Download id="closing" />
@@ -20,27 +15,6 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 </BaseLayout>
 
 <style>
-  .intro {
-    display: grid;
-    gap: 32px;
-    padding-block: 96px 64px;
-    max-width: 760px;
-    text-align: center;
-  }
-
-  h1 {
-    margin: 0;
-    font-size: clamp(2rem, 5vw, 3.25rem);
-    line-height: 1.1;
-    letter-spacing: -0.02em;
-  }
-
-  .intro > p {
-    margin: 0;
-    color: var(--muted);
-    font-size: 1.15rem;
-  }
-
   .closing {
     padding-block: 64px 96px;
     text-align: center;
