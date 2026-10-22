@@ -60,7 +60,7 @@ Changes to the board should also be tried in the running app with `cargo tauri d
 
 For maintainers:
 
-1. Set the new version in both `Cargo.toml` (`[workspace.package]`) and `desktop/tauri.conf.json`, run `cargo build` to update `Cargo.lock`, and commit.
+1. Set the new version with `cargo xtask version bump 0.2.0` (or `0.2.0-alpha.1`, `0.2.0-beta.1`). It updates `Cargo.toml` (`[workspace.package]`), `desktop/tauri.conf.json` and `Cargo.lock`, and refuses a version that isn't higher than the current one. Commit the result.
 2. Tag the commit and push the tag:
 
    ```sh
@@ -68,7 +68,7 @@ For maintainers:
    git push origin v0.2.0
    ```
 
-3. The Release workflow checks that the tag matches both versions, then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
+3. The Release workflow checks that the tag matches the version (`cargo xtask version check --tag`), then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
 4. Check the assets, edit the notes, and publish the draft.
 
 The builds are not signed yet; [Installing an unsigned build](README.md#installing-an-unsigned-build) explains what users see.

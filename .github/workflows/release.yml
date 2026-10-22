@@ -30,25 +30,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # alpha, beta, or empty for a production release.
+      # For the version tooling in xtask/.
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+
+      # alpha, beta, or empty for a production release. Fails on any other tag.
       - name: Read the build environment from the tag
         id: env
         env:
           TAG: ${{ github.ref_name }}
         run: |
-          env=$(sh .github/scripts/build-env.sh "$TAG")
+          env=$(cargo --locked xtask version env "$TAG")
           echo "env=$env" >> "$GITHUB_OUTPUT"
 
+      # Cargo.toml, tauri.conf.json and Cargo.lock must agree with the tag.
       - name: Check the tag matches the app version
         env:
           TAG: ${{ github.ref_name }}
-        run: |
-          app=$(jq -r .version desktop/tauri.conf.json)
-          crates=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-          if [ "$TAG" != "v$app" ] || [ "$TAG" != "v$crates" ]; then
-            echo "::error::Tag $TAG does not match tauri.conf.json ($app) and Cargo.toml ($crates)"
-            exit 1
-          fi
+        run: cargo --locked xtask version check --tag "$TAG"
 
       - name: Create the draft release
         id: create

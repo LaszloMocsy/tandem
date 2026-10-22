@@ -405,15 +405,15 @@ One public repo on your personal GitHub, MIT licensed, that tracks its own devel
 
 ```txt
 tandem/
-  Cargo.toml            # workspace: core, mcp, desktop
+  Cargo.toml            # workspace: core, mcp, desktop, xtask
   core/                 # tandem-board-core: store, index, service, watcher, git
   mcp/                  # tandem-board-mcp: MCP server on top of core
   desktop/              # tandem-board-desktop: Tauri shell, tauri.conf.json, commands
+  xtask/                # repo tooling, run as `cargo xtask`: version checks and bumps
   ui/                   # React + Vite frontend
   site/                 # landing page: static Astro site
   .tandem/              # Tandem's own tasks, managed by Tandem
   docs/spec.md          # this spec, exported as Markdown
-  scripts/              # bump-version.sh and its shared version helpers
   .github/workflows/    # ci.yml, release.yml, site-deploy.yml
   AGENTS.md  README.md  CONTRIBUTING.md  LICENSE
 ```
@@ -422,7 +422,7 @@ tandem/
 
 - **CI on every pull request:** `cargo fmt --check`, `cargo clippy`, `cargo test`, and frontend lint, typecheck and tests.
 - **Releases:** a tag `v*` runs `tauri-apps/tauri-action` to build macOS, Windows and Linux bundles into a draft GitHub release.
-- **Versions:** the app version lives in `Cargo.toml` (`[workspace.package]`), `desktop/tauri.conf.json` and the workspace crates in `Cargo.lock`. `sh scripts/bump-version.sh X.Y.Z` (or `X.Y.Z-alpha.N`, `X.Y.Z-beta.N`) sets all three and refuses a malformed version or one that isn't higher than the current one, by SemVer precedence (`0.2.0-alpha.1 < 0.2.0-beta.1 < 0.2.0`). `scripts/version.sh` holds the version rules, shared with the release workflow's tag check.
+- **Versions:** the app version lives in `Cargo.toml` (`[workspace.package]`), `desktop/tauri.conf.json` and the workspace crates in `Cargo.lock`. The `xtask` crate, run as `cargo xtask`, is the one place that reads and writes it, locally and in workflows: `cargo xtask version` prints it, `version check [--tag vX.Y.Z]` fails unless the three files agree (and match the tag), `version bump X.Y.Z` (or `X.Y.Z-alpha.N`, `X.Y.Z-beta.N`) sets all three and refuses a malformed version or one that isn't higher by SemVer precedence (`0.2.0-alpha.1 < 0.2.0-beta.1 < 0.2.0`), and `version env <tag>` prints the build environment for a release tag. `xtask` is a workspace member with its own version, so CI's Rust job tests it and a bump doesn't touch it.
 - **Build environments:** the build fixes which environment it is, and it can't be changed at runtime or from the UI. `cargo tauri dev` is DEV, a tag `vX.Y.Z-alpha.N` is ALPHA, a tag `vX.Y.Z-beta.N` is BETA, and a tag `vX.Y.Z` (or a local release build) is production. The release workflow fails on any other tag and marks ALPHA and BETA releases as pre-releases; their Windows bundle is the NSIS installer only, since MSI refuses pre-release versions. DEV, ALPHA and BETA builds put the environment in the window title (`Tandem DEV`, `Tandem ALPHA`, `Tandem BETA`) and draw a 16px strip across the top of the window, orange, purple and blue, above every page and dialog. The strip's middle reads the environment in white, plus the version for ALPHA and BETA: `DEV build`, `ALPHA build (v0.2.0-alpha.1)`, and the page starts below it. Production shows neither.
 - **Landing page:** `site/` is a static Astro site managed with bun, hosted on Vercel at `tandem.laszlomocsy.com`. Vercel's Git integration uses `site/` as the project root, and the `ignoreCommand` in `site/vercel.json` skips builds when `site/**` hasn't changed since the last deployment; pushes to `main` deploy to production and pull requests get preview deployments. Publishing a GitHub release runs `site-deploy.yml`, which builds `main` with the Vercel CLI and deploys it to production as a prebuilt deployment, so the skip can't cancel it and the download links always point at the latest release.
 - **Signing:** v1 ships unsigned builds; the README explains the macOS Gatekeeper and Windows SmartScreen warnings.
