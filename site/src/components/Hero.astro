@@ -1,0 +1,74 @@
+---
+import { REPO_URL } from '../consts';
+import Download from './Download.astro';
+import HeroMedia from './HeroMedia.astro';
+---
+
+<section class="hero">
+  <div class="container copy">
+    <h1>A task board you share with your coding agents.</h1>
+    <p class="subline">
+      Tasks are Markdown files in your repo. Agents claim and finish them over MCP. You review.
+    </p>
+    <Download id="hero" />
+    <a class="github" href={REPO_URL}>View on GitHub</a>
+    <p class="small">Free and MIT licensed · macOS, Windows, Linux</p>
+  </div>
+  <div class="container shot">
+    <HeroMedia />
+  </div>
+</section>
+
+<style>
+  .hero {
+    padding-block: clamp(48px, 10vw, 96px) 32px;
+  }
+
+  .copy {
+    display: grid;
+    justify-items: center;
+    gap: 20px;
+    max-width: 780px;
+    text-align: center;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(2rem, 6vw, 3.4rem);
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+
+  .subline {
+    margin: 0 0 12px;
+    max-width: 36em;
+    color: var(--muted);
+    font-size: clamp(1.05rem, 2.5vw, 1.2rem);
+    text-wrap: balance;
+  }
+
+  .github {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .github:hover {
+    background: var(--chip);
+  }
+
+  .small {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+
+  .shot {
+    margin-top: clamp(40px, 8vw, 72px);
+  }
+</style>

@@ -1,0 +1,66 @@
+---
+// Copies `text` to the clipboard. The only script it needs is below, shared
+// by every copy button on the page.
+interface Props {
+  text: string;
+  /** What is copied, for screen readers, such as "the command". */
+  label: string;
+}
+
+const { text, label } = Astro.props;
+---
+
+<button class="copy" type="button" data-copy={text} aria-label={`Copy ${label}`}>
+  <span class="idle">Copy</span>
+  <span class="done" aria-hidden="true">Copied</span>
+</button>
+<span class="visually-hidden" role="status" data-copy-status></span>
+
+<script>
+  for (const button of document.querySelectorAll<HTMLButtonElement>('button[data-copy]')) {
+    const status = button.nextElementSibling as HTMLElement | null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(button.dataset.copy ?? '');
+      } catch {
+        if (status) status.textContent = 'Copy failed. Select the text and copy it instead.';
+        return;
+      }
+      button.dataset.copied = '';
+      if (status) status.textContent = 'Copied';
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        delete button.dataset.copied;
+        if (status) status.textContent = '';
+      }, 2000);
+    });
+  }
+</script>
+
+<style>
+  .copy {
+    flex: none;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+
+  .copy:hover {
+    background: var(--chip);
+  }
+
+  .done,
+  .copy[data-copied] .idle {
+    display: none;
+  }
+
+  .copy[data-copied] .done {
+    display: inline;
+  }
+</style>

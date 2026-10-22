@@ -1,0 +1,11 @@
+---
+// Shiki-highlighted code with light and dark themes; global.css switches them.
+import { Code } from 'astro:components';
+import type { ComponentProps } from 'astro/types';
+
+type Props = Pick<ComponentProps<typeof Code>, 'code' | 'lang'>;
+
+const { code, lang } = Astro.props;
+---
+
+<Code code={code} lang={lang} themes={{ light: 'github-light', dark: 'github-dark' }} />

@@ -1,0 +1,117 @@
+---
+// Plain text on purpose: no vendor logos implying official integrations.
+import CodeBlock from './CodeBlock.astro';
+
+const url = 'http://127.0.0.1:4317/p/<project-id>/mcp';
+const mcpJson = `{
+  "mcpServers": {
+    "tandem": { "type": "http", "url": "${url}" }
+  }
+}`;
+---
+
+<section class="agents" aria-labelledby="agents-title">
+  <div class="container">
+    <h2 id="agents-title">Works with your agent</h2>
+    <p class="lead">
+      Each project gets one MCP endpoint over HTTP. The app's Setup panel shows its URL with copy
+      buttons for each of these.
+    </p>
+
+    <div class="grid">
+      <article>
+        <h3>Claude Code</h3>
+        <p>Add the server once from your terminal:</p>
+        <pre class="cmd"><code>claude mcp add --transport http tandem {url}</code></pre>
+      </article>
+
+      <article>
+        <h3><code>.mcp.json</code></h3>
+        <p>Or commit this at the repo root, so every Claude Code session in the repo gets the server:</p>
+        <CodeBlock code={mcpJson} lang="json" />
+      </article>
+
+      <article>
+        <h3>Codex, Cursor and others</h3>
+        <p>
+          Any MCP client that supports Streamable HTTP can use the same URL, in its own config
+          format. See your client's docs.
+        </p>
+      </article>
+
+      <article>
+        <h3><code>AGENTS.md</code></h3>
+        <p>
+          Add the workflow snippet to <code>AGENTS.md</code> or <code>CLAUDE.md</code>, so agents
+          claim tasks before working, commit the task file with their work, and never mark their own
+          work reviewed.
+        </p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<style>
+  .agents {
+    padding-block: clamp(56px, 10vw, 104px);
+  }
+
+  h2 {
+    margin: 0 0 12px;
+    font-size: clamp(1.6rem, 4vw, 2.2rem);
+    letter-spacing: -0.015em;
+    text-align: center;
+  }
+
+  .lead {
+    max-width: 38em;
+    margin: 0 auto clamp(28px, 5vw, 48px);
+    color: var(--muted);
+    text-align: center;
+    text-wrap: balance;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+    gap: 16px;
+  }
+
+  article {
+    min-width: 0;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+  }
+
+  h3 {
+    margin: 0 0 8px;
+    font-size: 1.05rem;
+  }
+
+  article > p {
+    margin: 0 0 12px;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+
+  article > p:last-child {
+    margin-bottom: 0;
+  }
+
+  article p code {
+    color: var(--text);
+  }
+
+  .cmd,
+  article :global(.astro-code) {
+    margin: 0;
+    padding: 12px 14px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg) !important;
+    font-size: 0.8rem;
+  }
+</style>
