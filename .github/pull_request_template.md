@@ -4,7 +4,7 @@
 
 ## Checklist
 
-- [ ] Tests cover the change, and `docs/spec.md` is updated if behaviour changed
+- [ ] Tests cover the change, and the README and docs are updated if behaviour changed
 - [ ] Commits for a Tandem task carry its `Task: <id>` trailer
 
 <!-- For a version/vX.Y.Z pull request into main; delete otherwise. -->

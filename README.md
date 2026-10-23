@@ -2,26 +2,24 @@
 
 A task board that you and your AI coding agents share.
 
-Each task is a Markdown file in your repo's `.tandem/` folder, committed with the code that works on it. Agents claim tasks, log progress and finish them through an MCP server built into the app. You approve what they propose, review what they finish, and watch it all happen on a five-column board: Backlog, Todo, In progress, Review and Done.
-
-The design, including the task file format, is in [docs/spec.md](docs/spec.md).
+Tasks live in the app, on your machine; nothing is added to your repo. Agents claim tasks, log progress and finish them through an MCP server built into the app. You approve what they propose, review what they finish, and watch it all happen on a five-column board: Backlog, Todo, In progress, Review and Done.
 
 ## How it works
 
-- **Tasks are files.** `.tandem/k3f9x2m.md` holds a task's title, status, acceptance criteria and changelog. You commit it like code, so the history of the work lives in git. The format is in [Task file format](docs/spec.md#task-file-format).
-- **Agents work through MCP.** An agent calls `start_task` to claim a task, `log_progress` and `set_blocked` while it works, and `finish_task` when it's done. Claims are leases, so a crashed agent's task can be taken over.
-- **You stay in charge.** Tasks an agent proposes wait in Backlog until you approve them, and only you can mark finished work reviewed. **Commit review** commits that one task file and nothing else.
-- **Activity stays local.** Leases, blocked flags and working logs live in a SQLite database in the app's data folder, never in the repo. Delete it, and the next launch rebuilds the board from the files.
+- **Tasks live in the app.** Each project has its own SQLite database in the app's data folder, holding every task with its acceptance criteria and full history: the changelog and the agents' working notes, kept for good. Your repo stays untouched.
+- **One board per repo.** A project is identified by its repo, so every git worktree of it opens the same board, and agents in parallel worktrees share it.
+- **Agents work through MCP.** An agent calls `start_task` to claim a task, `log_progress` and `set_blocked` while it works, and `finish_task` when it's done. Claims are leases, so a crashed agent's task can be taken over. Agents add a `Task: <id>` trailer to their commits, so git still links the code to the task.
+- **You stay in charge.** Tasks an agent proposes wait in Backlog until you approve them, and only you can mark finished work reviewed. Deleted tasks can be restored from Settings until you clean them up.
 
 ## Quick start
 
 1. Download the build for your platform from the [latest release](https://github.com/LaszloMocsy/tandem/releases/latest). The builds aren't signed yet, so see [Installing an unsigned build](#installing-an-unsigned-build) before you open it.
-2. Open Tandem, choose **Open folder** and pick a git repo. If it has no `.tandem/` folder yet, Tandem offers to create one with a `config.toml` and a `README.md` describing the format.
+2. Open Tandem, choose **Open folder** and pick a git repo, or any folder in it. A folder outside git works too, after a warning. If the repo has a `.tandem/` folder from an earlier version, its tasks are imported the first time you open it; the folder is only read, and you can delete it afterwards.
 3. Press **N** to create a task. Yours start in Todo, ready for an agent.
 4. Connect an agent, as described in [Connecting an agent](#connecting-an-agent), and ask it to work on the task.
 5. Watch the card move to In progress with the agent's badge, then to Review. Open it, check the work, and press **Mark reviewed**, or **Reopen with feedback** to send it back.
 
-Shortcuts: **N** new task, **/** search, **Enter** open the focused card, **R** mark reviewed, **A** approve. You can also drag cards between columns; each move applies the matching step from the [State model](docs/spec.md#state-model).
+Shortcuts: **N** new task, **/** search, **Enter** open the focused card, **R** mark reviewed, **A** approve. You can also drag cards between columns; each move applies the matching step, such as approving a task or marking it reviewed.
 
 ## Connecting an agent
 
@@ -45,7 +43,20 @@ The **Setup** panel shows your project's URL, with copy buttons for each of thes
   }
   ```
 
-- **`AGENTS.md` snippet:** add it to `AGENTS.md` or `CLAUDE.md`, so agents claim tasks before working, commit the task file with their work, and never mark their own work reviewed. The snippet is in [Agent workflow](docs/spec.md#agent-workflow).
+- **`AGENTS.md` snippet:** add it to `AGENTS.md` or `CLAUDE.md`, so agents claim tasks before working, tag their commits with the task and never mark their own work reviewed:
+
+  ```markdown
+  ## Tasks
+
+  This repo's tasks live in the Tandem app; agents work on them through the `tandem` MCP server.
+
+  - Before starting work, call `start_task` on the task (use `next_task` if none was given), and pass the agent id it returns as `agent` to every later tandem call for that task.
+  - Add a `Task: <id>` trailer to every commit for that task.
+  - Use `log_progress` for notes and `set_blocked` when you need a decision from me.
+  - Split large work into child tasks with `create_task` and `parent`. New tasks wait in backlog until I approve them; only start tasks in todo.
+  - Call `finish_task` with a short summary when the work is done. Tick each acceptance criterion you met and explain each one you didn't. Never mark tasks reviewed.
+  - If the tandem server is unreachable, ask me to open the app.
+  ```
 
 Other MCP clients that support Streamable HTTP can use the same URL; see your client's docs for its config format.
 
@@ -96,11 +107,11 @@ bun run test        # vitest
 
 | Path | What it is |
 | --- | --- |
-| `core/` | `tandem-board-core`: task store, SQLite index, task service, file watcher, git |
+| `core/` | `tandem-board-core`: the task model, the SQLite databases and their migrations, the task service, the Markdown task format, git |
 | `mcp/` | `tandem-board-mcp`: MCP server on top of core |
 | `desktop/` | `tandem-board-desktop`: the Tauri 2 shell and `tauri.conf.json` |
 | `ui/` | React + TypeScript + Vite frontend |
-| `docs/spec.md` | The v1 spec |
+| `site/` | The landing page, a static Astro site |
 
 `core` and `mcp` don't depend on Tauri, so they build and test without a webview.
 

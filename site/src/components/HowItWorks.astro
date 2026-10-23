@@ -27,8 +27,9 @@ Let people pick metric or imperial output.
 
 ### 2026-10-21 · claude-code-4537 · started`;
 
-const statusDiff = `- status: todo
-+ status: in_progress`;
+const commit = `feat: add a --units flag
+
+Task: m2ex9rd`;
 
 const mcpCommand = 'claude mcp add --transport http tandem http://127.0.0.1:4317/p/<project-id>/mcp';
 ---
@@ -41,16 +42,16 @@ const mcpCommand = 'claude mcp add --transport http tandem http://127.0.0.1:4317
       <li class="step">
         <div class="text">
           <p class="num">1</p>
-          <h3>Tasks are files</h3>
+          <h3>One board per repo</h3>
           <p>
-            Each task is a Markdown file in your repo's <code>.tandem/</code> folder, committed with
-            the code that works on it. The file is the card: when an agent starts the task, one line
-            changes.
+            Tasks live in the app, on your machine, with their whole history. Every worktree of a
+            repo opens the same board, and nothing is added to the repo. Agents read a task as
+            Markdown and tag their commits with its id.
           </p>
         </div>
         <div class="mock file-mock">
           <div class="window">
-            <p class="filename">.tandem/m2ex9rd.md</p>
+            <p class="filename">get_task m2ex9rd</p>
             <CodeBlock code={taskFile} lang="md" />
           </div>
           <div class="beside">
@@ -64,8 +65,8 @@ const mcpCommand = 'claude mcp add --transport http tandem http://127.0.0.1:4317
               </div>
             </div>
             <div class="window diff">
-              <p class="filename">git diff</p>
-              <CodeBlock code={statusDiff} lang="diff" />
+              <p class="filename">git log</p>
+              <CodeBlock code={commit} lang="text" />
             </div>
           </div>
         </div>

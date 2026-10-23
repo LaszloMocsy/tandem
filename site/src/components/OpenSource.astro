@@ -1,5 +1,5 @@
 ---
-import { LICENSE_URL, REPO_URL, TASKS_URL } from '../consts';
+import { LICENSE_URL, REPO_URL } from '../consts';
 import Download from './Download.astro';
 ---
 
@@ -8,9 +8,8 @@ import Download from './Download.astro';
     <img src="/logo.svg" alt="" width="64" height="64" />
     <h2 id="closing-title">Tandem is built with Tandem</h2>
     <p class="lead">
-      Its own tasks live in the repo's <a href={TASKS_URL}><code>.tandem/</code> folder</a>, worked
-      on by agents and reviewed by hand, like the ones on your board will be. Tandem is open source
-      under the <a href={LICENSE_URL}>MIT license</a>.
+      Its own tasks are worked on by agents and reviewed by hand on a Tandem board, like the ones
+      on your board will be. Tandem is open source under the <a href={LICENSE_URL}>MIT license</a>.
     </p>
     <Download id="closing" />
     <a class="github" href={REPO_URL}>View on GitHub</a>

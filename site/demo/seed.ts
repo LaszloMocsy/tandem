@@ -1,17 +1,29 @@
 // Builds the demo repo for the hero recording: a small CLI called
-// pocket-weather with real git history and nine tasks across the board.
-// Rerun it to reset the repo. See RECORDING.md.
+// pocket-weather with real git history, and nine tasks across its board.
+// Rerun it to reset the repo and the board. See RECORDING.md.
 //
 //   bun site/demo/seed.ts [path]        # default /tmp/tandem-demo
 //
 // The tasks are written by Tandem's own service (the demo_seed example in
-// core), never by hand. The task in progress is claimed later by drive.ts,
-// through MCP, so its lease is live while you record.
+// core) into the app's database, never by hand, so quit Tandem first. Set
+// TANDEM_DATA_DIR to seed another data folder than the app's. The task in
+// progress is claimed later by drive.ts, through MCP, so its lease is live
+// while you record.
 import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
 const repo = resolve(process.argv[2] ?? '/tmp/tandem-demo');
+const identifier = 'com.laszlomocsy.tandem';
+// Where Tauri keeps the app's data on each platform.
+const dataDir =
+  process.env.TANDEM_DATA_DIR ??
+  (process.platform === 'darwin'
+    ? join(homedir(), 'Library', 'Application Support', identifier)
+    : process.platform === 'win32'
+      ? join(process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'), identifier)
+      : join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), identifier));
 const root = resolve(import.meta.dir, '../..');
 // Lives inside .git, so it marks the folder as ours without being committed.
 const marker = join(repo, '.git', 'tandem-demo');
@@ -69,14 +81,16 @@ run(['git', 'config', 'user.email', 'sam@example.com']);
 run(['git', 'add', '--all']);
 run(['git', 'commit', '--quiet', '-m', 'Initial commit']);
 
-run(['cargo', 'run', '--quiet', '-p', 'tandem-board-core', '--example', 'demo_seed', '--', repo], root);
+run(
+  ['cargo', 'run', '--quiet', '-p', 'tandem-board-core', '--example', 'demo_seed', '--', repo, dataDir],
+  root,
+);
 
 console.log(`
 Seeded ${repo}.
 
 Next:
-  1. In Tandem, open the folder (project switcher → Open folder…), or, if it's
-     already open, wait for the board to refresh.
+  1. Open Tandem; the board is in its project list.
   2. Copy the project's MCP URL from the Setup panel.
   3. bun site/demo/drive.ts <mcp-url>
 `);
