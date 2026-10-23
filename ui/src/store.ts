@@ -1,19 +1,17 @@
 // The board's state: the project list, the project on screen and its
 // tasks. Tasks are refetched whenever `tasks-changed` names the project on
-// screen, so changes from the board, agents and outside edits all show up
-// the same way; the list is reloaded on `projects-changed`. Commands themselves go through `api`; the store never
-// patches tasks locally.
+// screen, so changes from the board and agents show up the same way.
+// Commands themselves go through `api`; the store never patches tasks
+// locally.
 
 import { useSyncExternalStore } from 'react'
 import {
   api as tauriApi,
   CommandError,
-  onProjectsChanged as tauriOnProjectsChanged,
   onTasksChanged as tauriOnTasksChanged,
   type Api,
   type Opened,
   type ProjectInfo,
-  type ProjectsChanged,
   type TaskSummary,
   type TasksChanged,
 } from './api.ts'
@@ -36,8 +34,8 @@ export interface BoardStore {
   /** Calls `listener` after every state change. Returns an unsubscribe. */
   subscribe(listener: () => void): () => void
   /**
-   * Starts listening for `tasks-changed` and `projects-changed`, loads the
-   * project list and shows the most recently opened project that is open.
+   * Starts listening for `tasks-changed`, loads the project list and shows
+   * the most recently opened project that is open.
    */
   start(): Promise<void>
   /** Stops listening for events. */
@@ -45,10 +43,10 @@ export interface BoardStore {
   /** Reloads the project list. */
   refreshProjects(): Promise<void>
   /**
-   * Opens a folder and shows it. If it has no `.tandem/` and
-   * `createFolder` is not set, nothing changes and the result says so.
+   * Opens a folder and shows it. If it is not in a git repo and
+   * `allowOutsideGit` is not set, nothing changes and the result says so.
    */
-  openProject(path: string, createFolder?: boolean): Promise<Opened>
+  openProject(path: string, allowOutsideGit?: boolean): Promise<Opened>
   /** Removes a project from the list; shows another if it was on screen. */
   removeProject(id: string): Promise<void>
   /** Refetches the tasks of the project on screen. */
@@ -58,8 +56,6 @@ export interface BoardStore {
 export interface BoardDeps {
   api: Pick<Api, 'listProjects' | 'openProject' | 'removeProject' | 'listTasks'>
   onTasksChanged: (handler: (event: TasksChanged) => void) => Promise<() => void>
-  /** Leaving it out never reloads the list on its own. */
-  onProjectsChanged?: (handler: (event: ProjectsChanged) => void) => Promise<() => void>
 }
 
 const initialState: BoardState = {
@@ -71,11 +67,7 @@ const initialState: BoardState = {
 }
 
 export function createBoardStore(
-  deps: BoardDeps = {
-    api: tauriApi,
-    onTasksChanged: tauriOnTasksChanged,
-    onProjectsChanged: tauriOnProjectsChanged,
-  },
+  deps: BoardDeps = { api: tauriApi, onTasksChanged: tauriOnTasksChanged },
 ): BoardStore {
   const { api } = deps
   let state = initialState
@@ -153,13 +145,9 @@ export function createBoardStore(
 
     async start() {
       if (unlisten) return
-      const listening = [
-        deps.onTasksChanged((event) => {
-          if (event.project === state.project) void refetch()
-        }),
-        deps.onProjectsChanged?.(() => void refreshProjects()) ?? Promise.resolve(() => {}),
-      ]
-      unlisten = Promise.all(listening).then((stops) => () => stops.forEach((stop) => stop()))
+      unlisten = deps.onTasksChanged((event) => {
+        if (event.project === state.project) void refetch()
+      })
       await unlisten
       await refreshProjects()
       if (state.project === null) {
@@ -175,8 +163,8 @@ export function createBoardStore(
 
     refreshProjects,
 
-    async openProject(path, createFolder = false) {
-      const opened = await api.openProject(path, createFolder)
+    async openProject(path, allowOutsideGit = false) {
+      const opened = await api.openProject(path, allowOutsideGit)
       if (opened.kind === 'project') {
         await refreshProjects()
         await show(opened.project.id)

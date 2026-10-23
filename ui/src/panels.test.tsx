@@ -48,7 +48,6 @@ const project: ProjectInfo = {
   lastOpenedAt: null,
   open: true,
   error: null,
-  readOnly: null,
   mcpUrl: 'http://127.0.0.1:4317/p/tandem/mcp',
 }
 
@@ -58,7 +57,7 @@ test('Setup offers the URL, the Claude Code command, .mcp.json and the snippet',
   expect(titles).toEqual(['MCP URL', 'Claude Code', '.mcp.json', 'AGENTS.md snippet'])
   expect(html).toContain('claude mcp add --transport http tandem http://127.0.0.1:4317/p/tandem/mcp')
   expect(html).toContain('&quot;url&quot;: &quot;http://127.0.0.1:4317/p/tandem/mcp&quot;')
-  expect(html).toContain('This repo tracks work in `.tandem/` through the `tandem` MCP server.')
+  expect(html).toContain('This repo&#x27;s tasks live in the Tandem app; agents work on them through the `tandem` MCP server.')
 })
 
 test('Setup explains a server that is not running, and still offers the snippet', () => {

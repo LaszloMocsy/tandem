@@ -10,14 +10,13 @@ export type Priority = 'high' | 'medium' | 'low'
 export interface ProjectInfo {
   id: string
   name: string
+  /** The checkout or folder last opened. */
   repoPath: string
   lastOpenedAt: string | null
   /** Whether the project is open, so its tasks can be listed. */
   open: boolean
   /** Why the project is not open, when it isn't. */
   error: string | null
-  /** Why the project is read-only, when it is. */
-  readOnly: string | null
   /** The project's MCP endpoint, while it is open and the server runs. */
   mcpUrl: string | null
 }
@@ -43,12 +42,12 @@ export interface AppSettings {
 export type Opened =
   | { kind: 'project'; project: ProjectInfo }
   /**
-   * The folder has no `.tandem/`; open it with `createFolder` to make one.
-   * `gitRepo` says whether the folder is in a git repo.
+   * The folder is not in a git repo. Nothing was added; open it again with
+   * `allowOutsideGit` to make it a project of its own.
    */
-  | { kind: 'noTaskFolder'; repoPath: string; gitRepo: boolean }
+  | { kind: 'outsideGit'; repoPath: string }
 
-/** What stands in the way of deleting a task, and what deleting it loses. */
+/** What stands in the way of deleting a task. */
 export interface DeleteCheck {
   /** Tasks whose parent is this task. */
   children: string[]
@@ -56,8 +55,14 @@ export interface DeleteCheck {
   dependents: string[]
   /** The live lease, while an agent is working on the task. */
   lease: Lease | null
-  /** Whether git history keeps a copy of the file. */
-  committed: boolean
+}
+
+/** A deleted task, which can still be restored until deleted tasks are cleaned up. */
+export interface DeletedTask {
+  id: string
+  title: string
+  status: Status
+  deletedAt: string
 }
 
 export interface Lease {
@@ -78,12 +83,6 @@ export interface AgentInfo {
   tasks: { id: string; title: string; live: boolean }[]
 }
 
-export interface TaskProblem {
-  /** `graph` is a loop or a missing parent. */
-  kind: 'invalid_file' | 'graph'
-  message: string
-}
-
 /** An acceptance criterion the agent left unmet, and why. */
 export interface UnmetCriterion {
   /** Counting from 1. */
@@ -100,11 +99,10 @@ export interface TaskSummary {
   parent: string | null
   labels: string[]
   dependsOn: string[]
-  /** `YYYY-MM-DD`; `null` only if the file is invalid. */
-  created: string | null
+  /** `YYYY-MM-DD`. */
+  created: string
   lease: Lease | null
   blocked: string | null
-  problem: TaskProblem | null
   /** Only filled in for tasks in `finished`. */
   unmet: UnmetCriterion[]
 }
@@ -112,7 +110,7 @@ export interface TaskSummary {
 export interface WorkLogEntry {
   /** `null` means you. */
   agentId: string | null
-  kind: 'note' | 'blocked' | 'unblocked' | 'feedback' | 'event'
+  kind: 'note' | 'blocked' | 'unblocked' | 'feedback'
   message: string
   createdAt: string
 }
@@ -124,7 +122,7 @@ export interface Criterion {
   text: string
 }
 
-/** One changelog entry, as read back from the file. */
+/** One changelog entry. */
 export interface ChangelogEntry {
   date: string
   who: string
@@ -133,7 +131,7 @@ export interface ChangelogEntry {
   text: string
 }
 
-/** The parsed task file. */
+/** The task's spec and changelog. */
 export interface TaskContent {
   /** Empty if there is no Description section. */
   description: string
@@ -146,22 +144,19 @@ export interface TaskContent {
 
 export interface TaskDetail {
   summary: TaskSummary
-  /** The task file, as it is on disk. */
+  /** The task rendered as Markdown. */
   markdown: string
   parent: TaskSummary | null
   children: TaskSummary[]
   /** Oldest first. */
   workLog: WorkLogEntry[]
   reviewFeedback: string | null
-  /** `null` if the file is invalid. */
-  content: TaskContent | null
+  content: TaskContent
 }
 
-/** The file a write changed. */
-export interface Written {
+/** The task a change saved, and its status after it. */
+export interface Saved {
   id: string
-  /** Relative to the repo root, such as `.tandem/k3f9x2m.md`. */
-  path: string
   status: Status
 }
 
@@ -216,23 +211,17 @@ export interface Finish {
 export interface TasksChanged {
   project: string
   changed: string[]
+  /** Tasks deleted or cleaned up. */
   removed: string[]
 }
 
 export const TASKS_CHANGED = 'tasks-changed'
 
-/** The payload of the `projects-changed` event, such as after a rename. */
-export interface ProjectsChanged {
-  project: string
-}
-
-export const PROJECTS_CHANGED = 'projects-changed'
-
 /**
- * A refused command. `code` is one of the spec's error codes, such as
+ * A refused command. `code` is one of the service's error codes, such as
  * `invalid_transition` or `cycle_detected`, or `project_not_found`,
- * `invalid_argument`, `read_only`, `git_failed`, `agents_working`,
- * `task_referenced`, `port_in_use`, `mcp_failed` or `internal`.
+ * `invalid_argument`, `agents_working`, `task_referenced`, `port_in_use`,
+ * `mcp_failed` or `internal`.
  */
 export class CommandError extends Error {
   readonly code: string
@@ -271,15 +260,17 @@ export const api = {
   /** Every project, the most recently opened first. */
   listProjects: () => call<ProjectInfo[]>('list_projects'),
   /**
-   * Opens a repo folder and makes it the most recent project. Without
-   * `createFolder`, a folder with no `.tandem/` is left alone.
+   * Opens a folder and makes it the most recent project. A folder in a git
+   * repo opens its repo's project; one outside git is left alone unless
+   * `allowOutsideGit` is set.
    */
-  openProject: (path: string, createFolder = false) =>
-    call<Opened>('open_project', { path, createFolder }),
+  openProject: (path: string, allowOutsideGit = false) =>
+    call<Opened>('open_project', { path, allowOutsideGit }),
   /**
-   * Closes a project, removes it from the recent list and deletes its local
-   * database. The repo and its `.tandem/` files stay. Refused with
-   * `agents_working` while an agent holds a live lease on one of its tasks.
+   * Closes a project, removes it from the recent list and deletes its
+   * database, with every task and its history. The folder stays. Refused
+   * with `agents_working` while an agent holds a live lease on one of its
+   * tasks.
    */
   removeProject: (project: string) => call<boolean>('remove_project', { project }),
   /** Asks for a folder with the system dialog; `null` if cancelled. */
@@ -287,17 +278,11 @@ export const api = {
   /** Opens the repository or the running version's release notes in the browser. */
   openLink: (link: Link) => call<null>('open_link', { link }),
   /**
-   * Sets the project's name in `.tandem/config.toml`; a blank name removes
-   * it, so the folder name is used. Refused with `read_only` on a read-only
-   * project.
+   * Renames the project on this machine; a blank name goes back to the
+   * folder name.
    */
   setProjectName: (project: string, name: string) =>
     call<ProjectInfo>('set_project_name', { project, name }),
-  /**
-   * Reset local state: deletes the project's database and rebuilds it from
-   * the task files. Leases, flags and working logs are lost.
-   */
-  resetProject: (project: string) => call<null>('reset_project', { project }),
 
   getAppSettings: () => call<AppSettings>('get_app_settings'),
   /**
@@ -314,41 +299,48 @@ export const api = {
   /** Agents seen in the last day, and any still holding a lease, newest first. */
   listAgents: (project: string) => call<AgentInfo[]>('list_agents', { project }),
   createTask: (project: string, task: NewTask) =>
-    call<Written>('create_task', { project, task }),
+    call<Saved>('create_task', { project, task }),
   updateTask: (project: string, id: string, edit: TaskEdit) =>
-    call<Written>('update_task', { project, id, edit }),
+    call<Saved>('update_task', { project, id, edit }),
   /** What stands in the way of deleting a task. */
   deleteCheck: (project: string, id: string) =>
     call<DeleteCheck>('delete_check', { project, id }),
   /**
-   * Deletes a task's file, at any status. Refused with `claimed_by_other`
-   * while an agent works on it, and `task_referenced` while another task
-   * links to it.
+   * Deletes a task, at any status, until it is restored or cleaned up.
+   * Refused with `claimed_by_other` while an agent works on it, and
+   * `task_referenced` while another task links to it.
    */
   deleteTask: (project: string, id: string) => call<null>('delete_task', { project, id }),
+  /** The deleted tasks, which can still be restored, newest first. */
+  listDeletedTasks: (project: string) =>
+    call<DeletedTask[]>('list_deleted_tasks', { project }),
+  /**
+   * Brings a deleted task back. Refused with `parent_not_found` or
+   * `not_found` while its parent or a dependency is deleted too.
+   */
+  restoreTask: (project: string, id: string) => call<null>('restore_task', { project, id }),
+  /**
+   * Removes every deleted task for good, so none can be restored. Returns
+   * how many went.
+   */
+  purgeDeletedTasks: (project: string) => call<number>('purge_deleted_tasks', { project }),
 
   /** Backlog → Todo. */
-  approve: (project: string, id: string) => call<Written>('approve_task', { project, id }),
+  approve: (project: string, id: string) => call<Saved>('approve_task', { project, id }),
   /** Todo → In progress. */
-  start: (project: string, id: string) => call<Written>('start_task', { project, id }),
+  start: (project: string, id: string) => call<Saved>('start_task', { project, id }),
   /** In progress → Review. */
   finish: (project: string, id: string, finish: Finish) =>
-    call<Written>('finish_task', { project, id, finish }),
+    call<Saved>('finish_task', { project, id, finish }),
   /** In progress → Todo. */
   release: (project: string, id: string, note = '') =>
-    call<Written>('release_task', { project, id, note }),
+    call<Saved>('release_task', { project, id, note }),
   /** Review → Done. */
   markReviewed: (project: string, id: string) =>
-    call<Written>('mark_reviewed', { project, id }),
+    call<Saved>('mark_reviewed', { project, id }),
   /** Review → In progress, with feedback for the next agent. */
   reopen: (project: string, id: string, feedback: string) =>
-    call<Written>('reopen_task', { project, id, feedback }),
-  /** Whether the task file has changes git hasn't committed. */
-  hasUncommittedChanges: (project: string, id: string) =>
-    call<boolean>('has_uncommitted_changes', { project, id }),
-  /** Commits a Done task's file and nothing else; returns the commit hash. */
-  commitReview: (project: string, id: string) =>
-    call<string>('commit_review', { project, id }),
+    call<Saved>('reopen_task', { project, id, feedback }),
 
   /** Sets the blocked flag, or clears it when `reason` is blank. */
   setBlocked: (project: string, id: string, reason: string) =>
@@ -356,7 +348,7 @@ export const api = {
   logProgress: (project: string, id: string, message: string) =>
     call<null>('log_progress', { project, id, message }),
   addChangelogEntry: (project: string, id: string, summary: string, files: string[] = []) =>
-    call<Written>('add_changelog_entry', { project, id, summary, files }),
+    call<Saved>('add_changelog_entry', { project, id, summary, files }),
 }
 
 export type Api = typeof api
@@ -364,11 +356,4 @@ export type Api = typeof api
 /** Calls `handler` for every `tasks-changed` event, until unlistened. */
 export function onTasksChanged(handler: (event: TasksChanged) => void): Promise<UnlistenFn> {
   return listen<TasksChanged>(TASKS_CHANGED, (event) => handler(event.payload))
-}
-
-/** Calls `handler` for every `projects-changed` event, until unlistened. */
-export function onProjectsChanged(
-  handler: (event: ProjectsChanged) => void,
-): Promise<UnlistenFn> {
-  return listen<ProjectsChanged>(PROJECTS_CHANGED, (event) => handler(event.payload))
 }

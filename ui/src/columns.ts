@@ -35,22 +35,19 @@ export interface CardData {
 export type Columns = Record<Status, CardData[]>
 
 /**
- * Sorts by priority, then by created date, oldest first. Invalid files,
- * which have no created date, go after the rest of their priority. The id
- * breaks ties, so the order never jumps between refetches.
+ * Sorts by priority, then by created date, oldest first. The id breaks
+ * ties, so the order never jumps between refetches.
  */
 export function compareTasks(a: TaskSummary, b: TaskSummary): number {
   return (
     PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] ||
-    compareNullable(a.created, b.created) ||
-    compareNullable(a.id, b.id)
+    compare(a.created, b.created) ||
+    compare(a.id, b.id)
   )
 }
 
-function compareNullable(a: string | null, b: string | null): number {
+function compare(a: string, b: string): number {
   if (a === b) return 0
-  if (a === null) return 1
-  if (b === null) return -1
   return a < b ? -1 : 1
 }
 

@@ -1,11 +1,5 @@
 import { expect, test } from 'vitest'
-import {
-  CommandError,
-  type ProjectInfo,
-  type ProjectsChanged,
-  type TaskSummary,
-  type TasksChanged,
-} from './api.ts'
+import { CommandError, type ProjectInfo, type TaskSummary, type TasksChanged } from './api.ts'
 import { createBoardStore, type BoardDeps } from './store.ts'
 
 function projectInfo(id: string, open = true): ProjectInfo {
@@ -16,7 +10,6 @@ function projectInfo(id: string, open = true): ProjectInfo {
     lastOpenedAt: null,
     open,
     error: open ? null : 'the folder is missing',
-    readOnly: null,
     mcpUrl: open ? `http://127.0.0.1:4317/p/${id}/mcp` : null,
   }
 }
@@ -33,7 +26,6 @@ function task(id: string, title = id): TaskSummary {
     created: '2026-10-15',
     lease: null,
     blocked: null,
-    problem: null,
     unmet: [],
   }
 }
@@ -48,19 +40,23 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-/** A fake desktop app: projects, tasks per project and the event channel. */
+/**
+ * A fake desktop app: projects, tasks per project and the event channel.
+ * Folders under `/repos/` are in git; others are not.
+ */
 function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) {
   const handlers = new Set<(event: TasksChanged) => void>()
-  const projectHandlers = new Set<(event: ProjectsChanged) => void>()
   const fetches: string[] = []
   let hold: { promise: Promise<void> } | null = null
   const deps: BoardDeps = {
     api: {
       listProjects: async () => projects,
-      openProject: async (path, createFolder = false) => {
+      openProject: async (path, allowOutsideGit = false) => {
         const project = projects.find((p) => p.repoPath === path)
         if (project) return { kind: 'project', project }
-        if (!createFolder) return { kind: 'noTaskFolder', repoPath: path, gitRepo: true }
+        if (!path.startsWith('/repos/') && !allowOutsideGit) {
+          return { kind: 'outsideGit', repoPath: path }
+        }
         const created = projectInfo(path.split('/').pop()!)
         projects = [created, ...projects]
         tasks[created.id] = []
@@ -82,10 +78,6 @@ function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) 
       handlers.add(handler)
       return () => handlers.delete(handler)
     },
-    onProjectsChanged: async (handler) => {
-      projectHandlers.add(handler)
-      return () => projectHandlers.delete(handler)
-    },
   }
   return {
     deps,
@@ -94,11 +86,7 @@ function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) 
     emit: (project: string, changed: string[] = []) => {
       for (const handler of handlers) handler({ project, changed, removed: [] })
     },
-    rename: (project: string, name: string) => {
-      projects = projects.map((p) => (p.id === project ? { ...p, name } : p))
-      for (const handler of projectHandlers) handler({ project })
-    },
-    listening: () => handlers.size + projectHandlers.size,
+    listening: () => handlers.size,
     holdFetches: () => {
       const gate = deferred<void>()
       hold = gate
@@ -129,7 +117,7 @@ test('start shows the most recent open project and its tasks', async () => {
   expect(renders).toBeGreaterThan(0)
   // Starting twice, as StrictMode does, listens once.
   await store.start()
-  expect(app.listening()).toBe(2)
+  expect(app.listening()).toBe(1)
   store.stop()
   await Promise.resolve()
   expect(app.listening()).toBe(0)
@@ -149,18 +137,6 @@ test('tasks-changed for the project on screen refetches its tasks', async () => 
   app.emit('b')
   await settle()
   expect(app.fetches).toEqual(['a'])
-})
-
-test('projects-changed reloads the project list without refetching tasks', async () => {
-  const app = fakeApp([projectInfo('a')], { a: [] })
-  const store = createBoardStore(app.deps)
-  await store.start()
-  app.fetches.length = 0
-
-  app.rename('a', 'Renamed in a pull')
-  await settle()
-  expect(store.getState().projects[0].name).toBe('Renamed in a pull')
-  expect(app.fetches).toEqual([])
 })
 
 test('a burst of events during a fetch costs one more fetch', async () => {
@@ -183,19 +159,30 @@ test('a burst of events during a fetch costs one more fetch', async () => {
   expect(store.getState().tasks).toEqual([task('zzzzzzz')])
 })
 
-test('opening a folder without .tandem changes nothing until asked to create it', async () => {
+test('opening a folder in a git repo shows it straight away', async () => {
   const app = fakeApp([projectInfo('a')], { a: [task('aaaaaaa')] })
   const store = createBoardStore(app.deps)
   await store.start()
 
-  const declined = await store.openProject('/repos/new')
-  expect(declined).toEqual({ kind: 'noTaskFolder', repoPath: '/repos/new', gitRepo: true })
-  expect(store.getState().project).toBe('a')
-
-  const created = await store.openProject('/repos/new', true)
-  expect(created.kind).toBe('project')
+  const opened = await store.openProject('/repos/new')
+  expect(opened.kind).toBe('project')
   expect(store.getState()).toMatchObject({ project: 'new', tasks: [], loading: false })
   expect(store.getState().projects[0].id).toBe('new')
+})
+
+test('opening a folder outside git changes nothing until allowed', async () => {
+  const app = fakeApp([projectInfo('a')], { a: [task('aaaaaaa')] })
+  const store = createBoardStore(app.deps)
+  await store.start()
+
+  const declined = await store.openProject('/tmp/notes')
+  expect(declined).toEqual({ kind: 'outsideGit', repoPath: '/tmp/notes' })
+  expect(store.getState().project).toBe('a')
+  expect(store.getState().projects.map((p) => p.id)).toEqual(['a'])
+
+  const opened = await store.openProject('/tmp/notes', true)
+  expect(opened.kind).toBe('project')
+  expect(store.getState()).toMatchObject({ project: 'notes', tasks: [], loading: false })
 })
 
 test('switching projects drops a slow fetch for the old one', async () => {

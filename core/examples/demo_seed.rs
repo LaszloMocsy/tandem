@@ -1,55 +1,59 @@
-//! Seeds the landing page's demo repo through Tandem's own service, so every
-//! task file is written the way the app writes it. Run by
-//! `site/demo/seed.ts`, which first creates the repo and its first commit:
+//! Seeds the landing page's demo board through Tandem's own service, into
+//! the app's database. Run by `site/demo/seed.ts`, which first creates the
+//! repo and its first commit:
 //!
 //! ```sh
-//! cargo run -p tandem-board-core --example demo_seed -- /tmp/tandem-demo
+//! cargo run -p tandem-board-core --example demo_seed -- /tmp/tandem-demo <data-dir>
 //! ```
 //!
-//! It works in a throwaway index, so the app's own database is untouched;
-//! the app rebuilds its board from the files when you open the repo. Leaves
-//! the board as `site/demo/RECORDING.md` describes, except for the task in
-//! progress, which `drive.ts` claims through MCP so its lease is live.
+//! `<data-dir>` is the app's data directory. Quit Tandem first: seeding
+//! replaces the demo project's database. Leaves the board as
+//! `site/demo/RECORDING.md` describes, except for the task in progress,
+//! which `drive.ts` claims through MCP so its lease is live.
 
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tandem_board_core::service::{Actor, Agent, Config, Finish, NewTask, Service, Written};
-use tandem_board_core::store::{Priority, TaskId};
+use tandem_board_core::db::{AppDb, delete_project_db, folder_name};
+use tandem_board_core::git;
+use tandem_board_core::model::{Priority, TaskId};
+use tandem_board_core::service::{Actor, Agent, Config, Finish, NewTask, Service};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-/// The name changelog entries use for you.
+/// The name events use for you.
 const USER_NAME: &str = "Sam Lee";
 
 fn main() -> Result<()> {
-    let repo: PathBuf = std::env::args_os()
-        .nth(1)
-        .ok_or("usage: demo_seed <repo>")?
-        .into();
-    if !repo.join(".git").is_dir() {
-        return Err(format!(
+    let mut args = std::env::args_os().skip(1);
+    let usage = "usage: demo_seed <repo> <data-dir>";
+    let repo: PathBuf = args.next().ok_or(usage)?.into();
+    let data: PathBuf = args.next().ok_or(usage)?.into();
+    let git_dir = git::common_dir(&repo).ok_or_else(|| {
+        format!(
             "{} is not a git repo; run site/demo/seed.ts",
             repo.display()
         )
-        .into());
-    }
+    })?;
 
-    let data = tempfile::TempDir::new()?;
+    let project = AppDb::open(&data)?.add_project(&git_dir, &repo, &folder_name(&git_dir))?;
+    delete_project_db(&data, &project.id)?;
     let config = Config {
         user_name: USER_NAME.to_owned(),
         ..Config::default()
     };
-    let service = Service::open(data.path(), "demo", &repo, config)?;
+    let service = Service::open(&data, &project.id, config)?;
     let seed = Seed {
         service: &service,
         repo: &repo,
         claude: agent(&service, "claude-code")?,
         codex: agent(&service, "codex")?,
     };
-    seed.run()
+    seed.run()?;
+    println!("Seeded project `{}` in {}", project.id, data.display());
+    Ok(())
 }
 
 fn agent(service: &Service, client: &str) -> Result<Actor> {
@@ -84,16 +88,7 @@ struct Work<'a> {
 
 impl Seed<'_> {
     fn run(&self) -> Result<()> {
-        // Opening the service created .tandem/ with its config and README.
-        self.commit(
-            "chore: track tasks with Tandem",
-            &[
-                ".tandem/config.toml".to_owned(),
-                ".tandem/README.md".to_owned(),
-            ],
-        )?;
-
-        // Done: worked, committed, reviewed and the review committed.
+        // Done: worked, committed and reviewed.
         for (spec, agent, work) in [
             (
                 Spec {
@@ -147,7 +142,6 @@ impl Seed<'_> {
             let id = self.create(&spec)?;
             self.work(id, agent, &work)?;
             self.service.mark_reviewed(id)?;
-            self.service.commit_review(id)?;
         }
 
         // Review: finished and committed, waiting for you.
@@ -224,11 +218,11 @@ impl Seed<'_> {
                 },
             )?;
         }
-        self.commit("chore(tandem): plan the next tasks", &[])
+        Ok(())
     }
 
     fn create(&self, spec: &Spec) -> Result<TaskId> {
-        let written = self.service.create_task(
+        let saved = self.service.create_task(
             &Actor::User,
             NewTask {
                 title: spec.title.to_owned(),
@@ -239,13 +233,13 @@ impl Seed<'_> {
                 ..NewTask::default()
             },
         )?;
-        Ok(written.id)
+        Ok(saved.id)
     }
 
-    /// Start, write the code, commit it with the task file, finish, and
-    /// commit the finished file: the agent workflow from the spec.
+    /// Start, write and commit the code with a `Task:` trailer, then
+    /// finish: the agent workflow.
     fn work(&self, id: TaskId, agent: &Actor, work: &Work) -> Result<()> {
-        let started = self.service.start_task(agent, id)?;
+        self.service.start_task(agent, id)?;
         let mut paths = Vec::new();
         for (path, contents) in work.files {
             let full = self.repo.join(path);
@@ -255,14 +249,10 @@ impl Seed<'_> {
             fs::write(full, contents)?;
             paths.push((*path).to_owned());
         }
-        self.commit_task(work.commit, &started, &paths)?;
+        self.commit(&format!("{}\n\nTask: {id}", work.commit), &paths)?;
 
-        let criteria = self
-            .service
-            .get_task(agent, id)?
-            .content
-            .map_or(0, |c| c.criteria.len());
-        let finished = self.service.finish_task(
+        let criteria = self.service.get_task(agent, id)?.content.criteria.len();
+        self.service.finish_task(
             agent,
             id,
             Finish {
@@ -272,24 +262,14 @@ impl Seed<'_> {
                 ..Finish::default()
             },
         )?;
-        self.commit_task(&format!("chore(tandem): finish {id}"), &finished, &[])
+        Ok(())
     }
 
-    fn commit_task(&self, message: &str, task: &Written, paths: &[String]) -> Result<()> {
-        let mut all = paths.to_vec();
-        all.push(task.path.clone());
-        self.commit(&format!("{message}\n\nTask: {}", task.id), &all)
-    }
-
-    /// Commits `paths`, or every change when it is empty.
+    /// Commits `paths`.
     fn commit(&self, message: &str, paths: &[String]) -> Result<()> {
-        if paths.is_empty() {
-            self.git(&["add", "--all"])?;
-        } else {
-            let mut args = vec!["add", "--"];
-            args.extend(paths.iter().map(String::as_str));
-            self.git(&args)?;
-        }
+        let mut args = vec!["add", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        self.git(&args)?;
         self.git(&["commit", "--quiet", "-m", message])
     }
 

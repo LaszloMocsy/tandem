@@ -1,13 +1,11 @@
 use std::error::Error as StdError;
 
 use serde::Serialize;
-use tandem_board_core::index::IndexError;
+use tandem_board_core::db::DbError;
 use tandem_board_core::service::ServiceError;
-use tandem_board_core::store::StoreError;
-use tandem_board_core::watcher::WatcherError;
 
 /// A failed command, as the UI receives it: a code it can act on and a
-/// message to show. Service errors keep the spec's codes, such as
+/// message to show. Service errors keep their codes, such as
 /// `invalid_transition`; the registry adds `project_not_found`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Error {
@@ -46,20 +44,8 @@ impl From<ServiceError> for Error {
     }
 }
 
-impl From<IndexError> for Error {
-    fn from(e: IndexError) -> Self {
-        Self::internal(&e)
-    }
-}
-
-impl From<StoreError> for Error {
-    fn from(e: StoreError) -> Self {
-        Self::internal(&e)
-    }
-}
-
-impl From<WatcherError> for Error {
-    fn from(e: WatcherError) -> Self {
+impl From<DbError> for Error {
+    fn from(e: DbError) -> Self {
         Self::internal(&e)
     }
 }

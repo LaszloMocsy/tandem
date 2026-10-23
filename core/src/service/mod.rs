@@ -1,23 +1,18 @@
 //! The task service: the one entry point for every change, used by both the
 //! board and the MCP server. There is one instance per project, and every
-//! call holds the project's lock, so writes are serialized.
-//!
-//! Transitions follow "State model" in the spec. Each one reads the task
-//! file inside a `BEGIN IMMEDIATE` transaction, so the file and the leases
-//! are checked and changed together even if another process shares the
-//! database. Files are written before the transaction commits; if the
-//! commit fails, the next rescan brings the index back in line.
+//! call holds the project's lock and runs in one `BEGIN IMMEDIATE`
+//! transaction, so checks and changes land together even if another
+//! process shares the database.
 
 mod delete;
 mod error;
+mod import;
 mod read;
+mod rows;
 mod transitions;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -25,14 +20,12 @@ use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use crate::index::{Changes, Problem, ProjectIndex, rescan_in, rescan_task_in, timestamp_text};
-use crate::store::{
-    self, Access, ChangelogItem, Criterion, Date, Priority, ReadOnly, Status, StoreError, TASK_DIR,
-    Task, TaskId, Unmet, UnmetCriterion, parse_task_file, task_path,
-};
+use crate::db::{Changes, ProjectDb, from_millis, millis, timestamp_text};
+use crate::model::{Criterion, Date, Priority, Status, TaskId, Unmet, UnmetCriterion};
 
-pub use delete::DeleteCheck;
+pub use delete::{DeleteCheck, DeletedTask};
 pub use error::ServiceError;
+pub use import::ImportReport;
 
 /// The default lease length.
 pub const LEASE_DURATION: SignedDuration = SignedDuration::from_mins(15);
@@ -45,10 +38,10 @@ pub type Clock = Arc<dyn Fn() -> Timestamp + Send + Sync>;
 pub struct Config {
     /// How long a lease lasts after the holder's latest call.
     pub lease_duration: SignedDuration,
-    /// The name changelog entries use for you, such as your git user name.
+    /// The name events use for you, such as your git user name.
     pub user_name: String,
     pub clock: Clock,
-    /// The time zone that decides today's date for changelogs, `created`
+    /// The time zone that decides the dates shown for events, `created`
     /// and `reviewed_at`.
     pub time_zone: TimeZone,
 }
@@ -85,7 +78,7 @@ impl Actor {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Agent {
-    /// Such as `claude-code-7f2a`. Shown in changelog headings.
+    /// Such as `claude-code-7f2a`. Shown in the task's history.
     pub id: String,
     /// From MCP `clientInfo`, such as `claude-code`.
     pub client_name: Option<String>,
@@ -107,7 +100,6 @@ pub struct AgentInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldTask {
     pub id: TaskId,
-    /// Empty if the file is invalid.
     pub title: String,
     /// `false` once the lease has expired.
     pub live: bool,
@@ -135,11 +127,9 @@ pub struct TaskSummary {
     pub parent: Option<TaskId>,
     pub labels: Vec<String>,
     pub depends_on: Vec<TaskId>,
-    /// `None` only if the file is invalid.
-    pub created: Option<Date>,
+    pub created: Date,
     pub lease: Option<Lease>,
     pub blocked: Option<String>,
-    pub problem: Option<Problem>,
     /// The criteria the agent left unmet, with reasons. Only filled in for
     /// tasks in `finished`, where the Review card shows them.
     pub unmet: Vec<UnmetCriterion>,
@@ -149,7 +139,7 @@ pub struct TaskSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDetail {
     pub summary: TaskSummary,
-    /// The task file, as it is on disk.
+    /// The whole task in the Markdown format, changelog included.
     pub markdown: String,
     pub parent: Option<TaskSummary>,
     pub children: Vec<TaskSummary>,
@@ -157,14 +147,13 @@ pub struct TaskDetail {
     pub work_log: Vec<LogEntry>,
     /// Your latest reopen feedback, for the next agent.
     pub review_feedback: Option<String>,
-    /// The parsed file; `None` if it is invalid.
-    pub content: Option<TaskContent>,
+    pub content: TaskContent,
 }
 
-/// What the detail pane shows of a valid task file.
+/// What the detail pane shows of a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskContent {
-    /// Empty if there is no Description section.
+    /// Markdown; empty if there is none.
     pub description: String,
     pub criteria: Vec<Criterion>,
     pub relevant_files: Vec<String>,
@@ -173,19 +162,20 @@ pub struct TaskContent {
     pub reviewed_at: Option<Date>,
 }
 
-impl TaskContent {
-    fn new(task: &Task) -> Self {
-        Self {
-            description: task.description().to_owned(),
-            criteria: task.criteria(),
-            relevant_files: task.relevant_files(),
-            changelog: task.changelog_entries(),
-            reviewed_at: task.reviewed_at,
-        }
-    }
+/// One entry of a task's changelog: every event except working-log notes
+/// and blocked flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangelogItem {
+    pub date: Date,
+    /// The agent id, or your name.
+    pub who: String,
+    /// Such as `created`, `started` or `finished`.
+    pub event: String,
+    /// The summary and any `Files:`, `Follow-ups:` and `Unmet:` lines.
+    pub text: String,
 }
 
-/// One working-log row.
+/// One working-log entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogEntry {
     /// `None` means you.
@@ -200,8 +190,8 @@ pub enum LogKind {
     Note,
     Blocked,
     Unblocked,
+    /// Your reopen feedback.
     Feedback,
-    Event,
 }
 
 impl LogKind {
@@ -211,22 +201,27 @@ impl LogKind {
             Self::Blocked => "blocked",
             Self::Unblocked => "unblocked",
             Self::Feedback => "feedback",
-            Self::Event => "event",
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
-        [
-            Self::Note,
-            Self::Blocked,
-            Self::Unblocked,
-            Self::Feedback,
-            Self::Event,
-        ]
-        .into_iter()
-        .find(|kind| kind.as_str() == s)
+    /// The working-log kind of an event, for the events the log shows.
+    fn of_event(kind: &str) -> Option<Self> {
+        match kind {
+            NOTE => Some(Self::Note),
+            BLOCKED => Some(Self::Blocked),
+            UNBLOCKED => Some(Self::Unblocked),
+            REOPENED => Some(Self::Feedback),
+            _ => None,
+        }
     }
 }
+
+/// Event kinds the working log shows and the changelog doesn't.
+const NOTE: &str = "note";
+const BLOCKED: &str = "blocked";
+const UNBLOCKED: &str = "unblocked";
+/// Shown in both: the changelog entry, and your feedback in the log.
+const REOPENED: &str = "reopened";
 
 /// Filters for `list_tasks`. Every filter that is set must match.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -234,7 +229,7 @@ pub struct TaskFilter {
     pub status: Option<Status>,
     pub label: Option<String>,
     pub parent: Option<TaskId>,
-    /// Matches the id, title, labels or body, ignoring case.
+    /// Matches the id, title, labels or description, ignoring case.
     pub query: Option<String>,
     /// Only tasks `start_task` would accept: in todo, every dependency
     /// done, and no live lease.
@@ -247,6 +242,7 @@ pub struct NewTask {
     pub title: String,
     pub description: String,
     pub acceptance_criteria: Vec<String>,
+    /// `medium` when not given.
     pub priority: Option<Priority>,
     pub parent: Option<TaskId>,
     pub labels: Vec<String>,
@@ -257,11 +253,10 @@ pub struct NewTask {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskEdit {
     pub title: Option<String>,
-    /// A blank value removes the section.
+    /// A blank value clears it.
     pub description: Option<String>,
     /// Replaces every criterion. One with the same text as a ticked
-    /// criterion stays ticked; new or reworded ones start unticked. An
-    /// empty list removes the section.
+    /// criterion stays ticked; new or reworded ones start unticked.
     pub acceptance_criteria: Option<Vec<String>>,
     pub relevant_files: Option<Vec<String>>,
     pub priority: Option<Priority>,
@@ -283,57 +278,70 @@ pub struct Finish {
     pub unmet: Vec<Unmet>,
 }
 
-/// The file a write changed. Every file-writing call returns it, so agents
-/// know to include it in their next commit.
+/// The task a change saved, and its status after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Written {
+pub struct Saved {
     pub id: TaskId,
-    /// Relative to the repo root, such as `.tandem/k3f9x2m.md`.
-    pub path: String,
     pub status: Status,
 }
 
 /// The task service for one project.
 pub struct Service {
-    index: Mutex<ProjectIndex>,
-    dir: PathBuf,
-    read_only: Option<ReadOnly>,
+    db: Mutex<ProjectDb>,
     config: Config,
+    /// Your row in `actors`.
+    user: i64,
     subscribers: Mutex<Vec<Sender<Changes>>>,
 }
 
 impl Service {
-    /// Opens the project and its index; see [`ProjectIndex::open`].
-    pub fn open(
-        data_dir: &Path,
-        project_id: &str,
-        repo: &Path,
-        config: Config,
-    ) -> Result<Self, ServiceError> {
-        Ok(Self::new(
-            ProjectIndex::open(data_dir, project_id, repo)?,
-            config,
-        ))
+    /// Opens the project's database in `data_dir`, creating it if needed.
+    pub fn open(data_dir: &Path, project_id: &str, config: Config) -> Result<Self, ServiceError> {
+        Self::new(ProjectDb::open(data_dir, project_id)?, config)
     }
 
-    pub fn new(index: ProjectIndex, config: Config) -> Self {
-        let read_only = match index.access() {
-            Access::ReadWrite => None,
-            Access::ReadOnly(reason) => Some(reason.clone()),
+    /// The service for an open database. Your row in `actors` takes the
+    /// current [`Config::user_name`].
+    pub fn new(db: ProjectDb, config: Config) -> Result<Self, ServiceError> {
+        let now = millis((config.clock)());
+        let conn = db.connection();
+        let existing: Option<i64> = conn
+            .query_row("SELECT id FROM actors WHERE kind = 'user'", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let user = match existing {
+            Some(id) => {
+                conn.execute(
+                    "UPDATE actors SET name = ?2 WHERE id = ?1",
+                    params![id, config.user_name],
+                )?;
+                id
+            }
+            None => conn.query_row(
+                "INSERT INTO actors (kind, name, first_seen, last_seen)
+                 VALUES ('user', ?1, ?2, ?2) RETURNING id",
+                params![config.user_name, now],
+                |row| row.get(0),
+            )?,
         };
-        Self {
-            dir: index.task_dir().to_owned(),
-            index: Mutex::new(index),
-            read_only,
+        Ok(Self {
+            db: Mutex::new(db),
             config,
+            user,
             subscribers: Mutex::new(Vec::new()),
-        }
+        })
     }
 
-    /// A channel that receives the tasks changed by every index change
-    /// from then on: writes through the service, and outside edits found
-    /// by the watcher or a rescan. A working-log note or blocked flag
-    /// counts as a change to its task. Dropping the receiver unsubscribes.
+    /// Whether opening created the project's database, so it has no tasks
+    /// yet and an old `.tandem/` folder may be worth importing.
+    pub fn is_new(&self) -> bool {
+        self.lock().created()
+    }
+
+    /// A channel that receives the tasks every call changes from then on.
+    /// A working-log note or blocked flag counts as a change to its task.
+    /// Dropping the receiver unsubscribes.
     pub fn subscribe(&self) -> Receiver<Changes> {
         let (tx, rx) = mpsc::channel();
         self.subscribers
@@ -355,12 +363,12 @@ impl Service {
 
     /// Issues a new agent id for an MCP client that starts a task: the
     /// client's name in lowercase ASCII letters, digits and dashes, plus a
-    /// random suffix, such as `claude-code-7f2a`. The id is recorded in
-    /// `agents`, so [`is_known_agent`](Self::is_known_agent) accepts it.
+    /// random suffix, such as `claude-code-7f2a`. The id is recorded, so
+    /// [`is_known_agent`](Self::is_known_agent) accepts it.
     pub fn register_agent(&self, client_name: Option<&str>) -> Result<String, ServiceError> {
         let base = client_agent_id(client_name.unwrap_or(""));
-        let index = self.lock();
-        let now = timestamp_text((self.config.clock)());
+        let db = self.lock();
+        let now = millis((self.config.clock)());
         loop {
             let mut suffix = [0u8; 2];
             getrandom::fill(&mut suffix).expect("the OS random number generator failed");
@@ -368,9 +376,9 @@ impl Service {
             if check_agent_id(&id, &self.config.user_name).is_err() {
                 continue;
             }
-            let inserted = index.connection().execute(
-                "INSERT OR IGNORE INTO agents (agent_id, client_name, last_seen_at)
-                 VALUES (?1, ?2, ?3)",
+            let inserted = db.connection().execute(
+                "INSERT OR IGNORE INTO actors (kind, name, client, first_seen, last_seen)
+                 VALUES ('agent', ?1, ?2, ?3, ?3)",
                 params![id, client_name, now],
             )?;
             if inserted == 1 {
@@ -379,114 +387,30 @@ impl Service {
         }
     }
 
-    /// Whether `id` was issued by [`register_agent`](Self::register_agent).
-    /// After a rebuild, which forgets every issued id, an agent that
-    /// started a task still in progress is known too, so it can carry on
-    /// with its id and win back its lease.
+    /// Whether `id` is an agent the project has seen: issued by
+    /// [`register_agent`](Self::register_agent), or named in imported
+    /// history.
     pub fn is_known_agent(&self, id: &str) -> Result<bool, ServiceError> {
-        let index = self.lock();
-        let issued = index
+        let db = self.lock();
+        Ok(db
             .connection()
-            .query_row("SELECT 1 FROM agents WHERE agent_id = ?1", [id], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM actors WHERE kind = 'agent' AND name = ?1",
+                [id],
+                |_| Ok(()),
+            )
             .optional()?
-            .is_some();
-        if issued {
-            return Ok(true);
-        }
-        Ok(index.tasks()?.iter().any(|task| {
-            task.status == Status::InProgress
-                && read_file(&self.dir, task.id).is_ok_and(|task| {
-                    transitions::last_hand_over(&task)
-                        .is_some_and(|entry| entry.event == "started" && entry.who == id)
-                })
-        }))
-    }
-
-    /// Deletes the project database and builds it again from the files,
-    /// for the Reset local state button. Leases, blocked flags, review
-    /// feedback, working logs and the issued agent ids are lost; an agent
-    /// still working on a task carries on with its id, as after any
-    /// rebuild. The task files are not touched.
-    pub fn reset(&self) -> Result<Changes, ServiceError> {
-        let mut index = self.lock();
-        let changes = index.reset()?;
-        self.emit(changes.clone());
-        Ok(changes)
-    }
-
-    /// The `.tandem/` folder.
-    pub fn task_dir(&self) -> &Path {
-        &self.dir
-    }
-
-    /// The repo the `.tandem/` folder is in.
-    fn repo(&self) -> &Path {
-        self.dir.parent().unwrap_or(&self.dir)
+            .is_some())
     }
 
     pub fn config(&self) -> &Config {
         &self.config
     }
 
-    /// Why the project is read-only, if it is.
-    pub fn read_only(&self) -> Option<&ReadOnly> {
-        self.read_only.as_ref()
-    }
-
-    /// The name `config.toml` gives the project, if any; see
-    /// [`store::project_name`].
-    pub fn name(&self) -> Result<Option<String>, ServiceError> {
-        Ok(store::project_name(self.repo())?)
-    }
-
-    /// Sets the project name in `config.toml`, or removes it when `name`
-    /// is blank, so the app falls back to the folder name. Only the `name`
-    /// line changes; see [`store::set_project_name`]. Returns the name now
-    /// set.
-    pub fn set_name(&self, name: &str) -> Result<Option<String>, ServiceError> {
-        let name = store::normalize_project_name(name)
-            .map_err(|e| ServiceError::InvalidArgument(e.to_string()))?;
-        let _index = self.lock();
-        self.check_writable()?;
-        match store::set_project_name(self.repo(), name.as_deref()) {
-            Ok(_) => Ok(name),
-            Err(StoreError::ConfigReadOnly { reason, .. }) => Err(ServiceError::ReadOnly(reason)),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Tells subscribers that `config.toml` may have changed, for a watcher
-    /// event on it, so the app can read the project name again.
-    pub fn config_changed(&self) {
-        let _index = self.lock();
-        self.emit(Changes {
-            config: true,
-            ..Changes::default()
-        });
-    }
-
-    /// A full rescan, for a burst of watcher events or the periodic sweep.
-    pub fn rescan(&self) -> Result<Changes, ServiceError> {
-        let mut index = self.lock();
-        let changes = index.rescan()?;
-        self.emit(changes.clone());
-        Ok(changes)
-    }
-
-    /// Re-reads one task's file, for a watcher event. An event for a file
-    /// the service just wrote finds the same hash and changes nothing, so
-    /// the app's own writes never come back as changes.
-    pub fn rescan_task(&self, id: TaskId) -> Result<Changes, ServiceError> {
-        let mut index = self.lock();
-        let changes = index.rescan_task(id)?;
-        self.emit(changes.clone());
-        Ok(changes)
-    }
-
-    fn lock(&self) -> MutexGuard<'_, ProjectIndex> {
-        // A panic mid-call rolls its transaction back, so the index is
+    fn lock(&self) -> MutexGuard<'_, ProjectDb> {
+        // A panic mid-call rolls its transaction back, so the database is
         // still consistent.
-        self.index.lock().unwrap_or_else(PoisonError::into_inner)
+        self.db.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Runs `f` under the project lock: records the call (which extends the
@@ -497,17 +421,16 @@ impl Service {
         actor: &Actor,
         f: impl FnOnce(&Call<'_>) -> Result<T, ServiceError>,
     ) -> Result<T, ServiceError> {
-        let mut index = self.lock();
+        let mut db = self.lock();
         let now = (self.config.clock)();
         // Outside the transaction, so even a refused call extends leases.
-        self.touch(index.connection(), actor, now)?;
-        let tx = index.begin()?;
+        let actor_id = self.touch(db.connection(), actor, now)?;
+        let tx = db.begin()?;
         let call = Call {
             tx: &tx,
-            dir: &self.dir,
             actor,
+            actor_id,
             now,
-            today: now.to_zoned(self.config.time_zone.clone()).date(),
             config: &self.config,
             changes: RefCell::default(),
         };
@@ -519,234 +442,168 @@ impl Service {
         Ok(out)
     }
 
-    /// Records an agent's call: updates `agents` and extends every lease the
-    /// agent holds, as "any tool call by the lease holder" does.
-    fn touch(&self, conn: &Connection, actor: &Actor, now: Timestamp) -> Result<(), ServiceError> {
+    /// Records a call and returns the caller's row in `actors`. For an
+    /// agent, updates its row and extends every lease it holds, as any tool
+    /// call by the lease holder does.
+    fn touch(&self, conn: &Connection, actor: &Actor, now: Timestamp) -> Result<i64, ServiceError> {
         let Actor::Agent(agent) = actor else {
-            return Ok(());
+            return Ok(self.user);
         };
         check_agent_id(&agent.id, &self.config.user_name)?;
-        conn.execute(
-            "INSERT INTO agents (agent_id, client_name, last_seen_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT (agent_id) DO UPDATE SET
-               client_name = coalesce(excluded.client_name, client_name),
-               last_seen_at = excluded.last_seen_at",
-            params![agent.id, agent.client_name, timestamp_text(now)],
+        let id: i64 = conn.query_row(
+            "INSERT INTO actors (kind, name, client, first_seen, last_seen)
+             VALUES ('agent', ?1, ?2, ?3, ?3)
+             ON CONFLICT (kind, name) DO UPDATE SET
+               client = coalesce(excluded.client, client),
+               last_seen = excluded.last_seen
+             RETURNING id",
+            params![agent.id, agent.client_name, millis(now)],
+            |row| row.get(0),
         )?;
         conn.execute(
-            "UPDATE leases SET expires_at = ?2 WHERE agent_id = ?1",
-            params![agent.id, timestamp_text(now + self.config.lease_duration)],
+            "UPDATE leases SET expires_at = ?2 WHERE actor = ?1",
+            params![id, millis(now + self.config.lease_duration)],
         )?;
-        Ok(())
+        Ok(id)
     }
 
-    fn check_writable(&self) -> Result<(), ServiceError> {
-        match &self.read_only {
-            Some(reason) => Err(ServiceError::ReadOnly(reason.clone())),
-            None => check_folder(&self.dir),
-        }
+    /// The date `ms` falls on in the configured time zone.
+    fn date(&self, ms: i64) -> Date {
+        date_in(&self.config.time_zone, ms)
     }
 }
 
 /// One call's view of the project, inside its transaction.
 struct Call<'a> {
     tx: &'a Transaction<'a>,
-    dir: &'a Path,
     actor: &'a Actor,
+    /// The caller's row in `actors`.
+    actor_id: i64,
     now: Timestamp,
-    today: Date,
     config: &'a Config,
     /// What the call changed, sent to subscribers once it commits.
     changes: RefCell<Changes>,
 }
 
 impl Call<'_> {
-    /// Re-indexes one task's file.
-    fn scan_task(&self, id: TaskId) -> Result<(), ServiceError> {
-        let changes = rescan_task_in(self.tx, self.dir, id)?;
-        self.changes.borrow_mut().merge(changes);
+    fn now_ms(&self) -> i64 {
+        millis(self.now)
+    }
+
+    /// Records that the task changed: sets its `updated_at` and tells
+    /// subscribers once the call commits.
+    fn changed(&self, seq: i64, id: TaskId) -> Result<(), ServiceError> {
+        self.tx
+            .prepare_cached("UPDATE tasks SET updated_at = ?2 WHERE seq = ?1")?
+            .execute([seq, self.now_ms()])?;
+        self.changes.borrow_mut().changed.insert(id);
         Ok(())
     }
 
-    /// A full stat scan.
-    fn scan_all(&self) -> Result<(), ServiceError> {
-        let changes = rescan_in(self.tx, self.dir)?;
-        self.changes.borrow_mut().merge(changes);
-        Ok(())
+    /// Adds an event by the caller to the task's timeline, and records the
+    /// change.
+    fn event(
+        &self,
+        seq: i64,
+        id: TaskId,
+        kind: &str,
+        summary: &str,
+        data: Option<&serde_json::Value>,
+    ) -> Result<(), ServiceError> {
+        rows::add_event(
+            self.tx,
+            seq,
+            self.actor_id,
+            self.now_ms(),
+            kind,
+            summary,
+            data,
+        )?;
+        self.changed(seq, id)
     }
 
-    /// Records a change to a task's overlays: its working log or flags.
-    fn touched(&self, id: TaskId) {
-        self.changes.borrow_mut().merge(Changes {
-            changed: [id].into(),
-            ..Changes::default()
-        });
-    }
-
-    /// Re-indexes the task, then reads and parses its file.
-    fn read(&self, id: TaskId) -> Result<Task, ServiceError> {
-        self.scan_task(id)?;
-        read_file(self.dir, id)
-    }
-
-    /// Writes the task file and indexes it, so the watcher event for this
-    /// write finds the same hash and changes nothing.
-    fn write(&self, task: &Task) -> Result<Written, ServiceError> {
-        check_folder(self.dir)?;
-        crate::store::write_task(self.dir, task)?;
-        self.scan_task(task.id)?;
-        Ok(written(task))
-    }
-
-    fn lease(&self, id: TaskId) -> Result<Option<Lease>, ServiceError> {
+    fn lease(&self, seq: i64) -> Result<Option<Lease>, ServiceError> {
         Ok(self
             .tx
-            .query_row(
-                "SELECT agent_id, claimed_at, expires_at FROM leases WHERE task_id = ?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
+            .prepare_cached(
+                "SELECT a.name, l.claimed_at, l.expires_at
+                 FROM leases l JOIN actors a ON a.id = l.actor WHERE l.task = ?1",
+            )?
+            .query_row([seq], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .optional()?
             .map(|(agent_id, claimed_at, expires_at)| {
                 lease(agent_id, claimed_at, expires_at, self.now)
             }))
     }
 
+    /// Gives the caller a fresh lease on the task.
+    fn claim(&self, seq: i64) -> Result<(), ServiceError> {
+        self.tx
+            .prepare_cached(
+                "INSERT OR REPLACE INTO leases (task, actor, claimed_at, expires_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?
+            .execute(params![
+                seq,
+                self.actor_id,
+                self.now_ms(),
+                millis(self.now + self.config.lease_duration)
+            ])?;
+        Ok(())
+    }
+
+    fn release(&self, seq: i64) -> Result<(), ServiceError> {
+        self.tx
+            .prepare_cached("DELETE FROM leases WHERE task = ?1")?
+            .execute([seq])?;
+        Ok(())
+    }
+
     /// Checks that an agent holds the task's lease. You may always act.
-    fn check_holder(&self, id: TaskId) -> Result<(), ServiceError> {
+    fn check_holder(&self, task: &rows::TaskRow) -> Result<(), ServiceError> {
         let Actor::Agent(agent) = self.actor else {
             return Ok(());
         };
-        match self.lease(id)? {
+        match self.lease(task.seq)? {
             Some(lease) if lease.agent_id == agent.id => Ok(()),
-            None if self.started_last(id, &agent.id) => {
-                // The lease was lost, as in a database rebuild, but the
-                // changelog shows this agent started the task: it carries on.
-                self.tx.execute(
-                    "INSERT INTO leases (task_id, agent_id, claimed_at, expires_at)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        id,
-                        agent.id,
-                        timestamp_text(self.now),
-                        timestamp_text(self.now + self.config.lease_duration)
-                    ],
-                )?;
-                Ok(())
+            None if task.status == Status::InProgress
+                && self.started_last(task.seq, &agent.id)? =>
+            {
+                // The lease is gone, but this agent started the task and
+                // nothing handed it over since: it carries on.
+                self.claim(task.seq)
             }
             other => Err(ServiceError::NotHolder {
-                task: id,
+                task: task.id,
                 holder: other.map(|lease| lease.agent_id),
             }),
         }
     }
 
-    /// Whether the task is in progress and `agent` started it, with nothing
-    /// handing it over since.
-    fn started_last(&self, id: TaskId, agent: &str) -> bool {
-        read_file(self.dir, id).is_ok_and(|task| {
-            task.status == Status::InProgress
-                && transitions::last_hand_over(&task)
-                    .is_some_and(|entry| entry.event == "started" && entry.who == agent)
-        })
-    }
-
-    /// The name changelog entries use for the caller.
-    fn who(&self) -> &str {
-        match self.actor {
-            Actor::User => &self.config.user_name,
-            Actor::Agent(agent) => &agent.id,
-        }
-    }
-
-    fn agent_id(&self) -> Option<&str> {
-        match self.actor {
-            Actor::User => None,
-            Actor::Agent(agent) => Some(&agent.id),
-        }
-    }
-
-    fn log(&self, id: TaskId, kind: LogKind, message: &str) -> Result<(), ServiceError> {
-        self.touched(id);
-        self.tx.execute(
-            "INSERT INTO work_log (task_id, agent_id, kind, message, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                id,
-                self.agent_id(),
-                kind.as_str(),
-                message,
-                timestamp_text(self.now)
-            ],
-        )?;
-        Ok(())
+    /// Whether `agent` started the task, with nothing handing it over since.
+    fn started_last(&self, seq: i64, agent: &str) -> Result<bool, ServiceError> {
+        Ok(
+            rows::last_hand_over(self.tx, seq)?.is_some_and(|(kind, actor_kind, name)| {
+                kind == "started" && actor_kind == "agent" && name == agent
+            }),
+        )
     }
 }
 
-/// Reads and parses a task file. A symlink or anything else that isn't a
-/// regular file is invalid and never followed, since it could point
-/// outside the repo.
-fn read_file(dir: &Path, id: TaskId) -> Result<Task, ServiceError> {
-    let path = task_path(dir, id);
-    check_regular_file(&path, id)?;
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ServiceError::NotFound(id)),
-        Err(source) => return Err(StoreError::Io { path, source }.into()),
-    };
-    parse_task_file(id, &bytes).map_err(|e| ServiceError::InvalidFile {
-        task: id,
-        message: e.to_string(),
-    })
-}
-
-fn check_regular_file(path: &Path, id: TaskId) -> Result<(), ServiceError> {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => Ok(()),
-        Ok(_) => Err(ServiceError::InvalidFile {
-            task: id,
-            message: "the file is a symbolic link or not a regular file".into(),
-        }),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(ServiceError::NotFound(id)),
-        Err(source) => Err(StoreError::Io {
-            path: path.to_owned(),
-            source,
-        }
-        .into()),
-    }
-}
-
-fn written(task: &Task) -> Written {
-    Written {
-        id: task.id,
-        path: format!("{TASK_DIR}/{}", task.id.file_name()),
-        status: task.status,
-    }
-}
-
-fn lease(agent_id: String, claimed_at: String, expires_at: String, now: Timestamp) -> Lease {
-    let live = expires_at > timestamp_text(now);
+fn lease(agent_id: String, claimed_at: i64, expires_at: i64, now: Timestamp) -> Lease {
     Lease {
         agent_id,
-        claimed_at,
-        expires_at,
-        live,
+        claimed_at: timestamp_text(from_millis(claimed_at)),
+        expires_at: timestamp_text(from_millis(expires_at)),
+        live: expires_at > millis(now),
     }
 }
 
-/// Every lease, by task.
-fn leases(conn: &Connection, now: Timestamp) -> Result<HashMap<TaskId, Lease>, ServiceError> {
-    let mut stmt = conn.prepare("SELECT task_id, agent_id, claimed_at, expires_at FROM leases")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, TaskId>(0)?,
-            lease(row.get(1)?, row.get(2)?, row.get(3)?, now),
-        ))
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+fn date_in(time_zone: &TimeZone, ms: i64) -> Date {
+    from_millis(ms).to_zoned(time_zone.clone()).date()
 }
 
-/// Agent ids appear in changelog headings next to your name, so they are
+/// Agent ids appear in a task's history next to your name, so they are
 /// limited to ASCII letters, digits, `-`, `_` and `.`, up to 64 characters,
 /// which rules out lookalike letters and invisible characters, and must not
 /// be your name in any case.
@@ -785,26 +642,5 @@ pub fn client_agent_id(client_name: &str) -> String {
     match base.trim_end_matches('-') {
         "" => "agent".to_owned(),
         base => base.to_owned(),
-    }
-}
-
-/// Checks that `.tandem` is still a real folder before writing to it: it
-/// may have been replaced by a symlink since the project was opened.
-fn check_folder(dir: &Path) -> Result<(), ServiceError> {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            Err(ServiceError::ReadOnly(ReadOnly::SymlinkedFolder))
-        }
-        Ok(meta) if !meta.is_dir() => Err(StoreError::Io {
-            path: dir.to_owned(),
-            source: io::Error::new(io::ErrorKind::NotADirectory, "not a directory"),
-        }
-        .into()),
-        Ok(_) => Ok(()),
-        Err(source) => Err(StoreError::Io {
-            path: dir.to_owned(),
-            source,
-        }
-        .into()),
     }
 }

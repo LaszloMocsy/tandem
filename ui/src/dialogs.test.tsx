@@ -17,7 +17,6 @@ function summary(id: string, title: string): TaskSummary {
     created: '2026-10-15',
     lease: null,
     blocked: null,
-    problem: null,
     unmet: [],
   }
 }

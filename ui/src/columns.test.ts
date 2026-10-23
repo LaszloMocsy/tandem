@@ -14,7 +14,6 @@ function task(id: string, patch: Partial<TaskSummary> = {}): TaskSummary {
     created: '2026-10-15',
     lease: null,
     blocked: null,
-    problem: null,
     unmet: [],
     ...patch,
   }
@@ -34,16 +33,15 @@ test('puts each task in its status column', () => {
     .toEqual({ backlog: ['a'], todo: ['b'], in_progress: ['c'], finished: ['d'], done: ['e'] })
 })
 
-test('sorts by priority, then oldest created, then id; invalid files last', () => {
+test('sorts by priority, then oldest created, then id', () => {
   const columns = buildColumns([
     task('low', { priority: 'low', created: '2026-01-01' }),
     task('newer', { priority: 'high', created: '2026-10-15' }),
-    task('broken', { priority: 'high', created: null }),
     task('older', { priority: 'high', created: '2026-10-01' }),
     task('same-b', { created: '2026-10-02' }),
     task('same-a', { created: '2026-10-02' }),
   ])
-  expect(ids(columns.todo)).toEqual(['older', 'newer', 'broken', 'same-a', 'same-b', 'low'])
+  expect(ids(columns.todo)).toEqual(['older', 'newer', 'same-a', 'same-b', 'low'])
 })
 
 test('links parents and counts done children', () => {

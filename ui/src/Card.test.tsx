@@ -19,8 +19,7 @@ function card(patch: Partial<TaskSummary> = {}, extra: Partial<CardData> = {}): 
       created: '2026-10-13',
       lease: null,
       blocked: null,
-      problem: null,
-      unmet: [],
+        unmet: [],
       ...patch,
     },
     parent: null,
@@ -78,21 +77,10 @@ test('shows a live or stale lease', () => {
   expect(stale).toContain('claude-code · stale 15m</span>')
 })
 
-test('shows blocked and invalid badges with the reason on hover', () => {
-  const html = render(
-    card({
-      blocked: 'Need a staging account',
-      problem: { kind: 'graph', message: 'parent loop: a → b → a' },
-    }),
-  )
+test('shows the blocked badge with the reason on hover', () => {
+  const html = render(card({ blocked: 'Need a staging account' }))
   expect(html).toContain('title="Need a staging account">Blocked</span>')
-  expect(html).toContain('title="parent loop: a → b → a">Invalid</span>')
-})
-
-test('names an unreadable file by its id', () => {
-  const html = render(card({ title: '', problem: { kind: 'invalid_file', message: 'bad YAML' } }))
-  expect(html).toContain('aria-label="k3f9x2m"')
-  expect(html).toContain('Unreadable file')
+  expect(html).not.toContain('Invalid')
 })
 
 test('shows unmet criteria on Review cards only', () => {

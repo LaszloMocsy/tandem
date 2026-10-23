@@ -1,23 +1,24 @@
 //! The Tauri commands the UI calls. Task commands act as you and wrap the
 //! project's service; `ui/src/api.ts` is the typed client for them.
 //!
-//! Every command is async and does its work on a blocking thread, so file
-//! and database work never stalls the window.
+//! Every command is async and does its work on a blocking thread, so
+//! database work never stalls the window.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use jiff::SignedDuration;
-use tandem_board_core::index::Theme;
+use tandem_board_core::db::Theme;
+use tandem_board_core::model::TaskId;
 use tandem_board_core::service::{Actor, Service};
-use tandem_board_core::store::TaskId;
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 use crate::build_env::BuildEnv;
 use crate::dto::{
-    AgentInfo, DeleteCheck, Finish, NewTask, TaskDetail, TaskEdit, TaskFilter, TaskSummary, Written,
+    AgentInfo, DeleteCheck, DeletedTask, Finish, NewTask, Saved, TaskDetail, TaskEdit, TaskFilter,
+    TaskSummary,
 };
 use crate::error::Error;
 use crate::links::Link;
@@ -49,15 +50,15 @@ pub async fn list_projects(projects: State<'_, Arc<Projects>>) -> Result<Vec<Pro
     blocking(move || projects.list()).await
 }
 
-/// Opens a repo folder; see [`Projects::open`].
+/// Opens a folder; see [`Projects::open`].
 #[tauri::command]
 pub async fn open_project(
     projects: State<'_, Arc<Projects>>,
     path: PathBuf,
-    create_folder: bool,
+    allow_outside_git: bool,
 ) -> Result<Opened> {
     let projects = Arc::clone(&projects);
-    blocking(move || projects.open(&path, create_folder)).await
+    blocking(move || projects.open(&path, allow_outside_git)).await
 }
 
 /// Removes a project from the app; see [`Projects::remove`].
@@ -67,8 +68,7 @@ pub async fn remove_project(projects: State<'_, Arc<Projects>>, project: String)
     blocking(move || projects.remove(&project)).await
 }
 
-/// Sets the project's name in `.tandem/config.toml`; a blank name removes
-/// it, so the folder name is used.
+/// Renames the project; a blank name goes back to the folder name.
 #[tauri::command]
 pub async fn set_project_name(
     projects: State<'_, Arc<Projects>>,
@@ -77,13 +77,6 @@ pub async fn set_project_name(
 ) -> Result<ProjectInfo> {
     let projects = Arc::clone(&projects);
     blocking(move || projects.set_name(&project, &name)).await
-}
-
-/// Reset local state: rebuilds the project's database from its files.
-#[tauri::command]
-pub async fn reset_project(projects: State<'_, Arc<Projects>>, project: String) -> Result<()> {
-    let projects = Arc::clone(&projects);
-    blocking(move || projects.reset(&project)).await
 }
 
 /// The app's settings and the MCP server's state, for the Settings page.
@@ -190,13 +183,13 @@ pub async fn get_task(
     .await
 }
 
-/// New task dialog: a new file in todo.
+/// New task dialog: a new task in todo.
 #[tauri::command]
 pub async fn create_task(
     projects: State<'_, Arc<Projects>>,
     project: String,
     task: NewTask,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service.create_task(&Actor::User, task.into())?.into())
     })
@@ -210,14 +203,14 @@ pub async fn update_task(
     project: String,
     id: TaskId,
     edit: TaskEdit,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service.update_task(&Actor::User, id, edit.into())?.into())
     })
     .await
 }
 
-/// What stands in the way of deleting a task, and whether git keeps it.
+/// What stands in the way of deleting a task.
 #[tauri::command]
 pub async fn delete_check(
     projects: State<'_, Arc<Projects>>,
@@ -230,7 +223,8 @@ pub async fn delete_check(
     .await
 }
 
-/// Deletes a task's file, at any status; see `Service::delete_task`.
+/// Deletes a task, at any status, until restored or cleaned up; see
+/// `Service::delete_task`.
 #[tauri::command]
 pub async fn delete_task(
     projects: State<'_, Arc<Projects>>,
@@ -243,13 +237,52 @@ pub async fn delete_task(
     .await
 }
 
+/// The deleted tasks, which can still be restored, newest first.
+#[tauri::command]
+pub async fn list_deleted_tasks(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+) -> Result<Vec<DeletedTask>> {
+    with_service(projects, project, move |service| {
+        let tasks = service.deleted_tasks()?;
+        Ok(tasks.into_iter().map(DeletedTask::from).collect())
+    })
+    .await
+}
+
+/// Brings a deleted task back.
+#[tauri::command]
+pub async fn restore_task(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+    id: TaskId,
+) -> Result<()> {
+    with_service(projects, project, move |service| {
+        Ok(service.restore_task(id)?)
+    })
+    .await
+}
+
+/// Removes every deleted task for good, so none can be restored. Returns
+/// how many went.
+#[tauri::command]
+pub async fn purge_deleted_tasks(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+) -> Result<usize> {
+    with_service(projects, project, move |service| {
+        Ok(service.purge_deleted()?.len())
+    })
+    .await
+}
+
 /// Backlog → Todo.
 #[tauri::command]
 pub async fn approve_task(
     projects: State<'_, Arc<Projects>>,
     project: String,
     id: TaskId,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service.approve(id)?.into())
     })
@@ -262,7 +295,7 @@ pub async fn start_task(
     projects: State<'_, Arc<Projects>>,
     project: String,
     id: TaskId,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service.start_task(&Actor::User, id)?.into())
     })
@@ -276,7 +309,7 @@ pub async fn finish_task(
     project: String,
     id: TaskId,
     finish: Finish,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service.finish_task(&Actor::User, id, finish.into())?.into())
     })
@@ -290,7 +323,7 @@ pub async fn release_task(
     project: String,
     id: TaskId,
     note: String,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service.release_task(&Actor::User, id, &note)?.into())
     })
@@ -303,7 +336,7 @@ pub async fn mark_reviewed(
     projects: State<'_, Arc<Projects>>,
     project: String,
     id: TaskId,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service.mark_reviewed(id)?.into())
     })
@@ -317,36 +350,9 @@ pub async fn reopen_task(
     project: String,
     id: TaskId,
     feedback: String,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service.reopen(id, &feedback)?.into())
-    })
-    .await
-}
-
-/// Whether the task file has changes git hasn't committed, for the Commit
-/// review button.
-#[tauri::command]
-pub async fn has_uncommitted_changes(
-    projects: State<'_, Arc<Projects>>,
-    project: String,
-    id: TaskId,
-) -> Result<bool> {
-    with_service(projects, project, move |service| {
-        Ok(service.has_uncommitted_changes(id)?)
-    })
-    .await
-}
-
-/// Commits a Done task's file alone. Returns the commit hash.
-#[tauri::command]
-pub async fn commit_review(
-    projects: State<'_, Arc<Projects>>,
-    project: String,
-    id: TaskId,
-) -> Result<String> {
-    with_service(projects, project, move |service| {
-        Ok(service.commit_review(id)?)
     })
     .await
 }
@@ -387,7 +393,7 @@ pub async fn add_changelog_entry(
     id: TaskId,
     summary: String,
     files: Option<Vec<String>>,
-) -> Result<Written> {
+) -> Result<Saved> {
     with_service(projects, project, move |service| {
         Ok(service
             .add_changelog_entry(&Actor::User, id, &summary, files.unwrap_or_default())?

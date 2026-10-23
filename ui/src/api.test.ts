@@ -20,9 +20,12 @@ test('commands pass camelCase arguments under the Rust names', async () => {
   await api.markReviewed('demo', 'k3f9x2m')
   await api.reopen('demo', 'k3f9x2m', 'Missing a test.')
   await api.release('demo', 'k3f9x2m')
+  await api.listDeletedTasks('demo')
+  await api.restoreTask('demo', 'k3f9x2m')
+  await api.purgeDeletedTasks('demo')
   expect(mockedInvoke.mock.calls).toEqual([
-    ['open_project', { path: '/repo', createFolder: false }],
-    ['open_project', { path: '/repo', createFolder: true }],
+    ['open_project', { path: '/repo', allowOutsideGit: false }],
+    ['open_project', { path: '/repo', allowOutsideGit: true }],
     ['list_tasks', { project: 'demo', filter: { status: 'todo', readyOnly: true } }],
     [
       'update_task',
@@ -32,6 +35,9 @@ test('commands pass camelCase arguments under the Rust names', async () => {
     ['mark_reviewed', { project: 'demo', id: 'k3f9x2m' }],
     ['reopen_task', { project: 'demo', id: 'k3f9x2m', feedback: 'Missing a test.' }],
     ['release_task', { project: 'demo', id: 'k3f9x2m', note: '' }],
+    ['list_deleted_tasks', { project: 'demo' }],
+    ['restore_task', { project: 'demo', id: 'k3f9x2m' }],
+    ['purge_deleted_tasks', { project: 'demo' }],
   ])
 })
 

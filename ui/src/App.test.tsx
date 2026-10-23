@@ -11,7 +11,6 @@ const project: ProjectInfo = {
   lastOpenedAt: null,
   open: true,
   error: null,
-  readOnly: null,
   mcpUrl: null,
 }
 
@@ -27,7 +26,6 @@ function task(id: string, status: TaskSummary['status']): TaskSummary {
     created: '2026-10-15',
     lease: null,
     blocked: null,
-    problem: null,
     unmet: [],
   }
 }
@@ -48,7 +46,7 @@ test('with no project open, shows the welcome screen', () => {
   const html = renderToStaticMarkup(<App store={store([], [])} />)
   expect(html).toContain('Tandem')
   expect(html).toContain('Welcome to Tandem')
-  expect(html).toContain('New board')
+  expect(html).toContain('Open folder')
   // Settings are there before any board is.
   expect(html).toContain('title="Settings (Cmd/Ctrl+,)">Settings</button>')
 })
@@ -73,12 +71,9 @@ test('shows the five columns with their cards', async () => {
   expect(html).toMatch(/aria-label="Review">.*Task bbbbbbb.*aria-label="Done"/)
 })
 
-test('a read-only project says why, such as asking you to update', async () => {
-  const reason =
-    'the tasks use format version 99, but this app supports only up to 1; update Tandem to edit them'
-  const board = store([{ ...project, readOnly: reason }], [task('aaaaaaa', 'todo')])
+test('New task is always available on an open board', async () => {
+  const board = store([project], [task('aaaaaaa', 'todo')])
   await board.start()
   const html = renderToStaticMarkup(<App store={board} />)
-  expect(html).toContain(`<p class="read-only-notice" role="status">Read-only: ${reason}</p>`)
-  expect(html).toContain('disabled="" title="New task (N)"')
+  expect(html).toContain('<button type="button" class="primary new-task-button" title="New task (N)">')
 })

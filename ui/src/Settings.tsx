@@ -1,10 +1,10 @@
-import { useEffect, useId, useState, type KeyboardEvent } from 'react'
-import type { Api, AppSettings, Link, ProjectInfo, Theme } from './api.ts'
+import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from 'react'
+import type { Api, AppSettings, DeletedTask, Link, ProjectInfo, Theme } from './api.ts'
 import { APP_VERSION, BUILD_ENV, type BuildEnv, versionText } from './buildEnv.ts'
-import { Dialog, ResetLocalStateForm } from './dialogs.tsx'
-import { errorMessage } from './edit.ts'
+import { useDeletedTasks } from './deletedTasks.ts'
+import { CleanUpDeletedForm, Dialog } from './dialogs.tsx'
+import { errorMessage, formatTime } from './edit.ts'
 import { CopyButton } from './panels.tsx'
-import { workingTasks, type WorkingTask } from './projects.ts'
 import { folderName, nameProblem, parsePort } from './settingsInput.ts'
 import { applyTheme } from './theme.ts'
 
@@ -17,8 +17,9 @@ export type SettingsApi = Pick<
   | 'setMcpPort'
   | 'setTheme'
   | 'setProjectName'
-  | 'resetProject'
-  | 'listAgents'
+  | 'listDeletedTasks'
+  | 'restoreTask'
+  | 'purgeDeletedTasks'
   | 'openLink'
 >
 
@@ -36,22 +37,22 @@ const THEMES: { theme: Theme; label: string }[] = [
 export function Settings({
   tab,
   project,
+  tasks,
   api,
   onTab,
   onClose,
   onProjectsChanged,
-  onReset,
   onRemove,
 }: {
   tab: SettingsTab
   project: ProjectInfo | undefined
+  /** The board's task list; a change reloads the deleted tasks. */
+  tasks: unknown
   api: SettingsApi
   onTab: (tab: SettingsTab) => void
   onClose: () => void
   /** A project's name or MCP URL changed, so the list needs reloading. */
   onProjectsChanged: () => void
-  /** The project's local state was reset. */
-  onReset: (project: ProjectInfo) => void
   onRemove: (project: ProjectInfo) => void
 }) {
   const id = useId()
@@ -106,9 +107,9 @@ export function Settings({
             <ProjectTab
               key={projectTab.id}
               project={projectTab}
+              tasks={tasks}
               api={api}
               onRenamed={onProjectsChanged}
-              onReset={onReset}
               onRemove={onRemove}
             />
           )}
@@ -354,50 +355,32 @@ export function AppSettingsView({
   )
 }
 
-/** Renames the project, and runs Reset local state with its dialog. */
+/** Renames the project, and lists, restores and cleans up deleted tasks. */
 function ProjectTab({
   project,
+  tasks,
   api,
   onRenamed,
-  onReset,
   onRemove,
 }: {
   project: ProjectInfo
+  tasks: unknown
   api: SettingsApi
   onRenamed: () => void
-  onReset: (project: ProjectInfo) => void
   onRemove: (project: ProjectInfo) => void
 }) {
-  // `null` until you type, so the field follows the name, even when a
-  // pull changes it.
+  // `null` until you type, so the field follows the name.
   const [draft, setDraft] = useState<string | null>(null)
   const [nameError, setNameError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
-  const [resetting, setResetting] = useState(false)
-  const [working, setWorking] = useState<WorkingTask[] | null>(null)
-  const [resetError, setResetError] = useState<string | null>(null)
+  const deleted = useDeletedTasks(api, project.id, tasks)
 
   useEffect(() => {
     if (!saved) return
     const timer = setTimeout(() => setSaved(false), 2000)
     return () => clearTimeout(timer)
   }, [saved])
-
-  // Which tasks agents are working on, for the reset dialog's warning.
-  const listAgents = api.listAgents
-  useEffect(() => {
-    if (!resetting) return
-    let current = true
-    listAgents(project.id).then(
-      (agents) => current && setWorking(workingTasks(agents)),
-      // Only a warning, so a failed check doesn't block the reset.
-      () => current && setWorking([]),
-    )
-    return () => {
-      current = false
-    }
-  }, [listAgents, project.id, resetting])
 
   async function saveName(name: string) {
     setBusy(true)
@@ -409,20 +392,6 @@ function ProjectTab({
       onRenamed()
     } catch (error) {
       setNameError(errorMessage(error))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function reset() {
-    setBusy(true)
-    setResetError(null)
-    try {
-      await api.resetProject(project.id)
-      setResetting(false)
-      onReset(project)
-    } catch (error) {
-      setResetError(errorMessage(error))
     } finally {
       setBusy(false)
     }
@@ -442,21 +411,29 @@ function ProjectTab({
           setSaved(false)
         }}
         onSaveName={(name) => void saveName(name)}
-        onReset={() => {
-          setWorking(null)
-          setResetError(null)
-          setResetting(true)
-        }}
         onRemove={() => onRemove(project)}
+        deletedTasks={
+          <DeletedTasksView
+            tasks={deleted.tasks}
+            loadError={deleted.loadError}
+            busy={deleted.busy}
+            error={deleted.error}
+            onRestore={(id) => void deleted.actions.restore(id)}
+            onCleanUp={deleted.actions.askCleanUp}
+          />
+        }
       />
-      <Dialog open={resetting} label="Reset local state" onClose={() => setResetting(false)}>
-        <ResetLocalStateForm
-          project={project}
-          working={working}
-          busy={busy}
-          error={resetError}
-          onCancel={() => setResetting(false)}
-          onSubmit={() => void reset()}
+      <Dialog
+        open={deleted.confirming}
+        label="Clean up deleted tasks"
+        onClose={deleted.actions.cancelCleanUp}
+      >
+        <CleanUpDeletedForm
+          count={deleted.tasks?.length ?? 0}
+          busy={deleted.busy}
+          error={deleted.cleanUpError}
+          onCancel={deleted.actions.cancelCleanUp}
+          onSubmit={() => void deleted.actions.confirmCleanUp()}
         />
       </Dialog>
     </>
@@ -464,8 +441,8 @@ function ProjectTab({
 }
 
 /**
- * The Project tab: the name, which is committed in `.tandem/config.toml`,
- * then the values and actions that stay on this machine.
+ * The Project tab: the name, the MCP endpoint, the deleted tasks and
+ * Remove. Everything is stored on this machine.
  */
 export function ProjectSettingsView({
   project,
@@ -475,8 +452,8 @@ export function ProjectSettingsView({
   busy,
   onName,
   onSaveName,
-  onReset,
   onRemove,
+  deletedTasks,
 }: {
   project: ProjectInfo
   name: string
@@ -485,11 +462,11 @@ export function ProjectSettingsView({
   busy: boolean
   onName: (name: string) => void
   onSaveName: (name: string) => void
-  onReset: () => void
   onRemove: () => void
+  /** The Deleted tasks section, before Remove. */
+  deletedTasks?: ReactNode
 }) {
   const folder = folderName(project.repoPath)
-  const readOnly = project.readOnly !== null
   const problem = nameProblem(name)
   // A blank name goes back to the folder name.
   const unchanged = (name.trim() || folder) === project.name
@@ -514,14 +491,13 @@ export function ProjectSettingsView({
             placeholder={folder}
             spellCheck={false}
             value={name}
-            disabled={readOnly}
             aria-invalid={problem !== null || nameError !== null || undefined}
             onChange={(event) => onName(event.target.value)}
           />
           <button
             type="submit"
             className="primary"
-            disabled={busy || readOnly || unchanged || problem !== null}
+            disabled={busy || unchanged || problem !== null}
           >
             Save
           </button>
@@ -536,18 +512,12 @@ export function ProjectSettingsView({
             {problem ?? nameError}
           </p>
         )}
-        {readOnly ? (
-          <p className="hint">Read-only: {project.readOnly}</p>
-        ) : (
-          <p className="hint">
-            Saved in <code>.tandem/config.toml</code>, so commit it and the whole team sees this
-            name. Leave it empty to use the folder name, <code>{folder}</code>.
-          </p>
-        )}
+        <p className="hint">
+          Stored on this machine. Leave it empty to use the folder name, <code>{folder}</code>.
+        </p>
       </section>
-      <section className="settings-section" aria-label="On this machine">
-        <h3>On this machine</h3>
-        <p className="hint">These stay on this machine and are never committed.</p>
+      <section className="settings-section" aria-label="MCP endpoint">
+        <h3>MCP endpoint</h3>
         <dl className="settings-values">
           <dt>Project id</dt>
           <dd>
@@ -567,30 +537,17 @@ export function ProjectSettingsView({
           </dd>
         </dl>
         <p className="hint">
-          The id names this board's MCP endpoint and stays the same when you rename it. Every clone
-          or worktree on this machine gets its own.
+          The id names this board's MCP endpoint and stays the same when you rename it. Every
+          worktree of the repo shares it.
         </p>
       </section>
-      <section className="settings-section" aria-label="Local data">
-        <h3>Local data</h3>
-        <div className="settings-action">
-          <div>
-            <h4>Reset local state</h4>
-            <p className="hint">
-              Deletes this board's local database and rebuilds it from the task files. Leases and
-              working logs are lost.
-            </p>
-          </div>
-          <button type="button" className="delete-task" disabled={busy} onClick={onReset}>
-            Reset local state…
-          </button>
-        </div>
+      {deletedTasks}
+      <section className="settings-section" aria-label="Remove from Tandem">
         <div className="settings-action">
           <div>
             <h4>Remove from Tandem</h4>
             <p className="hint">
-              Takes the board out of the project list. The repo and its <code>.tandem/</code>{' '}
-              folder stay as they are.
+              Deletes this board and its tasks from this machine. The folder stays as it is.
             </p>
           </div>
           <button type="button" className="delete-task" disabled={busy} onClick={onRemove}>
@@ -599,5 +556,81 @@ export function ProjectSettingsView({
         </div>
       </section>
     </>
+  )
+}
+
+/**
+ * The Deleted tasks section: each deleted task with Restore, and Clean up
+ * deleted tasks, which asks first. `tasks` is `null` while loading.
+ */
+export function DeletedTasksView({
+  tasks,
+  loadError,
+  busy,
+  error,
+  onRestore,
+  onCleanUp,
+}: {
+  tasks: readonly DeletedTask[] | null
+  loadError: string | null
+  busy: boolean
+  error: string | null
+  onRestore: (id: string) => void
+  onCleanUp: () => void
+}) {
+  return (
+    <section className="settings-section" aria-label="Deleted tasks">
+      <h3>Deleted tasks</h3>
+      {loadError ? (
+        <p className="field-error" role="alert">
+          {loadError}
+        </p>
+      ) : tasks === null ? (
+        <p className="muted">Loading…</p>
+      ) : tasks.length === 0 ? (
+        <p className="muted">No deleted tasks.</p>
+      ) : (
+        <ul className="deleted-tasks">
+          {tasks.map((task) => (
+            <li key={task.id}>
+              <code>{task.id}</code>
+              <span className="deleted-title">{task.title}</span>
+              <span className="muted">deleted {formatTime(task.deletedAt)}</span>
+              <button
+                type="button"
+                className="link"
+                aria-label={`Restore ${task.id}`}
+                disabled={busy}
+                onClick={() => onRestore(task.id)}
+              >
+                Restore
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="hint">Deleted tasks can be restored until you clean them up.</p>
+      <div className="settings-action">
+        <div>
+          <h4>Clean up deleted tasks</h4>
+          <p className="hint">
+            Deletes them and their history for good, so they can no longer be restored.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="delete-task"
+          disabled={busy || tasks === null || tasks.length === 0}
+          onClick={onCleanUp}
+        >
+          Clean up…
+        </button>
+      </div>
+    </section>
   )
 }

@@ -1,6 +1,6 @@
 // Which transition a drag between two columns applies, following the
-// transitions table in the spec's State model. A pair the table doesn't
-// list is not a move.
+// service's transitions in `core/src/service/transitions.rs`. A pair with
+// no transition is not a move.
 
 import type { Status } from './api.ts'
 

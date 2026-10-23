@@ -1,33 +1,35 @@
 //! The project registry: the projects in `app.db` and the ones open now.
 //!
-//! An open project has its service, its watcher, a thread that forwards
-//! its change events, and an MCP endpoint. Every project in the list whose
-//! `.tandem/` folder exists is opened on launch and stays open until the
-//! app quits or the project is removed, so agents can reach any of them
-//! whichever one the board shows.
+//! An open project has its service, a thread that forwards its change
+//! events, and an MCP endpoint. Every project in the list whose folder
+//! still exists is opened on launch and stays open until the app quits or
+//! the project is removed, so agents can reach any of them whichever one
+//! the board shows.
+//!
+//! A project is identified by its repo's git common dir, so every worktree
+//! of a repo opens the same project, with one board and one MCP URL.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
 use jiff::SignedDuration;
 use serde::Serialize;
+use tandem_board_core::db::{
+    AppDb, Changes, Project, Theme, delete_project_db, folder_name, normalize_project_name,
+};
 use tandem_board_core::git;
-use tandem_board_core::index::{AppDb, Changes, Project, Theme, delete_project_db, folder_name};
+use tandem_board_core::markdown::TASK_DIR;
 use tandem_board_core::service::{Config, Service};
-use tandem_board_core::store::TASK_DIR;
-use tandem_board_core::watcher::{Watcher, WatcherConfig};
 use tandem_board_mcp::{DEFAULT_ADDR, endpoint_path};
 
 use crate::error::{Error, describe, report};
 use crate::mcp::Mcp;
 
-/// Called with a project id and what changed in it. When `config.toml`
-/// changed, the project's name in the list is up to date by then.
+/// Called with a project id and what changed in it.
 pub type OnChange = Arc<dyn Fn(&str, &Changes) + Send + Sync>;
 
 /// A project as the project switcher shows it.
@@ -36,14 +38,13 @@ pub type OnChange = Arc<dyn Fn(&str, &Changes) + Send + Sync>;
 pub struct ProjectInfo {
     pub id: String,
     pub name: String,
+    /// The checkout or folder last opened.
     pub repo_path: String,
     pub last_opened_at: Option<String>,
     /// Whether the project is open, so its tasks can be listed.
     pub open: bool,
     /// Why the project is not open, when it isn't.
     pub error: Option<String>,
-    /// Why the project is read-only, when it is.
-    pub read_only: Option<String>,
     /// The project's MCP endpoint, while it is open and the server runs.
     pub mcp_url: Option<String>,
 }
@@ -70,36 +71,22 @@ pub struct AppSettingsInfo {
 pub enum Opened {
     /// The project is open.
     Project { project: ProjectInfo },
-    /// The folder has no `.tandem/`. Nothing was created or added to the
-    /// list; open it again with `create_folder` to create `.tandem/`.
+    /// The folder is not in a git repo. Nothing was added to the list; open
+    /// it again with `allow_outside_git` to make it a project of its own.
     #[serde(rename_all = "camelCase")]
-    NoTaskFolder {
-        repo_path: String,
-        /// Whether the folder is in a git repo, so the UI can warn before
-        /// creating a board that git won't track.
-        git_repo: bool,
-    },
+    OutsideGit { repo_path: String },
 }
 
 /// Every project in `app.db`, and the open ones.
 pub struct Projects {
     data_dir: PathBuf,
-    /// Shared with each project's event thread, which keeps its name up to
-    /// date.
-    app_db: Arc<Mutex<AppDb>>,
-    open: Mutex<BTreeMap<String, OpenProject>>,
+    app_db: Mutex<AppDb>,
+    open: Mutex<BTreeMap<String, Arc<Service>>>,
     /// Why a project failed to open on launch.
     failed: Mutex<BTreeMap<String, String>>,
     /// The MCP server, with an endpoint for every open project.
     mcp: Mcp,
     on_change: OnChange,
-}
-
-/// A running project. Dropping it stops the watcher; the forwarding thread
-/// ends once the last handle on the service is gone.
-struct OpenProject {
-    service: Arc<Service>,
-    _watcher: Watcher,
 }
 
 impl Projects {
@@ -108,7 +95,7 @@ impl Projects {
     pub fn new(data_dir: &Path, mcp: Mcp, on_change: OnChange) -> Result<Self, Error> {
         Ok(Self {
             data_dir: data_dir.to_owned(),
-            app_db: Arc::new(Mutex::new(AppDb::open(data_dir)?)),
+            app_db: Mutex::new(AppDb::open(data_dir)?),
             open: Mutex::default(),
             failed: Mutex::default(),
             mcp,
@@ -168,20 +155,19 @@ impl Projects {
         Ok(settings.mcp_port.unwrap_or(DEFAULT_ADDR.port()))
     }
 
-    /// Opens every project in the list whose `.tandem/` folder still
-    /// exists, as on launch. Projects without one are left closed, so
-    /// nothing is created behind your back. Failures are reported to
-    /// stderr and shown in the project list.
+    /// Opens every project in the list whose folder still exists, as on
+    /// launch. Failures are reported to stderr and shown in the project
+    /// list.
     pub fn open_all(&self) -> Result<(), Error> {
         let projects = lock(&self.app_db).projects()?;
         for project in projects {
-            if !has_task_folder(&project.repo_path) {
+            if !project.last_path.is_dir() {
                 continue;
             }
             if let Err(e) = self.start(&project) {
                 eprintln!(
                     "tandem: cannot open {}: {}",
-                    project.repo_path.display(),
+                    project.last_path.display(),
                     e.message
                 );
                 lock(&self.failed).insert(project.id, e.message);
@@ -196,30 +182,34 @@ impl Projects {
         Ok(projects.iter().map(|project| self.info(project)).collect())
     }
 
-    /// Opens the repo at `path` and records it as the most recently opened
-    /// project, adding it to the list if needed. If the folder has no
-    /// `.tandem/`, creates one when `create_folder` is set, and otherwise
-    /// changes nothing and says so.
-    pub fn open(&self, path: &Path, create_folder: bool) -> Result<Opened, Error> {
-        let repo = path.canonicalize().map_err(|e| {
+    /// Opens the folder at `path` and records its project as the most
+    /// recently opened, adding it to the list if needed. Any folder in a git
+    /// repo opens the repo's project, whichever worktree it is in. A folder
+    /// outside git becomes a project of its own only with
+    /// `allow_outside_git`; otherwise nothing changes and the result says so.
+    pub fn open(&self, path: &Path, allow_outside_git: bool) -> Result<Opened, Error> {
+        let folder = path.canonicalize().map_err(|e| {
             Error::new(
                 "invalid_argument",
                 format!("cannot open {}: {e}", path.display()),
             )
         })?;
-        if !repo.is_dir() {
+        if !folder.is_dir() {
             return Err(Error::new(
                 "invalid_argument",
-                format!("{} is not a folder", repo.display()),
+                format!("{} is not a folder", folder.display()),
             ));
         }
-        if !create_folder && !has_task_folder(&repo) {
-            return Ok(Opened::NoTaskFolder {
-                repo_path: repo.display().to_string(),
-                git_repo: git::is_repo(&repo),
-            });
-        }
-        let project = lock(&self.app_db).add_project(&repo)?;
+        let git_dir = match git::common_dir(&folder) {
+            Some(git_dir) => git_dir,
+            None if allow_outside_git => folder.clone(),
+            None => {
+                return Ok(Opened::OutsideGit {
+                    repo_path: folder.display().to_string(),
+                });
+            }
+        };
+        let project = lock(&self.app_db).add_project(&git_dir, &folder, &folder_name(&git_dir))?;
         self.start(&project)?;
         lock(&self.failed).remove(&project.id);
         let app_db = lock(&self.app_db);
@@ -232,14 +222,11 @@ impl Projects {
     }
 
     /// Closes the project, removes it from the list and deletes its
-    /// database from the app's data directory. The repo, its `.tandem/`
-    /// folder and the task files are left alone. Refused with
-    /// `agents_working` while an agent holds a live lease on any of its
-    /// tasks. Returns `false` if there is no such project.
+    /// database, with every task in it. The folder is left alone. Refused
+    /// with `agents_working` while an agent holds a live lease on any of
+    /// its tasks. Returns `false` if there is no such project.
     pub fn remove(&self, id: &str) -> Result<bool, Error> {
-        let service = lock(&self.open)
-            .get(id)
-            .map(|project| Arc::clone(&project.service));
+        let service = lock(&self.open).get(id).cloned();
         if let Some(service) = service {
             check_no_agents_working(&service)?;
             // Close the endpoint so no agent can claim a task, then check
@@ -254,132 +241,92 @@ impl Projects {
         lock(&self.failed).remove(id);
         self.mcp.endpoints().remove(id);
         let removed = lock(&self.app_db).remove_project(id)?;
-        if removed {
-            // The project is gone from the list either way, so a database
-            // left behind is only reported; it is rebuilt if you add the
-            // project again.
-            if let Err(e) = delete_project_db(&self.data_dir, id) {
-                report(&format!("cannot delete the database of {id}"), &e);
-            }
+        if removed && let Err(e) = delete_project_db(&self.data_dir, id) {
+            // The project is gone from the list either way.
+            report(&format!("cannot delete the database of {id}"), &e);
         }
         Ok(removed)
     }
 
-    /// Sets the project's name in its `config.toml`, or removes it when
-    /// `name` is blank so the folder name is used; see
-    /// [`Service::set_name`]. Returns the project as the list shows it.
+    /// Renames the project, or gives it back its folder's name when `name`
+    /// is blank. Returns the project as the list shows it.
     pub fn set_name(&self, id: &str, name: &str) -> Result<ProjectInfo, Error> {
-        let service = self.service(id)?;
-        service.set_name(name)?;
-        let project = lock(&self.app_db)
+        let name = normalize_project_name(name)
+            .map_err(|e| Error::new("invalid_argument", e.to_string()))?;
+        let app_db = lock(&self.app_db);
+        let project = app_db
             .project(id)?
             .ok_or_else(|| Error::project_not_found(id))?;
-        cache_name(&self.app_db, &project.id, &project.repo_path, &service)?;
-        let project = lock(&self.app_db).project(id)?.unwrap_or(project);
+        let name = name.unwrap_or_else(|| folder_name(&project.git_dir));
+        app_db.set_name(id, &name)?;
+        let project = app_db.project(id)?.unwrap_or(project);
+        drop(app_db);
         Ok(self.info(&project))
-    }
-
-    /// Deletes the project's database and rebuilds it from the files; see
-    /// [`Service::reset`]. Leases and working logs are lost.
-    pub fn reset(&self, id: &str) -> Result<(), Error> {
-        self.service(id)?.reset()?;
-        Ok(())
     }
 
     /// The service of an open project.
     pub fn service(&self, id: &str) -> Result<Arc<Service>, Error> {
         lock(&self.open)
             .get(id)
-            .map(|project| Arc::clone(&project.service))
+            .cloned()
             .ok_or_else(|| Error::project_not_found(id))
     }
 
-    /// Opens the project unless it is open already: its service, watcher,
-    /// change forwarding and MCP endpoint.
+    /// Opens the project unless it is open already: its service, change
+    /// forwarding and MCP endpoint. A project opened for the first time
+    /// imports the tasks of an old `.tandem/` folder in the checkout, if it
+    /// has one; the folder is only read.
     fn start(&self, project: &Project) -> Result<(), Error> {
         let mut open = lock(&self.open);
         if open.contains_key(&project.id) {
             return Ok(());
         }
         let config = Config {
-            user_name: git_user_name(&project.repo_path).unwrap_or_else(|| "user".to_owned()),
+            user_name: git::user_name(&project.last_path).unwrap_or_else(|| "user".to_owned()),
             ..Config::default()
         };
-        let service = Arc::new(Service::open(
-            &self.data_dir,
-            &project.id,
-            &project.repo_path,
-            config,
-        )?);
-        if let Some(reason) = service.read_only() {
-            eprintln!(
-                "tandem: {} is read-only: {reason}",
-                project.repo_path.display()
-            );
-        }
-        // The name may have changed while the app was closed.
-        if let Err(e) = cache_name(&self.app_db, &project.id, &project.repo_path, &service) {
-            eprintln!("tandem: cannot read the name of {}: {e}", project.id);
+        let service = Arc::new(Service::open(&self.data_dir, &project.id, config)?);
+        let task_dir = project.last_path.join(TASK_DIR);
+        if service.is_new() && task_dir.is_dir() {
+            let report = service.import_folder(&task_dir)?;
+            for skipped in &report.skipped {
+                eprintln!("tandem: importing {}: {skipped}", task_dir.display());
+            }
         }
 
-        // Subscribe before the watcher starts, so no change is missed. The
-        // thread holds a weak handle, so it ends with the project.
+        // The thread holds the receiver only, so it ends with the project.
         let changes = service.subscribe();
         let on_change = Arc::clone(&self.on_change);
-        let app_db = Arc::clone(&self.app_db);
-        let weak = Arc::downgrade(&service);
-        let (id, repo) = (project.id.clone(), project.repo_path.clone());
+        let id = project.id.clone();
         thread::Builder::new()
             .name(format!("tandem-events-{id}"))
             .spawn(move || {
                 for changes in changes {
-                    if changes.config
-                        && let Some(service) = weak.upgrade()
-                        && let Err(e) = cache_name(&app_db, &id, &repo, &service)
-                    {
-                        eprintln!("tandem: cannot read the name of {id}: {e}");
-                    }
                     on_change(&id, &changes);
                 }
             })
             .map_err(|e| Error::internal(&e))?;
 
-        let path = project.repo_path.clone();
-        let watcher = Watcher::start(Arc::clone(&service), WatcherConfig::default(), move |e| {
-            report(&format!("watching {}", path.display()), &e);
-        })?;
         self.mcp
             .endpoints()
             .insert(&project.id, Arc::clone(&service));
-        open.insert(
-            project.id.clone(),
-            OpenProject {
-                service,
-                _watcher: watcher,
-            },
-        );
+        open.insert(project.id.clone(), service);
         Ok(())
     }
 
     fn info(&self, project: &Project) -> ProjectInfo {
-        let open = lock(&self.open);
-        let service = open.get(&project.id).map(|open| &open.service);
-        let error = match service {
-            Some(_) => None,
-            None => Some(self.closed_reason(project)),
-        };
+        let open = lock(&self.open).contains_key(&project.id);
         ProjectInfo {
             id: project.id.clone(),
             name: project.name.clone(),
-            repo_path: project.repo_path.display().to_string(),
+            repo_path: project.last_path.display().to_string(),
             last_opened_at: project.last_opened_at.clone(),
-            open: service.is_some(),
-            error,
-            read_only: service
-                .and_then(|service| service.read_only())
-                .map(ToString::to_string),
-            mcp_url: service
-                .and(self.mcp.addr())
+            open,
+            error: (!open).then(|| self.closed_reason(project)),
+            mcp_url: self
+                .mcp
+                .addr()
+                .filter(|_| open)
                 .map(|addr| format!("http://{addr}{}", endpoint_path(&project.id))),
         }
     }
@@ -388,26 +335,13 @@ impl Projects {
         if let Some(message) = lock(&self.failed).get(&project.id) {
             return message.clone();
         }
-        match fs::metadata(&project.repo_path) {
-            Ok(meta) if meta.is_dir() => format!("the folder has no {TASK_DIR} folder"),
+        match fs::metadata(&project.last_path) {
+            Ok(meta) if meta.is_dir() => "the project is not open".to_owned(),
             Ok(_) => "the project path is not a folder".to_owned(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => "the folder is missing".to_owned(),
             Err(e) => describe(&e),
         }
     }
-}
-
-/// Stores the project's name, from its `config.toml` or else its folder,
-/// in the project list.
-fn cache_name(
-    app_db: &Mutex<AppDb>,
-    id: &str,
-    repo: &Path,
-    service: &Service,
-) -> Result<(), Error> {
-    let name = service.name()?.unwrap_or_else(|| folder_name(repo));
-    lock(app_db).set_name(id, &name)?;
-    Ok(())
 }
 
 /// Refuses with `agents_working` if an agent holds a live lease on any of
@@ -437,36 +371,20 @@ fn check_no_agents_working(service: &Service) -> Result<(), Error> {
     ))
 }
 
-/// Whether `repo` has a `.tandem` entry. A symlinked one counts; it opens
-/// read-only.
-fn has_task_folder(repo: &Path) -> bool {
-    fs::symlink_metadata(repo.join(TASK_DIR)).is_ok()
-}
-
-/// Your name for changelog entries: `git config user.name` in the repo.
-fn git_user_name(repo: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .args(["config", "user.name"])
-        .current_dir(repo)
-        .output()
-        .ok()?;
-    let name = String::from_utf8(output.stdout).ok()?.trim().to_owned();
-    (output.status.success() && !name.is_empty()).then_some(name)
-}
-
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
     use std::sync::mpsc;
     use std::time::Duration;
 
     use std::net::SocketAddr;
-    use tandem_board_core::index::project_db_path;
-    use tandem_board_core::service::{Actor, NewTask};
-    use tandem_board_core::store::TaskId;
+    use tandem_board_core::db::project_db_path;
+    use tandem_board_core::model::TaskId;
+    use tandem_board_core::service::{Actor, NewTask, TaskFilter};
     use tempfile::TempDir;
 
     use tandem_board_mcp::Endpoints;
@@ -510,8 +428,12 @@ mod tests {
             }
         }
 
-        fn open(&self, repo: &Path, create_folder: bool) -> Opened {
-            self.projects.open(repo, create_folder).unwrap()
+        /// Opens a folder, as a project of its own if it is outside git.
+        fn open(&self, folder: &Path) -> ProjectInfo {
+            match self.projects.open(folder, true).unwrap() {
+                Opened::Project { project } => project,
+                other => panic!("expected an open project, got {other:?}"),
+            }
         }
 
         /// Closes everything and starts again on the same data directory,
@@ -524,13 +446,48 @@ mod tests {
             env.projects.open_all().unwrap();
             env
         }
+
+        fn titles(&self, id: &str) -> Vec<String> {
+            self.projects
+                .service(id)
+                .unwrap()
+                .list_tasks(&Actor::User, &TaskFilter::default())
+                .unwrap()
+                .into_iter()
+                .map(|task| task.title)
+                .collect()
+        }
     }
 
-    fn project(opened: Opened) -> ProjectInfo {
-        match opened {
-            Opened::Project { project } => project,
-            other => panic!("expected an open project, got {other:?}"),
+    fn git(folder: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(folder)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// A repo `app` with one commit, in a new folder.
+    fn repo() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path().join("app");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        for (key, value) in [
+            ("user.name", "Sam"),
+            ("user.email", "sam@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&repo, &["config", key, value]);
         }
+        fs::write(repo.join("README.md"), "readme\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "Initial"]);
+        (dir, repo)
     }
 
     fn create(service: &Service, title: &str) -> TaskId {
@@ -547,25 +504,16 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_without_tandem_is_only_opened_when_asked_to_create_it() {
+    fn a_folder_outside_git_is_only_opened_when_allowed() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
+        let folder = TempDir::new().unwrap();
 
-        let opened = env.open(repo.path(), false);
-        let repo_path = repo.path().canonicalize().unwrap().display().to_string();
-        assert_eq!(
-            opened,
-            Opened::NoTaskFolder {
-                repo_path,
-                git_repo: false
-            }
-        );
-        assert!(!repo.path().join(TASK_DIR).exists());
+        let opened = env.projects.open(folder.path(), false).unwrap();
+        let repo_path = folder.path().canonicalize().unwrap().display().to_string();
+        assert_eq!(opened, Opened::OutsideGit { repo_path });
         assert!(env.projects.list().unwrap().is_empty());
 
-        let info = project(env.open(repo.path(), true));
-        assert!(repo.path().join(TASK_DIR).join("config.toml").is_file());
-        assert!(repo.path().join(TASK_DIR).join("README.md").is_file());
+        let info = env.open(folder.path());
         assert!(info.open);
         assert_eq!(info.error, None);
         assert!(info.last_opened_at.is_some());
@@ -575,53 +523,64 @@ mod tests {
         );
         assert_eq!(env.projects.list().unwrap(), std::slice::from_ref(&info));
         assert_eq!(env.endpoints.project_ids(), [info.id]);
+        // Nothing is written into the folder.
+        assert_eq!(fs::read_dir(folder.path()).unwrap().count(), 0);
     }
 
     #[test]
-    fn a_folder_without_tandem_says_whether_it_is_a_git_repo() {
+    fn every_worktree_of_a_repo_opens_the_same_project() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let status = Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(repo.path())
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let Opened::NoTaskFolder { git_repo, .. } = env.open(repo.path(), false) else {
-            panic!("expected no .tandem folder");
-        };
-        assert!(git_repo);
-    }
-
-    #[test]
-    fn a_newer_format_opens_read_only_and_says_to_update() {
-        let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let config = repo.path().join(TASK_DIR).join("config.toml");
-        fs::create_dir_all(config.parent().unwrap()).unwrap();
-        fs::write(&config, "format_version = 99\n").unwrap();
-
-        let info = project(env.open(repo.path(), false));
-        assert!(info.open);
-        let reason = info.read_only.unwrap();
-        assert!(reason.contains("format version 99"), "{reason}");
-        assert!(reason.contains("update Tandem"), "{reason}");
-        assert_eq!(
-            fs::read_to_string(&config).unwrap(),
-            "format_version = 99\n"
+        let (dir, repo) = repo();
+        let worktree = dir.path().join("app-feature");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap(),
+            ],
         );
+        let sub = repo.join("src");
+        fs::create_dir(&sub).unwrap();
+
+        // A repo opens without asking, from any folder in it.
+        let Opened::Project { project: main } = env.projects.open(&sub, false).unwrap() else {
+            panic!("a repo opens without asking");
+        };
+        assert_eq!(main.id, "app");
+        assert_eq!(main.name, "app");
+        let task = create(&env.projects.service(&main.id).unwrap(), "Shared");
+
+        let other = env.open(&worktree);
+        assert_eq!(other.id, main.id);
+        assert_eq!(other.mcp_url, main.mcp_url);
+        assert_eq!(
+            other.repo_path,
+            worktree.canonicalize().unwrap().display().to_string()
+        );
+        assert_eq!(env.projects.list().unwrap().len(), 1);
+        assert_eq!(env.endpoints.project_ids(), ["app"]);
+        assert_eq!(env.titles("app"), ["Shared"]);
+        let found = env
+            .projects
+            .service("app")
+            .unwrap()
+            .get_task(&Actor::User, task)
+            .unwrap();
+        assert_eq!(found.content.changelog[0].who, "Sam");
     }
 
     #[test]
     fn opening_a_missing_folder_fails() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let missing = repo.path().join("nope");
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope");
         let error = env.projects.open(&missing, true).unwrap_err();
         assert_eq!(error.code, "invalid_argument");
-        let file = repo.path().join("file");
+        let file = dir.path().join("file");
         fs::write(&file, "").unwrap();
         assert_eq!(
             env.projects.open(&file, true).unwrap_err().code,
@@ -638,10 +597,10 @@ mod tests {
             TempDir::new().unwrap(),
             TempDir::new().unwrap(),
         );
-        let a_id = project(env.open(a.path(), true)).id;
-        let gone_id = project(env.open(gone.path(), true)).id;
+        let a_id = env.open(a.path()).id;
+        let gone_id = env.open(gone.path()).id;
         thread::sleep(Duration::from_millis(5));
-        let b_id = project(env.open(b.path(), true)).id;
+        let b_id = env.open(b.path()).id;
         let ids: Vec<String> = env
             .projects
             .list()
@@ -652,10 +611,11 @@ mod tests {
         assert_eq!(ids, [b_id.clone(), gone_id.clone(), a_id.clone()]);
         // Opening a listed project again moves it to the top.
         thread::sleep(Duration::from_millis(5));
-        project(env.open(a.path(), false));
+        env.open(a.path());
         assert_eq!(env.projects.list().unwrap()[0].id, a_id);
 
-        fs::remove_dir_all(gone.path().join(TASK_DIR)).unwrap();
+        let gone_path = gone.path().to_owned();
+        drop(gone);
         let env = env.relaunch();
         let list = env.projects.list().unwrap();
         let by_id = |id: &str| list.iter().find(|p| p.id == id).unwrap().clone();
@@ -663,12 +623,9 @@ mod tests {
         let closed = by_id(&gone_id);
         assert!(!closed.open);
         assert_eq!(closed.mcp_url, None);
-        assert_eq!(
-            closed.error.as_deref(),
-            Some("the folder has no .tandem folder")
-        );
+        assert_eq!(closed.error.as_deref(), Some("the folder is missing"));
         // Launch doesn't bring the folder back.
-        assert!(!gone.path().join(TASK_DIR).exists());
+        assert!(!gone_path.exists());
         assert_eq!(
             env.projects.service(&gone_id).err().unwrap().code,
             "project_not_found"
@@ -679,10 +636,41 @@ mod tests {
     }
 
     #[test]
+    fn tasks_stay_in_the_database_across_launches() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
+        create(&env.projects.service(&id).unwrap(), "Kept");
+        let env = env.relaunch();
+        assert_eq!(env.titles(&id), ["Kept"]);
+    }
+
+    #[test]
+    fn a_first_open_imports_an_old_tandem_folder_once() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let dir = folder.path().join(TASK_DIR);
+        fs::create_dir(&dir).unwrap();
+        let task = |id: &str, title: &str| {
+            format!("---\nid: {id}\ntitle: {title}\nstatus: todo\ncreated: 2026-10-13\n---\n")
+        };
+        fs::write(dir.join("k3f9x2m.md"), task("k3f9x2m", "From the folder")).unwrap();
+
+        let id = env.open(folder.path()).id;
+        assert_eq!(env.titles(&id), ["From the folder"]);
+
+        // Files added later are not picked up: the database is the board.
+        fs::write(dir.join("p2xmq7d.md"), task("p2xmq7d", "Added later")).unwrap();
+        let env = env.relaunch();
+        env.open(folder.path());
+        assert_eq!(env.titles(&id), ["From the folder"]);
+    }
+
+    #[test]
     fn changes_are_forwarded_with_the_project_id() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let id = project(env.open(repo.path(), true)).id;
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
         let service = env.projects.service(&id).unwrap();
 
         let task = create(&service, "From the board");
@@ -690,26 +678,19 @@ mod tests {
         assert_eq!(project, id);
         assert!(changes.changed.contains(&task));
 
-        // An outside edit reaches the UI through the watcher.
-        fs::remove_file(service.task_dir().join(task.file_name())).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let (project, changes) = env
-                .events
-                .recv_timeout(deadline - std::time::Instant::now())
-                .expect("the watcher reports the deleted file");
-            if project == id && changes.removed.contains(&task) {
-                break;
-            }
-        }
+        service.delete_task(task).unwrap();
+        let (project, changes) = env.events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(project, id);
+        assert!(changes.removed.contains(&task));
     }
 
     #[test]
-    fn removing_a_project_closes_it_and_keeps_its_files() {
+    fn removing_a_project_deletes_its_database_and_leaves_the_folder() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let id = project(env.open(repo.path(), true)).id;
-        let task = create(&env.projects.service(&id).unwrap(), "Kept");
+        let folder = TempDir::new().unwrap();
+        fs::write(folder.path().join("notes.md"), "mine\n").unwrap();
+        let id = env.open(folder.path()).id;
+        create(&env.projects.service(&id).unwrap(), "Gone with it");
         let db = project_db_path(env.data.path(), &id);
         assert!(db.is_file());
 
@@ -722,14 +703,14 @@ mod tests {
             env.projects.service(&id).err().unwrap().code,
             "project_not_found"
         );
-        assert!(repo.path().join(TASK_DIR).join(task.file_name()).is_file());
+        assert!(folder.path().join("notes.md").is_file());
     }
 
     #[test]
     fn a_project_cannot_be_removed_while_an_agent_works_on_it() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let id = project(env.open(repo.path(), true)).id;
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
         let service = env.projects.service(&id).unwrap();
         let task = create(&service, "Busy");
         let agent = Actor::agent("claude-code-7f2a");
@@ -757,9 +738,9 @@ mod tests {
     #[test]
     fn a_project_that_is_not_open_can_be_removed() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let id = project(env.open(repo.path(), true)).id;
-        fs::remove_dir_all(repo.path().join(TASK_DIR)).unwrap();
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
+        drop(folder);
         let env = env.relaunch();
         assert!(!env.projects.list().unwrap()[0].open);
 
@@ -771,8 +752,8 @@ mod tests {
     #[test]
     fn changing_the_port_moves_every_mcp_url_and_is_saved() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let id = project(env.open(repo.path(), true)).id;
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
         let settings = env.projects.app_settings().unwrap();
         assert_eq!(settings.mcp_port, DEFAULT_ADDR.port());
         assert_eq!(settings.default_mcp_port, DEFAULT_ADDR.port());
@@ -825,100 +806,28 @@ mod tests {
     }
 
     #[test]
-    fn the_name_comes_from_config_toml_or_the_folder() {
+    fn the_name_starts_as_the_folder_name_and_can_be_changed() {
         let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let folder = folder_name(&repo.path().canonicalize().unwrap());
-        let config = repo.path().join(TASK_DIR).join("config.toml");
-        fs::create_dir(repo.path().join(TASK_DIR)).unwrap();
-        fs::write(&config, "format_version = 1\nname = \"From the team\"\n").unwrap();
+        let folder = TempDir::new().unwrap();
+        let folder_name = folder_name(&folder.path().canonicalize().unwrap());
 
-        let info = project(env.open(repo.path(), false));
-        assert_eq!(info.name, "From the team");
+        let info = env.open(folder.path());
+        assert_eq!(info.name, folder_name);
         let id = info.id;
 
         let info = env.projects.set_name(&id, " Renamed ").unwrap();
         assert_eq!(info.name, "Renamed");
         assert_eq!(env.projects.list().unwrap()[0].name, "Renamed");
-        assert_eq!(
-            fs::read_to_string(&config).unwrap(),
-            "format_version = 1\nname = \"Renamed\"\n"
-        );
         // The id stays, so agent configs keep working.
         assert_eq!(info.id, id);
 
-        assert_eq!(env.projects.set_name(&id, "").unwrap().name, folder);
-        assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
+        assert_eq!(
+            env.projects.set_name(&id, "a\nb").unwrap_err().code,
+            "invalid_argument"
+        );
+        assert_eq!(env.projects.set_name(&id, "").unwrap().name, folder_name);
         assert_eq!(
             env.projects.set_name("missing", "x").unwrap_err().code,
-            "project_not_found"
-        );
-    }
-
-    #[test]
-    fn an_outside_edit_to_the_name_reaches_the_list() {
-        let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let id = project(env.open(repo.path(), true)).id;
-        // Let the watcher start.
-        thread::sleep(Duration::from_millis(300));
-
-        let config = repo.path().join(TASK_DIR).join("config.toml");
-        fs::write(&config, "format_version = 1\nname = \"Pulled\"\n").unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let (project, changes) = env
-                .events
-                .recv_timeout(deadline - std::time::Instant::now())
-                .expect("the watcher reports the config change");
-            if project == id && changes.config {
-                break;
-            }
-        }
-        // Updated before the event is passed on.
-        assert_eq!(env.projects.list().unwrap()[0].name, "Pulled");
-    }
-
-    #[test]
-    fn a_read_only_project_cannot_be_renamed() {
-        let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let config = repo.path().join(TASK_DIR).join("config.toml");
-        fs::create_dir(repo.path().join(TASK_DIR)).unwrap();
-        fs::write(&config, "format_version = 99\n").unwrap();
-        let id = project(env.open(repo.path(), false)).id;
-        assert_eq!(
-            env.projects.set_name(&id, "Tandem").unwrap_err().code,
-            "read_only"
-        );
-        assert_eq!(
-            fs::read_to_string(&config).unwrap(),
-            "format_version = 99\n"
-        );
-    }
-
-    #[test]
-    fn reset_local_state_keeps_the_tasks_and_drops_leases() {
-        let env = Env::new(TempDir::new().unwrap());
-        let repo = TempDir::new().unwrap();
-        let id = project(env.open(repo.path(), true)).id;
-        let service = env.projects.service(&id).unwrap();
-        let task = create(&service, "Kept");
-        service
-            .start_task(&Actor::agent("claude-code-7f2a"), task)
-            .unwrap();
-        // A live lease blocks Remove, but not Reset.
-        assert_eq!(env.projects.remove(&id).unwrap_err().code, "agents_working");
-
-        env.projects.reset(&id).unwrap();
-        let tasks = service
-            .list_tasks(&Actor::User, &Default::default())
-            .unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].lease, None);
-        assert!(env.projects.remove(&id).unwrap());
-        assert_eq!(
-            env.projects.reset(&id).unwrap_err().code,
             "project_not_found"
         );
     }

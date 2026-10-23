@@ -1,63 +1,63 @@
-//! Every change to a task, following the transitions table in "State
-//! model": each writes exactly the file and SQLite changes listed there.
+//! Every change to a task. Each transition sets the status and adds its
+//! event in one transaction: `created`, `approved`, `started`, `finished`,
+//! `reviewed`, `reopened`, `released`, plus `edited` and `milestone`.
 
 use std::collections::BTreeSet;
 
 use rusqlite::params;
+use serde_json::json;
 
+use super::rows::{self, TaskRow};
 use super::{
-    Actor, Call, Finish, LogKind, NewTask, Service, ServiceError, TaskEdit, Written, read_file,
-    written,
+    Actor, BLOCKED, Call, Finish, NOTE, NewTask, REOPENED, Saved, Service, ServiceError, TaskEdit,
+    UNBLOCKED,
 };
-use crate::git;
-use crate::index::{graph_in, timestamp_text};
-use crate::store::{
-    ACCEPTANCE_CRITERIA, ChangelogEntry, Criterion, DESCRIPTION, EntryHeading, RELEVANT_FILES,
-    Status, TASK_DIR, Task, TaskId, create_task, unused_id,
-};
+use crate::model::{Criterion, Priority, Status, TaskId};
 
 impl Service {
-    /// New task: a new file, in `backlog` when an agent creates it and in
-    /// `todo` when you do, with a `created` changelog entry. Refuses a
-    /// parent or dependency that is missing or would close a loop.
-    pub fn create_task(&self, actor: &Actor, new: NewTask) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    /// New task: in `backlog` when an agent creates it and in `todo` when
+    /// you do, with a `created` event. Refuses a parent or dependency that
+    /// is missing or would close a loop.
+    pub fn create_task(&self, actor: &Actor, new: NewTask) -> Result<Saved, ServiceError> {
         let title = one_line("title", &new.title)?.to_owned();
         let labels = labels(new.labels)?;
         let criteria = checklist(&new.acceptance_criteria, &[])?;
         let depends_on = dedup(new.depends_on);
+        let status = match actor {
+            Actor::User => Status::Todo,
+            Actor::Agent(_) => Status::Backlog,
+        };
         self.call(actor, |call| {
-            // A full stat scan first, so the graph check sees every file.
-            call.scan_all()?;
-            let id = unused_id(call.dir)?;
-            graph_in(call.tx)?.check_change(id, new.parent, &depends_on)?;
-            let mut task = Task {
-                id,
-                title,
-                status: match actor {
-                    Actor::User => Status::Todo,
-                    Actor::Agent(_) => Status::Backlog,
-                },
-                priority: new.priority,
-                parent: new.parent,
-                labels,
-                depends_on,
-                created: call.today,
-                reviewed_at: None,
-                body: String::new(),
-            };
-            set_section(&mut task, DESCRIPTION, &new.description)?;
-            set_section(&mut task, ACCEPTANCE_CRITERIA, &criteria)?;
-            append(&mut task, call, "created", "")?;
-            create_task(call.dir, &task)?;
-            call.scan_task(id)?;
-            Ok(written(&task))
+            let id = unused_id(call)?;
+            rows::graph(call.tx)?.check_change(id, new.parent, &depends_on)?;
+            let seq: i64 = call.tx.query_row(
+                "INSERT INTO tasks (id, title, status, priority, created_by, created_at,
+                                    updated_at, description)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7) RETURNING seq",
+                params![
+                    id,
+                    title,
+                    status,
+                    new.priority.unwrap_or(Priority::Medium),
+                    call.actor_id,
+                    call.now_ms(),
+                    new.description.trim()
+                ],
+                |row| row.get(0),
+            )?;
+            rows::set_parent(call.tx, seq, new.parent)?;
+            rows::set_labels(call.tx, seq, &labels)?;
+            rows::set_depends_on(call.tx, seq, &depends_on)?;
+            rows::set_criteria(call.tx, seq, &criteria)?;
+            call.event(seq, id, "created", "", None)?;
+            Ok(Saved { id, status })
         })
     }
 
-    /// Edits the spec: title, sections, priority, parent, labels and
-    /// dependencies. Never changes the review, and adds no changelog entry
-    /// unless an agent's edit sends the task back to backlog.
+    /// Edits the spec: title, description, criteria, relevant files,
+    /// priority, parent, labels and dependencies. Never changes the review,
+    /// and adds no event unless an agent's edit sends the task back to
+    /// backlog.
     ///
     /// You may edit any task. Agents are limited, so that nothing they
     /// change gets worked on before you approve it:
@@ -65,72 +65,78 @@ impl Service {
     /// - In backlog, agents may edit anything.
     /// - After approval, `relevant_files`, `labels` and `priority` stay open.
     ///   Any other change to a todo task sends it back to backlog, with an
-    ///   `edited` changelog entry, until you approve it again. On a task in
-    ///   progress, only the lease holder may edit, and other changes are
-    ///   refused.
+    ///   `edited` event, until you approve it again. On a task in progress,
+    ///   only the lease holder may edit, and other changes are refused.
     /// - Finished and done tasks are closed to agents.
     pub fn update_task(
         &self,
         actor: &Actor,
         id: TaskId,
         edit: TaskEdit,
-    ) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    ) -> Result<Saved, ServiceError> {
         self.call(actor, |call| {
-            call.scan_all()?;
-            let original = read_file(call.dir, id)?;
+            let task = rows::task_row(call.tx, id)?;
             let is_agent = matches!(actor, Actor::Agent(_));
             if is_agent {
-                check_agent_access(call, &original)?;
+                check_agent_access(call, &task)?;
             }
+            let (description, files) = rows::details(call.tx, task.seq)?;
+            let criteria = rows::criteria(call.tx, task.seq)?;
 
             // What the task is and when it can start.
-            let mut task = original.clone();
-            if let Some(title) = &edit.title {
-                task.title = one_line("title", title)?.to_owned();
-            }
-            if let Some(description) = &edit.description {
-                set_section(&mut task, DESCRIPTION, description)?;
-            }
-            if let Some(criteria) = &edit.acceptance_criteria {
-                let criteria = checklist(criteria, &task.criteria())?;
-                set_section(&mut task, ACCEPTANCE_CRITERIA, &criteria)?;
-            }
-            let graph = graph_in(call.tx)?;
-            if let Some(parent) = edit.parent {
+            let title = match &edit.title {
+                Some(title) => one_line("title", title)?.to_owned(),
+                None => task.title.clone(),
+            };
+            let new_description = match &edit.description {
+                Some(text) => text.trim().to_owned(),
+                None => description.clone(),
+            };
+            let new_criteria = match &edit.acceptance_criteria {
+                Some(items) => checklist(items, &criteria)?,
+                None => criteria.iter().map(|c| (c.text.clone(), c.met)).collect(),
+            };
+            let parent = edit.parent.unwrap_or(task.parent);
+            let depends_on = match edit.depends_on.clone() {
+                Some(ids) => dedup(ids),
+                None => task.depends_on.clone(),
+            };
+            let graph = rows::graph(call.tx)?;
+            if edit.parent.is_some() {
                 graph.check_change(id, parent, &[])?;
-                task.parent = parent;
             }
-            if let Some(depends_on) = edit.depends_on.clone() {
-                let depends_on = dedup(depends_on);
+            if edit.depends_on.is_some() {
                 graph.check_change(id, None, &depends_on)?;
-                task.depends_on = depends_on;
             }
-            let spec_changed = task != original;
+            let mut sorted_deps = depends_on.clone();
+            sorted_deps.sort_unstable();
+            let old_criteria: Vec<(String, bool)> =
+                criteria.iter().map(|c| (c.text.clone(), c.met)).collect();
+            let spec_changed = title != task.title
+                || new_description != description
+                || new_criteria != old_criteria
+                || parent != task.parent
+                || sorted_deps != task.depends_on;
 
             // Details that change neither.
-            if let Some(files) = &edit.relevant_files {
-                set_section(&mut task, RELEVANT_FILES, &list(files)?)?;
-            }
-            if let Some(priority) = edit.priority {
-                task.priority = Some(priority);
-            }
-            if let Some(labels_) = edit.labels.clone() {
-                task.labels = labels(labels_)?;
-            }
+            let new_files = match &edit.relevant_files {
+                Some(items) => one_lines("relevant file", items)?,
+                None => files.clone(),
+            };
+            let priority = edit.priority.unwrap_or(task.priority);
+            let new_labels = match edit.labels.clone() {
+                Some(items) => labels(items)?,
+                None => task.labels.clone(),
+            };
+            let details_changed = new_files != files
+                || priority != task.priority
+                || !same_labels(&new_labels, &task.labels);
 
+            let mut status = task.status;
             if is_agent && spec_changed {
-                match original.status {
+                match task.status {
                     Status::Backlog => {}
-                    Status::Todo => {
-                        set_status(&mut task, Status::Backlog);
-                        append(
-                            &mut task,
-                            call,
-                            "edited",
-                            "Changed after approval; back in backlog until approved again.",
-                        )?;
-                    }
+                    Status::Todo => status = Status::Backlog,
                     status => {
                         return Err(ServiceError::InvalidTransition {
                             task: id,
@@ -140,45 +146,80 @@ impl Service {
                     }
                 }
             }
-            if task == original {
-                return Ok(written(&task));
+            if !spec_changed && !details_changed {
+                return Ok(Saved { id, status });
             }
-            call.write(&task)
+
+            call.tx.execute(
+                "UPDATE tasks SET title = ?2, status = ?3, priority = ?4, description = ?5,
+                                  relevant_files = ?6
+                 WHERE seq = ?1",
+                params![
+                    task.seq,
+                    title,
+                    status,
+                    priority,
+                    new_description,
+                    serde_json::to_string(&new_files).expect("strings serialize")
+                ],
+            )?;
+            if parent != task.parent {
+                rows::set_parent(call.tx, task.seq, parent)?;
+            }
+            if sorted_deps != task.depends_on {
+                rows::set_depends_on(call.tx, task.seq, &depends_on)?;
+            }
+            if new_criteria != old_criteria {
+                rows::set_criteria(call.tx, task.seq, &new_criteria)?;
+            }
+            if !same_labels(&new_labels, &task.labels) {
+                rows::set_labels(call.tx, task.seq, &new_labels)?;
+            }
+            if status != task.status {
+                call.event(
+                    task.seq,
+                    id,
+                    "edited",
+                    "Changed after approval; back in backlog until approved again.",
+                    None,
+                )?;
+            }
+            call.changed(task.seq, id)?;
+            Ok(Saved { id, status })
         })
     }
 
-    /// Backlog → Todo, by you only: `status: todo`, changelog `approved`.
-    pub fn approve(&self, id: TaskId) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    /// Backlog → Todo, by you only, with an `approved` event.
+    pub fn approve(&self, id: TaskId) -> Result<Saved, ServiceError> {
         self.call(&Actor::User, |call| {
-            let mut task = call.read(id)?;
+            let task = rows::task_row(call.tx, id)?;
             expect_status(&task, Status::Backlog, "approve")?;
-            set_status(&mut task, Status::Todo);
-            append(&mut task, call, "approved", "")?;
-            call.write(&task)
+            set_status(call, &task, Status::Todo)?;
+            call.event(task.seq, id, "approved", "", None)?;
+            Ok(saved(&task, Status::Todo))
         })
     }
 
-    /// Todo → In progress: `status: in_progress`, changelog `started`, and a
-    /// lease when an agent starts it. Runs as one `BEGIN IMMEDIATE`
-    /// transaction, so of many agents starting the same task, exactly one
-    /// wins.
+    /// Todo → In progress, with a `started` event, and a lease when an agent
+    /// starts it. Runs in one `BEGIN IMMEDIATE` transaction, so of many
+    /// agents starting the same task, exactly one wins.
     ///
     /// An agent may also start a task that is already in progress if no live
-    /// lease is held on it: a stale lease is taken over, which the changelog
+    /// lease is held on it: a stale lease is taken over, which the event
     /// notes. Without any lease, an agent may pick up a task you reopened,
-    /// or resume one it started itself before the database was rebuilt; a
-    /// task you started from the board stays yours. Calling it again while
-    /// holding the lease only extends it.
-    pub fn start_task(&self, actor: &Actor, id: TaskId) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    /// or resume one it started itself; a task you started from the board
+    /// stays yours. Calling it again while holding the lease only extends
+    /// it.
+    pub fn start_task(&self, actor: &Actor, id: TaskId) -> Result<Saved, ServiceError> {
         self.call(actor, |call| {
-            let mut task = call.read(id)?;
+            let task = rows::task_row(call.tx, id)?;
             let mut summary = String::new();
             match (actor, task.status) {
                 (_, Status::Todo) => {}
-                (Actor::Agent(agent), Status::InProgress) => match call.lease(id)? {
-                    Some(lease) if lease.agent_id == agent.id => return Ok(written(&task)),
+                (Actor::Agent(agent), Status::InProgress) => match call.lease(task.seq)? {
+                    Some(lease) if lease.agent_id == agent.id => {
+                        return Ok(saved(&task, task.status));
+                    }
                     Some(lease) if lease.live => {
                         return Err(ServiceError::ClaimedByOther {
                             task: id,
@@ -200,32 +241,24 @@ impl Service {
                     });
                 }
             }
-            let pending: Vec<TaskId> = task
-                .depends_on
-                .iter()
-                .copied()
-                .filter(|&dep| !read_file(call.dir, dep).is_ok_and(|d| d.status == Status::Done))
-                .collect();
+            let pending: Vec<TaskId> = call
+                .tx
+                .prepare_cached(
+                    "SELECT t.id FROM task_deps d JOIN tasks t ON t.seq = d.depends_on
+                     WHERE d.task = ?1 AND t.status != 'done' ORDER BY t.id",
+                )?
+                .query_map([task.seq], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
             if !pending.is_empty() {
                 return Err(ServiceError::DepsNotDone { task: id, pending });
             }
 
-            set_status(&mut task, Status::InProgress);
-            append(&mut task, call, "started", &summary)?;
-            let out = call.write(&task)?;
-            if let Actor::Agent(agent) = actor {
-                call.tx.execute(
-                    "INSERT OR REPLACE INTO leases (task_id, agent_id, claimed_at, expires_at)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![
-                        id,
-                        agent.id,
-                        timestamp_text(call.now),
-                        timestamp_text(call.now + call.config.lease_duration)
-                    ],
-                )?;
+            set_status(call, &task, Status::InProgress)?;
+            call.event(task.seq, id, "started", &summary, None)?;
+            if let Actor::Agent(_) = actor {
+                call.claim(task.seq)?;
             }
-            Ok(out)
+            Ok(saved(&task, Status::InProgress))
         })
     }
 
@@ -238,9 +271,9 @@ impl Service {
     ) -> Result<(), ServiceError> {
         let message = non_empty("message", message)?;
         self.call(actor, |call| {
-            call.check_exists(id)?;
-            call.check_holder(id)?;
-            call.log(id, LogKind::Note, message)
+            let task = rows::task_row(call.tx, id)?;
+            call.check_holder(&task)?;
+            call.event(task.seq, id, NOTE, message, None)
         })
     }
 
@@ -249,69 +282,66 @@ impl Service {
     pub fn set_blocked(&self, actor: &Actor, id: TaskId, reason: &str) -> Result<(), ServiceError> {
         let reason = reason.trim();
         self.call(actor, |call| {
-            call.check_exists(id)?;
-            call.check_holder(id)?;
+            let task = rows::task_row(call.tx, id)?;
+            call.check_holder(&task)?;
             let (blocked, kind) = match reason {
-                "" => (None, LogKind::Unblocked),
-                reason => (Some(reason), LogKind::Blocked),
+                "" => (None, UNBLOCKED),
+                reason => (Some(reason), BLOCKED),
             };
             call.tx.execute(
-                "INSERT INTO task_flags (task_id, blocked_reason) VALUES (?1, ?2)
-                 ON CONFLICT (task_id) DO UPDATE SET blocked_reason = excluded.blocked_reason",
-                params![id, blocked],
+                "UPDATE tasks SET blocked_reason = ?2 WHERE seq = ?1",
+                params![task.seq, blocked],
             )?;
-            call.log(id, kind, reason)
+            call.event(task.seq, id, kind, reason, None)
         })
     }
 
-    /// A milestone entry in the changelog of a task in progress, before an
-    /// intermediate commit. Only the lease holder, or you.
+    /// A milestone event for a task in progress, before an intermediate
+    /// commit. Only the lease holder, or you.
     pub fn add_changelog_entry(
         &self,
         actor: &Actor,
         id: TaskId,
         summary: &str,
         files: Vec<String>,
-    ) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    ) -> Result<Saved, ServiceError> {
         let summary = non_empty("summary", summary)?;
+        let files = one_lines("file", &files)?;
         self.call(actor, |call| {
-            let mut task = call.read(id)?;
+            let task = rows::task_row(call.tx, id)?;
             expect_status(&task, Status::InProgress, "add a changelog entry to")?;
-            call.check_holder(id)?;
-            append_entry(
-                &mut task,
-                ChangelogEntry {
-                    files,
-                    ..entry(call, "milestone", summary)
-                },
-            )?;
-            call.write(&task)
+            call.check_holder(&task)?;
+            let data = (!files.is_empty()).then(|| json!({ "files": files }));
+            call.event(task.seq, id, "milestone", summary, data.as_ref())?;
+            Ok(saved(&task, task.status))
         })
     }
 
     /// In progress → Review: ticks the `met` criteria, sets `finished`,
-    /// adds a `finished` changelog entry with the summary, and releases the
-    /// lease. Every criterion still unticked must be in `unmet` with a
-    /// reason, or the call fails with `criteria_unmet`. Only the lease
-    /// holder, or you.
+    /// adds a `finished` event with the summary, and releases the lease.
+    /// Every criterion still unticked must be in `unmet` with a reason, or
+    /// the call fails with `criteria_unmet`. Only the lease holder, or you.
     pub fn finish_task(
         &self,
         actor: &Actor,
         id: TaskId,
         finish: Finish,
-    ) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    ) -> Result<Saved, ServiceError> {
         let summary = non_empty("summary", &finish.summary)?;
+        let files = one_lines("file", &finish.files_changed)?;
+        let follow_ups = match &finish.follow_ups {
+            Some(text) => Some(one_line("follow_ups", text)?.to_owned()),
+            None => None,
+        };
         self.call(actor, |call| {
-            let mut task = call.read(id)?;
+            let task = rows::task_row(call.tx, id)?;
             expect_status(&task, Status::InProgress, "finish")?;
-            call.check_holder(id)?;
+            call.check_holder(&task)?;
 
             let met: BTreeSet<u32> = finish.met.iter().copied().collect();
             let mut unmet = BTreeSet::new();
             for item in &finish.unmet {
-                non_empty("unmet reason", &item.reason)?;
+                one_line("unmet reason", &item.reason)?;
                 if met.contains(&item.criterion) || !unmet.insert(item.criterion) {
                     return Err(invalid(format!(
                         "criterion {} is listed more than once in met and unmet",
@@ -319,7 +349,7 @@ impl Service {
                     )));
                 }
             }
-            let criteria = task.criteria();
+            let criteria = rows::criteria(call.tx, task.seq)?;
             for &number in met.iter().chain(&unmet) {
                 let Some(criterion) = criteria.iter().find(|c| c.number == number) else {
                     return Err(invalid(format!("criterion {number} does not exist")));
@@ -340,146 +370,115 @@ impl Service {
                 });
             }
 
-            let met: Vec<u32> = met.into_iter().collect();
-            task.tick_criteria(&met)
-                .map_err(|e| invalid(e.to_string()))?;
-            set_status(&mut task, Status::Finished);
+            for &number in &met {
+                call.tx
+                    .prepare_cached(
+                        "UPDATE criteria SET met = 1 WHERE task = ?1 AND position = ?2",
+                    )?
+                    .execute(params![task.seq, number])?;
+            }
+            set_status(call, &task, Status::Finished)?;
             let mut unmet = finish.unmet.clone();
             unmet.sort_by_key(|u| u.criterion);
-            append_entry(
-                &mut task,
-                ChangelogEntry {
-                    files: finish.files_changed.clone(),
-                    follow_ups: finish.follow_ups.clone(),
-                    unmet,
-                    ..entry(call, "finished", summary)
-                },
-            )?;
-            let out = call.write(&task)?;
-            call.tx
-                .execute("DELETE FROM leases WHERE task_id = ?1", [id])?;
-            Ok(out)
+            let data = json!({
+                "files": files,
+                "follow_ups": follow_ups,
+                "unmet": unmet
+                    .iter()
+                    .map(|u| json!({ "criterion": u.criterion, "reason": u.reason.trim() }))
+                    .collect::<Vec<_>>(),
+            });
+            call.event(task.seq, id, "finished", summary, Some(&data))?;
+            call.release(task.seq)?;
+            Ok(saved(&task, Status::Finished))
         })
     }
 
-    /// Review → Done, by you only: `status: done`, `reviewed_at: <today>`.
-    pub fn mark_reviewed(&self, id: TaskId) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    /// Review → Done, by you only: sets `done` and `reviewed_at`, with a
+    /// `reviewed` event.
+    pub fn mark_reviewed(&self, id: TaskId) -> Result<Saved, ServiceError> {
         self.call(&Actor::User, |call| {
-            let mut task = call.read(id)?;
+            let task = rows::task_row(call.tx, id)?;
             expect_status(&task, Status::Finished, "mark reviewed")?;
-            set_status(&mut task, Status::Done);
-            task.reviewed_at = Some(call.today);
-            call.write(&task)
+            set_status(call, &task, Status::Done)?;
+            call.event(task.seq, id, "reviewed", "", None)?;
+            Ok(saved(&task, Status::Done))
         })
     }
 
-    /// Review → In progress, by you only: `status: in_progress`, changelog
-    /// `reopened` with your feedback, which is also stored for the next
-    /// agent and added to the working log.
-    pub fn reopen(&self, id: TaskId, feedback: &str) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    /// Review → In progress, by you only, with a `reopened` event carrying
+    /// your feedback, which the next agent sees.
+    pub fn reopen(&self, id: TaskId, feedback: &str) -> Result<Saved, ServiceError> {
         let feedback = non_empty("feedback", feedback)?;
         self.call(&Actor::User, |call| {
-            let mut task = call.read(id)?;
+            let task = rows::task_row(call.tx, id)?;
             expect_status(&task, Status::Finished, "reopen")?;
-            set_status(&mut task, Status::InProgress);
-            append(&mut task, call, "reopened", feedback)?;
-            let out = call.write(&task)?;
-            call.tx.execute(
-                "INSERT INTO task_flags (task_id, review_feedback) VALUES (?1, ?2)
-                 ON CONFLICT (task_id) DO UPDATE SET review_feedback = excluded.review_feedback",
-                params![id, feedback],
-            )?;
-            call.log(id, LogKind::Feedback, feedback)?;
-            Ok(out)
+            set_status(call, &task, Status::InProgress)?;
+            call.event(task.seq, id, REOPENED, feedback, None)?;
+            Ok(saved(&task, Status::InProgress))
         })
     }
 
-    /// Commit review, by you only, for a task in `done`: commits its file
-    /// and nothing else, with the message `Review <id>: <title>` and a
-    /// `Task: <id>` trailer. Anything else you have staged stays staged.
-    /// Returns the new commit's hash.
-    pub fn commit_review(&self, id: TaskId) -> Result<String, ServiceError> {
-        self.check_writable()?;
-        // Under the project lock, so no write lands mid-commit.
-        self.call(&Actor::User, |call| {
-            let task = call.read(id)?;
-            expect_status(&task, Status::Done, "commit the review of")?;
-            let title = task.title.split_whitespace().collect::<Vec<_>>().join(" ");
-            let message = format!("Review {id}: {title}\n\nTask: {id}");
-            Ok(git::commit_file(
-                self.repo(),
-                &written(&task).path,
-                &message,
-            )?)
-        })
-    }
-
-    /// Whether the task's file has changes git hasn't committed: edited,
-    /// staged or not yet tracked. The board offers Commit review while it
-    /// does.
-    pub fn has_uncommitted_changes(&self, id: TaskId) -> Result<bool, ServiceError> {
-        let path = format!("{TASK_DIR}/{}", id.file_name());
-        Ok(git::has_changes(self.repo(), &path)?)
-    }
-
-    /// In progress → Todo: `status: todo`, changelog `released` with the
-    /// note, and the lease removed. Only the lease holder, or you.
+    /// In progress → Todo, with a `released` event carrying the note, and
+    /// the lease removed. Only the lease holder, or you.
     pub fn release_task(
         &self,
         actor: &Actor,
         id: TaskId,
         note: &str,
-    ) -> Result<Written, ServiceError> {
-        self.check_writable()?;
+    ) -> Result<Saved, ServiceError> {
         self.call(actor, |call| {
-            let mut task = call.read(id)?;
+            let task = rows::task_row(call.tx, id)?;
             expect_status(&task, Status::InProgress, "release")?;
-            call.check_holder(id)?;
-            set_status(&mut task, Status::Todo);
-            append(&mut task, call, "released", note.trim())?;
-            let out = call.write(&task)?;
-            call.tx
-                .execute("DELETE FROM leases WHERE task_id = ?1", [id])?;
-            Ok(out)
+            call.check_holder(&task)?;
+            set_status(call, &task, Status::Todo)?;
+            call.event(task.seq, id, "released", note.trim(), None)?;
+            call.release(task.seq)?;
+            Ok(saved(&task, Status::Todo))
         })
+    }
+}
+
+/// A random id no task has, deleted ones included.
+fn unused_id(call: &Call<'_>) -> Result<TaskId, ServiceError> {
+    loop {
+        let id = TaskId::generate();
+        let taken = call
+            .tx
+            .prepare_cached("SELECT 1 FROM tasks WHERE id = ?1")?
+            .exists([id])?;
+        if !taken {
+            return Ok(id);
+        }
     }
 }
 
 /// Whether an agent may start an in-progress task that has no lease: only
 /// if you reopened it last, or the agent itself started it last.
-fn check_unleased_start(call: &Call<'_>, task: &Task, agent: &str) -> Result<(), ServiceError> {
-    match last_hand_over(task) {
-        Some(entry) if entry.event == "reopened" => Ok(()),
-        Some(entry) if entry.event == "started" && entry.who == agent => Ok(()),
-        entry => Err(ServiceError::ClaimedByOther {
+fn check_unleased_start(call: &Call<'_>, task: &TaskRow, agent: &str) -> Result<(), ServiceError> {
+    match rows::last_hand_over(call.tx, task.seq)? {
+        Some((kind, _, _)) if kind == REOPENED => Ok(()),
+        Some((kind, actor_kind, name))
+            if kind == "started" && actor_kind == "agent" && name == agent =>
+        {
+            Ok(())
+        }
+        last => Err(ServiceError::ClaimedByOther {
             task: task.id,
-            holder: entry
-                .filter(|entry| entry.event == "started")
-                .map_or(call.config.user_name.clone(), |entry| entry.who),
+            holder: last
+                .filter(|(kind, _, _)| kind == "started")
+                .map_or(call.config.user_name.clone(), |(_, _, name)| name),
             expires_at: None,
         }),
     }
 }
 
-/// The latest changelog entry that hands the task over: `started`,
-/// `finished`, `released` or `reopened`. Milestones and edits don't.
-pub(super) fn last_hand_over(task: &Task) -> Option<EntryHeading> {
-    task.changelog().into_iter().rev().find(|entry| {
-        matches!(
-            entry.event.as_str(),
-            "started" | "finished" | "released" | "reopened"
-        )
-    })
-}
-
 /// Which tasks an agent may edit at all: not finished or done ones, and in
 /// progress only with the lease.
-fn check_agent_access(call: &Call<'_>, task: &Task) -> Result<(), ServiceError> {
+fn check_agent_access(call: &Call<'_>, task: &TaskRow) -> Result<(), ServiceError> {
     match task.status {
         Status::Backlog | Status::Todo => Ok(()),
-        Status::InProgress => call.check_holder(task.id),
+        Status::InProgress => call.check_holder(task),
         status @ (Status::Finished | Status::Done) => Err(ServiceError::InvalidTransition {
             task: task.id,
             action: "update",
@@ -488,18 +487,11 @@ fn check_agent_access(call: &Call<'_>, task: &Task) -> Result<(), ServiceError> 
     }
 }
 
-impl Call<'_> {
-    /// Checks that the task has a file, valid or not.
-    fn check_exists(&self, id: TaskId) -> Result<(), ServiceError> {
-        self.scan_task(id)?;
-        match crate::index::task_in(self.tx, id)? {
-            Some(_) => Ok(()),
-            None => Err(ServiceError::NotFound(id)),
-        }
-    }
-}
-
-fn expect_status(task: &Task, expected: Status, action: &'static str) -> Result<(), ServiceError> {
+fn expect_status(
+    task: &TaskRow,
+    expected: Status,
+    action: &'static str,
+) -> Result<(), ServiceError> {
     if task.status == expected {
         Ok(())
     } else {
@@ -511,50 +503,31 @@ fn expect_status(task: &Task, expected: Status, action: &'static str) -> Result<
     }
 }
 
-/// Changes the status. Any move out of `done` removes `reviewed_at`.
-fn set_status(task: &mut Task, status: Status) {
-    if task.status == Status::Done && status != Status::Done {
-        task.reviewed_at = None;
+/// Changes the status. Moving into `done` sets `reviewed_at`; any move out
+/// of it clears it.
+fn set_status(call: &Call<'_>, task: &TaskRow, status: Status) -> Result<(), ServiceError> {
+    let reviewed_at = match status {
+        Status::Done => Some(call.now_ms()),
+        _ => None,
+    };
+    call.tx
+        .prepare_cached("UPDATE tasks SET status = ?2, reviewed_at = ?3 WHERE seq = ?1")?
+        .execute(params![task.seq, status, reviewed_at])?;
+    Ok(())
+}
+
+fn saved(task: &TaskRow, status: Status) -> Saved {
+    Saved {
+        id: task.id,
+        status,
     }
-    task.status = status;
-}
-
-fn entry(call: &Call<'_>, event: &str, summary: &str) -> ChangelogEntry {
-    ChangelogEntry {
-        date: call.today,
-        who: call.who().to_owned(),
-        event: event.to_owned(),
-        summary: summary.to_owned(),
-        files: Vec::new(),
-        follow_ups: None,
-        unmet: Vec::new(),
-    }
-}
-
-fn append(
-    task: &mut Task,
-    call: &Call<'_>,
-    event: &str,
-    summary: &str,
-) -> Result<(), ServiceError> {
-    append_entry(task, entry(call, event, summary))
-}
-
-fn append_entry(task: &mut Task, entry: ChangelogEntry) -> Result<(), ServiceError> {
-    task.append_changelog(&entry)
-        .map_err(|e| invalid(e.to_string()))
-}
-
-fn set_section(task: &mut Task, name: &str, content: &str) -> Result<(), ServiceError> {
-    task.set_section(name, content)
-        .map_err(|e| invalid(format!("{name}: {e}")))
 }
 
 fn invalid(message: String) -> ServiceError {
     ServiceError::InvalidArgument(message)
 }
 
-fn non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str, ServiceError> {
+pub(super) fn non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str, ServiceError> {
     match value.trim() {
         "" => Err(invalid(format!("`{field}` must not be empty"))),
         value => Ok(value),
@@ -569,22 +542,39 @@ fn one_line<'a>(field: &str, value: &'a str) -> Result<&'a str, ServiceError> {
     Ok(value)
 }
 
-/// Labels: single lines, without duplicates.
+fn one_lines(field: &str, items: &[String]) -> Result<Vec<String>, ServiceError> {
+    items
+        .iter()
+        .map(|item| one_line(field, item).map(str::to_owned))
+        .collect()
+}
+
+/// Labels: single lines, without duplicates, ignoring case.
 fn labels(labels: Vec<String>) -> Result<Vec<String>, ServiceError> {
     let mut out: Vec<String> = Vec::with_capacity(labels.len());
     for label in &labels {
         let label = one_line("label", label)?;
-        if !out.iter().any(|l| l == label) {
+        if !out.iter().any(|l| l.eq_ignore_ascii_case(label)) {
             out.push(label.to_owned());
         }
     }
     Ok(out)
 }
 
-/// Acceptance criteria as checkboxes. An item with the same text as a
+/// Whether two label lists hold the same labels, in any order and case.
+fn same_labels(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|x| b.iter().any(|y| x.eq_ignore_ascii_case(y)))
+}
+
+/// Acceptance criteria with their ticks. An item with the same text as a
 /// ticked criterion in `existing` stays ticked, each one matched at most
 /// once; new or reworded items start unticked.
-fn checklist(items: &[String], existing: &[Criterion]) -> Result<String, ServiceError> {
+fn checklist(
+    items: &[String],
+    existing: &[Criterion],
+) -> Result<Vec<(String, bool)>, ServiceError> {
     let mut ticked: Vec<&str> = existing
         .iter()
         .filter(|c| c.met)
@@ -597,20 +587,12 @@ fn checklist(items: &[String], existing: &[Criterion]) -> Result<String, Service
             let met = match ticked.iter().position(|&t| t == text) {
                 Some(i) => {
                     ticked.swap_remove(i);
-                    'x'
+                    true
                 }
-                None => ' ',
+                None => false,
             };
-            Ok(format!("- [{met}] {text}\n"))
+            Ok((text.to_owned(), met))
         })
-        .collect()
-}
-
-/// Relevant files as a bulleted list.
-fn list(items: &[String]) -> Result<String, ServiceError> {
-    items
-        .iter()
-        .map(|item| Ok(format!("- {}\n", one_line("relevant file", item)?)))
         .collect()
 }
 

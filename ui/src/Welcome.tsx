@@ -1,19 +1,17 @@
 import type { ProjectInfo } from './api.ts'
 import { openedAgo, problemLabel } from './projects.ts'
 
-/** The empty state: New board, Open board and the recent projects. */
+/** The empty state: Open folder and the recent projects. */
 export function Welcome({
   projects,
   now,
-  onNewBoard,
-  onOpenBoard,
+  onOpenFolder,
   onOpenProject,
   onRemoveProject,
 }: {
   projects: readonly ProjectInfo[]
   now: number
-  onNewBoard: () => void
-  onOpenBoard: () => void
+  onOpenFolder: () => void
   onOpenProject: (project: ProjectInfo) => void
   onRemoveProject: (project: ProjectInfo) => void
 }) {
@@ -23,21 +21,13 @@ export function Welcome({
         <img className="logo" src="/logo.svg" alt="" width={56} height={56} />
         <h2>Welcome to Tandem</h2>
         <p className="welcome-lead">
-          A task board you share with your coding agents, kept as files in your repo.
+          A task board you share with your coding agents, one per repo.
         </p>
         <div className="welcome-actions">
-          <button type="button" className="welcome-action" onClick={onNewBoard}>
-            <span className="welcome-action-title">
-              <span aria-hidden="true">＋ </span>New board
-            </span>
+          <button type="button" className="welcome-action" onClick={onOpenFolder}>
+            <span className="welcome-action-title">Open folder</span>
             <span className="welcome-action-hint">
-              Pick a repo folder and create <code>.tandem/</code> in it
-            </span>
-          </button>
-          <button type="button" className="welcome-action" onClick={onOpenBoard}>
-            <span className="welcome-action-title">Open board</span>
-            <span className="welcome-action-hint">
-              Pick a repo that already has <code>.tandem/</code>
+              Pick a folder in a repo to open its board, or start one
             </span>
           </button>
         </div>

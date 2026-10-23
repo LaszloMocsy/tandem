@@ -1,9 +1,15 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import type { AppSettings, ProjectInfo } from './api.ts'
+import type { AppSettings, DeletedTask, ProjectInfo } from './api.ts'
 import { APP_VERSION, type BuildEnv } from './buildEnv.ts'
-import { ResetLocalStateForm } from './dialogs.tsx'
-import { AppSettingsView, ProjectSettingsView, Settings, type SettingsApi } from './Settings.tsx'
+import { CleanUpDeletedForm } from './dialogs.tsx'
+import {
+  AppSettingsView,
+  DeletedTasksView,
+  ProjectSettingsView,
+  Settings,
+  type SettingsApi,
+} from './Settings.tsx'
 import { isSettingsShortcut } from './shortcuts.ts'
 
 const noop = () => {}
@@ -23,7 +29,6 @@ const project: ProjectInfo = {
   lastOpenedAt: null,
   open: true,
   error: null,
-  readOnly: null,
   mcpUrl: 'http://127.0.0.1:4317/p/tandem-2/mcp',
 }
 
@@ -33,8 +38,9 @@ const api: SettingsApi = {
   setMcpPort: never,
   setTheme: never,
   setProjectName: never,
-  resetProject: never,
-  listAgents: never,
+  listDeletedTasks: never,
+  restoreTask: never,
+  purgeDeletedTasks: never,
   openLink: never,
 }
 
@@ -65,7 +71,6 @@ function projectView(info: ProjectInfo, name = info.name) {
       busy={false}
       onName={noop}
       onSaveName={noop}
-      onReset={noop}
       onRemove={noop}
     />,
   )
@@ -140,29 +145,29 @@ test('the Project tab shows the name, the local values and the actions', () => {
   const html = projectView(project)
   expect(html).toContain('value="Tandem board"')
   expect(html).toContain('placeholder="tandem"')
-  expect(html).toContain('Saved in <code>.tandem/config.toml</code>')
+  expect(html).toContain('Stored on this machine. Leave it empty to use the folder name')
+  expect(html).not.toMatch(/\.tandem|commit/)
   expect(html).toMatch(/disabled="">Save<\/button>/)
   expect(html).toContain('<code>tandem-2</code><button type="button" class="link" aria-label="Copy project id">Copy</button>')
   expect(html).toContain(
     '<code>http://127.0.0.1:4317/p/tandem-2/mcp</code><button type="button" class="link" aria-label="Copy MCP URL">Copy</button>',
   )
-  expect(html).toContain('Reset local state…')
+  expect(html).not.toContain('Reset local state')
+  expect(html).toContain('Deletes this board and its tasks from this machine.')
   expect(html).toContain('Remove…')
 })
 
 test('a new name can be saved, and an empty one goes back to the folder name', () => {
   expect(projectView(project, 'Renamed')).toMatch(/<button type="submit" class="primary">Save/)
   expect(projectView(project, '  ')).toMatch(/<button type="submit" class="primary">Save/)
-  // Without a name in config.toml, clearing it changes nothing.
+  // Without a name of its own, clearing it changes nothing.
   const unnamed = { ...project, name: 'tandem' }
   expect(projectView(unnamed, '')).toMatch(/disabled="">Save/)
   expect(projectView(project, 'two\nlines')).toContain("can&#x27;t contain line breaks")
 })
 
-test('a read-only project shows why its name cannot change', () => {
-  const html = projectView({ ...project, readOnly: 'the tasks use format version 99', mcpUrl: null })
-  expect(html).toMatch(/<input [^>]*aria-label="Board name"[^>]*disabled=""/)
-  expect(html).toContain('Read-only: the tasks use format version 99')
+test('without the MCP server, the Project tab points to the App tab', () => {
+  const html = projectView({ ...project, mcpUrl: null })
   expect(html).toContain('The MCP server isn&#x27;t running; see the App tab.')
 })
 
@@ -171,11 +176,11 @@ test('without an open board, only the App tab can be chosen', () => {
     <Settings
       tab="project"
       project={undefined}
+      tasks={[]}
       api={api}
       onTab={noop}
       onClose={noop}
       onProjectsChanged={noop}
-      onReset={noop}
       onRemove={noop}
     />,
   )
@@ -184,26 +189,85 @@ test('without an open board, only the App tab can be chosen', () => {
   expect(html).toContain('Loading…')
 })
 
-test('the reset dialog warns about the tasks agents are working on', () => {
-  const render = (working: { id: string; title: string }[] | null) =>
+const deletedTasks: DeletedTask[] = [
+  { id: 'k3f9x2m', title: 'Dropped idea', status: 'todo', deletedAt: '2026-10-16T09:00:00Z' },
+  { id: 'a7rq4ne', title: 'Old spike', status: 'done', deletedAt: '2026-10-15T09:00:00Z' },
+]
+
+function deletedView(
+  tasks: DeletedTask[] | null,
+  { error = null as string | null, busy = false } = {},
+) {
+  return renderToStaticMarkup(
+    <DeletedTasksView
+      tasks={tasks}
+      loadError={null}
+      busy={busy}
+      error={error}
+      onRestore={noop}
+      onCleanUp={noop}
+    />,
+  )
+}
+
+test('the Deleted tasks section lists each deleted task with Restore', () => {
+  const html = deletedView(deletedTasks)
+  expect(html).toContain('<h3>Deleted tasks</h3>')
+  expect(html).toMatch(/<code>k3f9x2m<\/code><span class="deleted-title">Dropped idea<\/span><span class="muted">deleted [^<]+<\/span>/)
+  expect(html).toContain('<code>a7rq4ne</code><span class="deleted-title">Old spike</span>')
+  expect(html).toContain('aria-label="Restore k3f9x2m">Restore</button>')
+  expect(html).toContain('aria-label="Restore a7rq4ne">Restore</button>')
+  expect(html).toMatch(/<button type="button" class="delete-task">Clean up…<\/button>/)
+})
+
+test('a refused restore says why', () => {
+  const html = deletedView(deletedTasks, {
+    error: 'parent task `a7rq4ne` was not found',
+  })
+  expect(html).toContain('<p class="field-error" role="alert">parent task `a7rq4ne` was not found</p>')
+})
+
+test('without deleted tasks, the section says so and Clean up is disabled', () => {
+  const html = deletedView([])
+  expect(html).toContain('No deleted tasks.')
+  expect(html).not.toContain('>Restore</button>')
+  expect(html).toMatch(/<button type="button" class="delete-task" disabled="">Clean up…<\/button>/)
+  expect(deletedView(null)).toContain('Loading…')
+  expect(deletedView(null)).toMatch(/disabled="">Clean up…/)
+})
+
+test('the Project tab places Deleted tasks before Remove', () => {
+  const html = renderToStaticMarkup(
+    <ProjectSettingsView
+      project={project}
+      name={project.name}
+      nameError={null}
+      saved={false}
+      busy={false}
+      onName={noop}
+      onSaveName={noop}
+      onRemove={noop}
+      deletedTasks={<section aria-label="Deleted tasks" />}
+    />,
+  )
+  expect(html.indexOf('aria-label="Deleted tasks"')).toBeGreaterThan(-1)
+  expect(html.indexOf('aria-label="Deleted tasks"')).toBeLessThan(html.indexOf('Remove…'))
+})
+
+test('the clean up dialog says it is permanent and the tasks can no longer be restored', () => {
+  const render = (count: number) =>
     renderToStaticMarkup(
-      <ResetLocalStateForm
-        project={project}
-        working={working}
-        busy={false}
-        error={null}
-        onSubmit={noop}
-        onCancel={noop}
-      />,
+      <CleanUpDeletedForm count={count} busy={false} error={null} onSubmit={noop} onCancel={noop} />,
     )
-  const html = render([{ id: 'k3f9x2m', title: 'Fix token refresh race' }])
-  expect(html).toContain('Reset local state of “Tandem board”?')
-  expect(html).toContain('Leases, blocked flags, review feedback and working logs are lost.')
-  expect(html).toContain('Agents are working on this task.')
-  expect(html).toContain('<code>k3f9x2m</code> Fix token refresh race')
-  expect(html).toMatch(/<button type="submit" class="danger">Reset local state/)
-  expect(render([])).not.toContain('Agents are working')
-  expect(render(null)).toMatch(/disabled="">Checking agents…/)
+  const html = render(2)
+  expect(html).toContain('Clean up 2 deleted tasks?')
+  expect(html).toContain('permanently deletes the 2 deleted tasks and their history')
+  expect(html).toContain('This can&#x27;t be undone.')
+  expect(html).toContain('resets the undo history')
+  expect(html).toContain('none of them can be restored')
+  expect(html).toContain('<button type="submit" class="danger">Clean up for good</button>')
+  expect(html).toContain('>Keep them</button>')
+  expect(render(1)).toContain('Clean up 1 deleted task?')
 })
 
 test('Cmd or Ctrl+comma opens Settings', () => {

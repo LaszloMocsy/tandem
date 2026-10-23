@@ -16,7 +16,6 @@ function summary(id: string, patch: Partial<TaskSummary> = {}): TaskSummary {
     created: '2026-10-13',
     lease: null,
     blocked: null,
-    problem: null,
     unmet: [],
     ...patch,
   }
@@ -37,7 +36,7 @@ const tasks = [
 
 const detail: TaskDetail = {
   summary: task,
-  markdown: '---\nid: k3f9x2m\n---\n',
+  markdown: '# Fix token refresh race\n',
   parent: tasks[1],
   children: [],
   workLog: [
@@ -70,15 +69,11 @@ const detail: TaskDetail = {
   },
 }
 
-function render(
-  data: TaskDetail = detail,
-  { readOnly = false, errors = {} }: { readOnly?: boolean; errors?: FieldErrors } = {},
-) {
+function render(data: TaskDetail = detail, { errors = {} }: { errors?: FieldErrors } = {}) {
   return renderToStaticMarkup(
     <TaskView
       detail={data}
       tasks={tasks}
-      readOnly={readOnly}
       errors={errors}
       onSave={async () => true}
       onClearError={() => {}}
@@ -133,37 +128,20 @@ test('shows refused edits next to their control', () => {
   )
 })
 
-test('shows both timelines, the working log marked local only', () => {
+test('shows both timelines', () => {
   const html = render()
   const changelog = section(html, 'Changelog')
   expect(changelog).toContain('<span class="event">created</span><span class="muted">sam · 2026-10-13</span>')
   expect(changelog).toContain('<p class="prose">Serialized refresh.\nUnmet: 2 (needs a staging account)</p>')
   const log = section(html, 'Working log')
-  expect(log).toContain('<span class="tag">local only, not committed</span>')
+  expect(log).toContain('<h3>Working log</h3>')
   expect(log).toContain('Reproduced with two tabs.')
   expect(log).toMatch(/<li class="log-feedback">.*you · /)
 })
 
-test('a read-only project shows no editors', () => {
-  const html = render(detail, { readOnly: true })
-  expect(html).not.toContain('Edit ')
-  expect(html).not.toContain('Remove label')
-  expect(html).not.toContain('Add dependency')
-  expect(html).toMatch(/aria-label="Priority" disabled=""/)
-})
-
-test('an invalid file shows its error and raw text, and is not editable', () => {
-  const html = render({
-    ...detail,
-    summary: { ...task, title: '', problem: { kind: 'invalid_file', message: 'bad YAML' } },
-    markdown: '---\nstatus: [\n---\n',
-    content: null,
-  })
-  expect(html).toContain('<strong>Invalid.</strong> bad YAML')
-  expect(html).toContain('<pre class="raw">---\nstatus: [\n---\n</pre>')
-  expect(html).not.toContain('Edit ')
-  expect(html).not.toContain('aria-label="Description"')
-  expect(html).toContain('aria-label="Working log"')
+test('a reviewed task says when', () => {
+  const html = render({ ...detail, content: { ...detail.content, reviewedAt: '2026-10-15' } })
+  expect(html).toContain('<span class="muted">reviewed 2026-10-15</span>')
 })
 
 test('editor helpers', () => {
@@ -180,7 +158,6 @@ test('the footer, such as Delete task, comes after the working log', () => {
     <TaskView
       detail={detail}
       tasks={tasks}
-      readOnly={false}
       errors={{}}
       onSave={async () => true}
       onClearError={() => {}}

@@ -4,27 +4,17 @@ import { Dialog, ReopenForm } from './dialogs.tsx'
 
 /**
  * Your actions on a task, by status: Approve in Backlog; Mark reviewed and
- * Reopen with feedback in Review; Commit review in Done while the file has
- * uncommitted changes. Renders nothing for other tasks.
+ * Reopen with feedback in Review. Renders nothing for other tasks.
  */
 export function ReviewBar({
   status,
-  disabled,
-  uncommitted,
-  committed,
   busy,
   error,
   onApprove,
   onMarkReviewed,
   onReopen,
-  onCommit,
 }: {
   status: Status
-  disabled: boolean
-  /** Whether the task file has changes git hasn't committed. */
-  uncommitted: boolean
-  /** The hash of the review just committed from here. */
-  committed: string | null
   busy: boolean
   /** The latest refused action. */
   error: string | null
@@ -32,7 +22,6 @@ export function ReviewBar({
   onMarkReviewed: () => void
   /** Resolves to whether the task was reopened. */
   onReopen: (feedback: string) => Promise<boolean>
-  onCommit: () => void
 }) {
   const [reopening, setReopening] = useState(false)
 
@@ -45,7 +34,7 @@ export function ReviewBar({
     content = (
       <>
         <p>Waiting for your approval before agents can start it.</p>
-        <button type="button" className="primary" disabled={disabled || busy} onClick={onApprove}>
+        <button type="button" className="primary" disabled={busy} onClick={onApprove}>
           Approve
         </button>
       </>
@@ -58,35 +47,20 @@ export function ReviewBar({
           <button
             type="button"
             className="primary"
-            disabled={disabled || busy}
+            disabled={busy}
             onClick={onMarkReviewed}
           >
             Mark reviewed
           </button>
           <button
             type="button"
-            disabled={disabled || busy}
+            disabled={busy}
             onClick={() => setReopening(true)}
           >
             Reopen with feedback…
           </button>
         </div>
       </>
-    )
-  } else if (status === 'done' && uncommitted) {
-    content = (
-      <>
-        <p>The review is not committed yet.</p>
-        <button type="button" className="primary" disabled={disabled || busy} onClick={onCommit}>
-          Commit review
-        </button>
-      </>
-    )
-  } else if (status === 'done' && committed) {
-    content = (
-      <p>
-        Review committed as <code>{committed.slice(0, 7)}</code>.
-      </p>
     )
   } else {
     return null
