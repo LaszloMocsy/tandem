@@ -23,6 +23,10 @@ test('commands pass camelCase arguments under the Rust names', async () => {
   await api.listDeletedTasks('demo')
   await api.restoreTask('demo', 'k3f9x2m')
   await api.purgeDeletedTasks('demo')
+  await api.listBackups('demo')
+  await api.backUpProject('demo')
+  await api.restoreBackup('demo', '20261023T093000.123Z')
+  await api.exportTasks('demo', 'markdown')
   expect(mockedInvoke.mock.calls).toEqual([
     ['open_project', { path: '/repo', allowOutsideGit: false }],
     ['open_project', { path: '/repo', allowOutsideGit: true }],
@@ -38,6 +42,10 @@ test('commands pass camelCase arguments under the Rust names', async () => {
     ['list_deleted_tasks', { project: 'demo' }],
     ['restore_task', { project: 'demo', id: 'k3f9x2m' }],
     ['purge_deleted_tasks', { project: 'demo' }],
+    ['list_backups', { project: 'demo' }],
+    ['back_up_project', { project: 'demo' }],
+    ['restore_backup', { project: 'demo', name: '20261023T093000.123Z' }],
+    ['export_tasks', { project: 'demo', format: 'markdown' }],
   ])
 })
 

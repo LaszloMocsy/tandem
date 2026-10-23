@@ -48,6 +48,11 @@ pub enum ServiceError {
         /// Tasks that list this task in `depends_on`.
         dependents: Vec<TaskId>,
     },
+    #[error(
+        "an agent is working on {}; wait until it finishes or releases them",
+        tasks_text(.0)
+    )]
+    AgentsWorking(Vec<TaskId>),
     #[error("{0}")]
     InvalidArgument(String),
     #[error(transparent)]
@@ -58,7 +63,7 @@ impl ServiceError {
     /// The error code: `not_found`, `claimed_by_other`, `deps_not_done`,
     /// `not_holder`, `invalid_transition`, `cycle_detected`,
     /// `parent_not_found`, `criteria_unmet`, `task_referenced`,
-    /// `invalid_argument` or `internal`.
+    /// `agents_working`, `invalid_argument` or `internal`.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotFound(_) => "not_found",
@@ -69,6 +74,7 @@ impl ServiceError {
             Self::Graph(e) => e.code(),
             Self::CriteriaUnmet { .. } => "criteria_unmet",
             Self::Referenced { .. } => "task_referenced",
+            Self::AgentsWorking(_) => "agents_working",
             Self::InvalidArgument(_) => "invalid_argument",
             Self::Db(_) => "internal",
         }
@@ -97,6 +103,11 @@ fn linked(what: &str, tasks: &[TaskId]) -> String {
         return String::new();
     }
     format!("{what} {}", list(tasks))
+}
+
+fn tasks_text(tasks: &[TaskId]) -> String {
+    let noun = if tasks.len() == 1 { "task" } else { "tasks" };
+    format!("{noun} {}", list(tasks))
 }
 
 fn until(expires_at: &Option<String>) -> String {

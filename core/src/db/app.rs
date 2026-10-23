@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
+use super::backup::{backup_dir, backups_owner};
 use super::{DB_DIR, DbError, from_millis, io_error, millis, schema, timestamp_text};
 
 /// The longest project id [`AppDb::add_project`] makes, before any `-2`
@@ -32,6 +33,7 @@ pub struct Project {
 /// settings.
 pub struct AppDb {
     conn: Connection,
+    data_dir: PathBuf,
 }
 
 impl AppDb {
@@ -40,13 +42,18 @@ impl AppDb {
     pub fn open(data_dir: &Path) -> Result<Self, DbError> {
         let path = data_dir.join(DB_DIR).join("app.db");
         let (conn, _) = schema::open(&path, schema::APP_MIGRATIONS)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            data_dir: data_dir.to_owned(),
+        })
     }
 
     /// Adds the project identified by `git_dir`, opened at `path`, to the
     /// list, named `name` with an id made from it. If a project with that
     /// `git_dir` is in the list already, as when you open another worktree
     /// of the same repo, returns it instead, with `last_path` set to `path`.
+    /// A new project never takes an id whose backups belong to another
+    /// project, as a removed project's last backup does.
     pub fn add_project(
         &mut self,
         git_dir: &Path,
@@ -72,11 +79,15 @@ impl AppDb {
                 let base = slug(name);
                 let mut id = base.clone();
                 let mut n = 1;
-                while tx
-                    .query_row("SELECT 1 FROM projects WHERE id = ?1", [&id], |_| Ok(()))
-                    .optional()?
-                    .is_some()
-                {
+                let taken = |id: &str| -> Result<bool, DbError> {
+                    let listed = tx
+                        .query_row("SELECT 1 FROM projects WHERE id = ?1", [id], |_| Ok(()))
+                        .optional()?
+                        .is_some();
+                    let backups = backups_owner(&backup_dir(&self.data_dir, id));
+                    Ok(listed || backups.is_some_and(|owner| owner != git_dir))
+                };
+                while taken(&id)? {
                     n += 1;
                     id = format!("{base}-{n}");
                 }

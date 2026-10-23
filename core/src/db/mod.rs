@@ -1,11 +1,13 @@
 //! The SQLite databases, in the app's data directory and never in a repo:
 //! `app.db` with the project list and settings, and one database per
-//! project with its tasks, their history and in-flight activity.
+//! project with its tasks, their history and in-flight activity. Each
+//! project's database is backed up into the same directory; see `backup`.
 //!
 //! The schema is in `schema.rs`: each list of migrations, read in order,
 //! builds the current schema from nothing.
 
 mod app;
+pub mod backup;
 mod project;
 mod schema;
 mod sql;
@@ -48,6 +50,8 @@ pub enum DbError {
     },
     #[error("`{0}` is not a valid project id")]
     InvalidProjectId(String),
+    #[error("{} is not a Tandem project database", path.display())]
+    NotABackup { path: PathBuf },
     #[error("{} is not valid UTF-8", path.display())]
     NonUtf8Path { path: PathBuf },
 }

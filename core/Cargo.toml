@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 getrandom = "0.4.3"
 jiff = { version = "0.2.38", features = ["serde"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize"] }
 serde_json = "1.0.154"

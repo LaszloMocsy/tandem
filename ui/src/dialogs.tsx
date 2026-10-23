@@ -409,12 +409,13 @@ export function RemoveProjectForm({
         file in it.
       </p>
       <p className="dialog-callout danger">
-        Tandem deletes this board's database from this machine for good: every task, its
-        changelog and working log, and the deleted tasks. This can't be undone.
+        Tandem deletes this board's database from this machine: every task, its changelog and
+        working log, and the deleted tasks. It keeps one last backup and deletes the others.
       </p>
       <p className="hint">
         The board leaves Tandem's project list and agents lose its MCP endpoint. Opening the
-        folder again starts an empty board.
+        folder again starts an empty board; restore the last backup from Settings to bring the
+        tasks back.
       </p>
       {blocked && (
         <div className="dialog-callout danger" role="status">
@@ -565,6 +566,49 @@ export function CleanUpDeletedForm({
         ready
         busy={busy}
         cancel="Keep them"
+        danger
+        onCancel={onCancel}
+      />
+    </form>
+  )
+}
+
+/**
+ * Restore a backup: replaces every task with the backup's. The current
+ * tasks are backed up first, so it can be undone.
+ */
+export function RestoreBackupForm({
+  when,
+  tasks,
+  busy,
+  error,
+  onSubmit,
+  onCancel,
+}: {
+  /** When the backup was made, as shown. */
+  when: string
+  /** Its tasks, such as `12 tasks`. */
+  tasks: string
+  busy: boolean
+  error: string | null
+  onSubmit: () => void
+  onCancel: () => void
+}) {
+  return (
+    <form onSubmit={onSubmitted(onSubmit)}>
+      <h3>Restore the backup from {when}?</h3>
+      <p className="dialog-callout danger">
+        Every task on this board, and its history, is replaced with the backup's {tasks}.
+      </p>
+      <p className="hint">
+        Your current tasks are backed up first, so you can undo this by restoring that backup.
+      </p>
+      <FormError error={error} />
+      <Actions
+        submit="Restore backup"
+        ready
+        busy={busy}
+        cancel="Keep current tasks"
         danger
         onCancel={onCancel}
       />

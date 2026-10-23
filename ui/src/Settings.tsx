@@ -1,8 +1,18 @@
 import { useEffect, useId, useState, type KeyboardEvent, type ReactNode } from 'react'
-import type { Api, AppSettings, DeletedTask, Link, ProjectInfo, Theme } from './api.ts'
+import type {
+  Api,
+  AppSettings,
+  BackupInfo,
+  DeletedTask,
+  ExportFormat,
+  Link,
+  ProjectInfo,
+  Theme,
+} from './api.ts'
+import { formatSize, taskCount, useBackups } from './backups.ts'
 import { APP_VERSION, BUILD_ENV, type BuildEnv, versionText } from './buildEnv.ts'
 import { useDeletedTasks } from './deletedTasks.ts'
-import { CleanUpDeletedForm, Dialog } from './dialogs.tsx'
+import { CleanUpDeletedForm, Dialog, RestoreBackupForm } from './dialogs.tsx'
 import { errorMessage, formatTime } from './edit.ts'
 import { CopyButton } from './panels.tsx'
 import { folderName, nameProblem, parsePort } from './settingsInput.ts'
@@ -20,6 +30,10 @@ export type SettingsApi = Pick<
   | 'listDeletedTasks'
   | 'restoreTask'
   | 'purgeDeletedTasks'
+  | 'listBackups'
+  | 'backUpProject'
+  | 'restoreBackup'
+  | 'exportTasks'
   | 'openLink'
 >
 
@@ -355,7 +369,10 @@ export function AppSettingsView({
   )
 }
 
-/** Renames the project, and lists, restores and cleans up deleted tasks. */
+/**
+ * Renames the project, backs it up and restores or exports it, and lists,
+ * restores and cleans up deleted tasks.
+ */
 function ProjectTab({
   project,
   tasks,
@@ -375,6 +392,7 @@ function ProjectTab({
   const [saved, setSaved] = useState(false)
   const [busy, setBusy] = useState(false)
   const deleted = useDeletedTasks(api, project.id, tasks)
+  const backups = useBackups(api, project.id, tasks)
 
   useEffect(() => {
     if (!saved) return
@@ -412,6 +430,18 @@ function ProjectTab({
         }}
         onSaveName={(name) => void saveName(name)}
         onRemove={() => onRemove(project)}
+        backups={
+          <BackupsView
+            backups={backups.backups}
+            loadError={backups.loadError}
+            busy={backups.busy}
+            notice={backups.notice}
+            error={backups.error}
+            onBackUp={() => void backups.actions.backUpNow()}
+            onRestore={backups.actions.askRestore}
+            onExport={(format) => void backups.actions.exportTasks(format)}
+          />
+        }
         deletedTasks={
           <DeletedTasksView
             tasks={deleted.tasks}
@@ -436,13 +466,29 @@ function ProjectTab({
           onSubmit={() => void deleted.actions.confirmCleanUp()}
         />
       </Dialog>
+      <Dialog
+        open={backups.confirming !== null}
+        label="Restore backup"
+        onClose={backups.actions.cancelRestore}
+      >
+        {backups.confirming && (
+          <RestoreBackupForm
+            when={formatTime(backups.confirming.createdAt)}
+            tasks={taskCount(backups.confirming.tasks)}
+            busy={backups.busy}
+            error={backups.restoreError}
+            onCancel={backups.actions.cancelRestore}
+            onSubmit={() => void backups.actions.confirmRestore()}
+          />
+        )}
+      </Dialog>
     </>
   )
 }
 
 /**
- * The Project tab: the name, the MCP endpoint, the deleted tasks and
- * Remove. Everything is stored on this machine.
+ * The Project tab: the name, the MCP endpoint, the backups, the deleted
+ * tasks and Remove. Everything is stored on this machine.
  */
 export function ProjectSettingsView({
   project,
@@ -453,6 +499,7 @@ export function ProjectSettingsView({
   onName,
   onSaveName,
   onRemove,
+  backups,
   deletedTasks,
 }: {
   project: ProjectInfo
@@ -463,6 +510,8 @@ export function ProjectSettingsView({
   onName: (name: string) => void
   onSaveName: (name: string) => void
   onRemove: () => void
+  /** The Backups section, after the MCP endpoint. */
+  backups?: ReactNode
   /** The Deleted tasks section, before Remove. */
   deletedTasks?: ReactNode
 }) {
@@ -541,13 +590,15 @@ export function ProjectSettingsView({
           worktree of the repo shares it.
         </p>
       </section>
+      {backups}
       {deletedTasks}
       <section className="settings-section" aria-label="Remove from Tandem">
         <div className="settings-action">
           <div>
             <h4>Remove from Tandem</h4>
             <p className="hint">
-              Deletes this board and its tasks from this machine. The folder stays as it is.
+              Deletes this board and its tasks from this machine, keeping one last backup in case
+              you open the repo again. The folder stays as it is.
             </p>
           </div>
           <button type="button" className="delete-task" disabled={busy} onClick={onRemove}>
@@ -556,6 +607,105 @@ export function ProjectSettingsView({
         </div>
       </section>
     </>
+  )
+}
+
+/**
+ * The Backups section: each backup with Restore, which asks first, Back up
+ * now, and Export. `backups` is `null` while loading.
+ */
+export function BackupsView({
+  backups,
+  loadError,
+  busy,
+  notice,
+  error,
+  onBackUp,
+  onRestore,
+  onExport,
+}: {
+  backups: readonly BackupInfo[] | null
+  loadError: string | null
+  busy: boolean
+  notice: string | null
+  error: string | null
+  onBackUp: () => void
+  onRestore: (backup: BackupInfo) => void
+  onExport: (format: ExportFormat) => void
+}) {
+  return (
+    <section className="settings-section" aria-label="Backups">
+      <h3>Backups</h3>
+      {loadError ? (
+        <p className="field-error" role="alert">
+          {loadError}
+        </p>
+      ) : backups === null ? (
+        <p className="muted">Loading…</p>
+      ) : backups.length === 0 ? (
+        <p className="muted">No backups yet.</p>
+      ) : (
+        <ul className="backups">
+          {backups.map((backup) => (
+            <li key={backup.name}>
+              <span className="backup-time">{formatTime(backup.createdAt)}</span>
+              <span className="muted">
+                {taskCount(backup.tasks)} · {formatSize(backup.size)}
+              </span>
+              <button
+                type="button"
+                className="link"
+                aria-label={`Restore the backup from ${formatTime(backup.createdAt)}`}
+                disabled={busy || backup.tasks === null}
+                onClick={() => onRestore(backup)}
+              >
+                Restore…
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {notice && (
+        <p className="muted" role="status">
+          {notice}
+        </p>
+      )}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="hint">
+        Tandem backs up this board on this machine every hour while it changes, and when the app
+        starts and quits. It keeps every backup from the last day and one a day for 30 days.
+      </p>
+      <div className="settings-action">
+        <div>
+          <h4>Back up now</h4>
+          <p className="hint">Adds a backup of the board as it is.</p>
+        </div>
+        <button type="button" disabled={busy} onClick={onBackUp}>
+          Back up now
+        </button>
+      </div>
+      <div className="settings-action">
+        <div>
+          <h4>Export</h4>
+          <p className="hint">
+            Saves a copy to keep yourself: JSON with every task and its history, or a folder with
+            each task as a Markdown file.
+          </p>
+        </div>
+        <div className="settings-buttons">
+          <button type="button" disabled={busy} onClick={() => onExport('json')}>
+            JSON…
+          </button>
+          <button type="button" disabled={busy} onClick={() => onExport('markdown')}>
+            Markdown…
+          </button>
+        </div>
+      </div>
+    </section>
   )
 }
 

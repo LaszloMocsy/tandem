@@ -22,7 +22,7 @@ use crate::dto::{
 };
 use crate::error::Error;
 use crate::links::Link;
-use crate::projects::{AppSettingsInfo, Opened, ProjectInfo, Projects};
+use crate::projects::{AppSettingsInfo, BackupInfo, Opened, ProjectInfo, Projects};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -274,6 +274,119 @@ pub async fn purge_deleted_tasks(
         Ok(service.purge_deleted()?.len())
     })
     .await
+}
+
+/// The project's backups, newest first.
+#[tauri::command]
+pub async fn list_backups(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+) -> Result<Vec<BackupInfo>> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.backups(&project)).await
+}
+
+/// Backs up the project now.
+#[tauri::command]
+pub async fn back_up_project(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+) -> Result<BackupInfo> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.back_up(&project)).await
+}
+
+/// Replaces the project's tasks with a backup; see
+/// [`Projects::restore_backup`]. Returns the backup that undoes it.
+#[tauri::command]
+pub async fn restore_backup(
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+    name: String,
+) -> Result<BackupInfo> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.restore_backup(&project, &name)).await
+}
+
+/// Exports the project's tasks, after asking where with the system dialog:
+/// `json` to one file with everything, `markdown` to a new folder of
+/// `<id>.md` files in the folder you choose. Returns where it went, or
+/// `None` if you cancel.
+#[tauri::command]
+pub async fn export_tasks(
+    app: AppHandle,
+    projects: State<'_, Arc<Projects>>,
+    project: String,
+    format: String,
+) -> Result<Option<String>> {
+    let service = projects.service(&project)?;
+    blocking(move || {
+        let stem = format!("{project}-tasks-{}", jiff::Zoned::now().date());
+        let dialog = app.dialog().file();
+        let path = match format.as_str() {
+            "json" => dialog
+                .set_file_name(format!("{stem}.json"))
+                .add_filter("JSON", &["json"])
+                .blocking_save_file(),
+            "markdown" => dialog.blocking_pick_folder(),
+            _ => {
+                return Err(Error::new(
+                    "invalid_argument",
+                    format!("`{format}` is not an export format; use json or markdown"),
+                ));
+            }
+        };
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let path = path
+            .into_path()
+            .map_err(|e| Error::new("invalid_argument", e.to_string()))?;
+        let written = if format == "json" {
+            let json = serde_json::to_string_pretty(&service.export_json()?)
+                .map_err(|e| Error::internal(&e))?;
+            write_file(&path, &(json + "\n"))?;
+            path
+        } else {
+            let folder = new_folder(&path, &stem)?;
+            for (name, text) in service.export_markdown()? {
+                write_file(&folder.join(name), &text)?;
+            }
+            folder
+        };
+        Ok(Some(written.display().to_string()))
+    })
+    .await
+}
+
+/// Creates a folder named `stem` in `parent`, or `stem-2` and so on if
+/// that is taken, so an export never writes over files.
+fn new_folder(parent: &std::path::Path, stem: &str) -> Result<PathBuf> {
+    let mut n = 1;
+    loop {
+        let name = if n == 1 {
+            stem.to_owned()
+        } else {
+            format!("{stem}-{n}")
+        };
+        let folder = parent.join(name);
+        match std::fs::create_dir(&folder) {
+            Ok(()) => return Ok(folder),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(e) => return Err(cannot_write(&folder, &e)),
+        }
+    }
+}
+
+fn write_file(path: &std::path::Path, text: &str) -> Result<()> {
+    std::fs::write(path, text).map_err(|e| cannot_write(path, &e))
+}
+
+fn cannot_write(path: &std::path::Path, e: &std::io::Error) -> Error {
+    Error::new(
+        "invalid_argument",
+        format!("cannot write {}: {e}", path.display()),
+    )
 }
 
 /// Backlog → Todo.

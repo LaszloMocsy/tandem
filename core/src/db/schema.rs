@@ -144,7 +144,11 @@ pub(super) fn open(path: &Path, migrations: &[&str]) -> Result<(Connection, bool
 
 /// Runs the migrations the database is missing. Returns whether it had
 /// none yet.
-fn migrate(conn: &mut Connection, path: &Path, migrations: &[&str]) -> Result<bool, DbError> {
+pub(super) fn migrate(
+    conn: &mut Connection,
+    path: &Path,
+    migrations: &[&str],
+) -> Result<bool, DbError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let supported = migrations.len() as i64;

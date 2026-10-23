@@ -1,12 +1,12 @@
 # Tandem
 
-Tandem is a local Tauri desktop app with a kanban board for tasks that you and AI coding agents share. Tasks live in a SQLite database per project in the app's data directory; nothing is written into the repo. A project is identified by its repo's git common dir, so every worktree shares one board. Agents claim, work on and finish tasks through an MCP server built into the app, and a human reviews and ticks off what they finish. A Rust core owns every database change; the UI and the MCP server both go through it.
+Tandem is a local Tauri desktop app with a kanban board for tasks that you and AI coding agents share. Tasks live in a SQLite database per project in the app's data directory, backed up next to it; nothing is written into the repo. A project is identified by its repo's git common dir, so every worktree shares one board. Agents claim, work on and finish tasks through an MCP server built into the app, and a human reviews and ticks off what they finish. A Rust core owns every database change; the UI and the MCP server both go through it.
 
 ## Layout
 
 ```txt
 Cargo.toml       # workspace: core, mcp, desktop, xtask
-core/            # tandem-board-core: model, db (schema and migrations), service, graph, git, markdown
+core/            # tandem-board-core: model, db (schema, migrations, backups), service, graph, git, markdown
 mcp/             # tandem-board-mcp: MCP tool handlers on top of core
 desktop/         # tandem-board-desktop: Tauri 2 shell, tauri.conf.json, commands
 xtask/           # repo tooling, run as `cargo xtask`: version checks and bumps
@@ -58,8 +58,8 @@ CI runs the fmt, clippy, test, lint, typecheck and frontend test commands above 
 - `core` and `mcp` never depend on Tauri, directly or through another crate. Tauri code lives only in `desktop`.
 - Every change to `core` comes with tests.
 - The database schema is the migrations in `core/src/db/schema.rs`: each list, read in order, builds the current schema from nothing. Change the schema only by appending a migration; never edit one that has shipped.
-- Every service call runs in one `BEGIN IMMEDIATE` transaction, so checks and changes land together.
-- A task's events are append-only. Deleting a task sets `deleted_at`; only cleaning up deleted tasks removes rows, after the user confirms.
+- Every service call runs in one `BEGIN IMMEDIATE` transaction, so checks and changes land together. Restoring a backup is the one exception: it replaces the whole database in one SQLite write, after backing up the current state.
+- A task's events are append-only. Deleting a task sets `deleted_at`; only cleaning up deleted tasks removes rows, after the user confirms. Restoring a backup, which the user also confirms, brings back the backup's rows as they were.
 - `core/src/markdown/` is the Markdown task format: how `get_task` shows a task, and how an old `.tandem/` folder is imported. The app never writes it into a repo.
 
 ## Tandem Tasks

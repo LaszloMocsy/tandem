@@ -4,8 +4,10 @@
 //! transaction, so checks and changes land together even if another
 //! process shares the database.
 
+mod backup;
 mod delete;
 mod error;
+mod export;
 mod import;
 mod read;
 mod rows;
@@ -13,6 +15,7 @@ mod transitions;
 
 use std::cell::RefCell;
 use std::path::Path;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -25,6 +28,7 @@ use crate::model::{Criterion, Date, Priority, Status, TaskId, Unmet, UnmetCriter
 
 pub use delete::{DeleteCheck, DeletedTask};
 pub use error::ServiceError;
+pub use export::{EXPORT_FORMAT, EXPORT_VERSION};
 pub use import::ImportReport;
 
 /// The default lease length.
@@ -289,8 +293,8 @@ pub struct Saved {
 pub struct Service {
     db: Mutex<ProjectDb>,
     config: Config,
-    /// Your row in `actors`.
-    user: i64,
+    /// Your row in `actors`. Looked up again after a restore.
+    user: AtomicI64,
     subscribers: Mutex<Vec<Sender<Changes>>>,
 }
 
@@ -303,32 +307,11 @@ impl Service {
     /// The service for an open database. Your row in `actors` takes the
     /// current [`Config::user_name`].
     pub fn new(db: ProjectDb, config: Config) -> Result<Self, ServiceError> {
-        let now = millis((config.clock)());
-        let conn = db.connection();
-        let existing: Option<i64> = conn
-            .query_row("SELECT id FROM actors WHERE kind = 'user'", [], |row| {
-                row.get(0)
-            })
-            .optional()?;
-        let user = match existing {
-            Some(id) => {
-                conn.execute(
-                    "UPDATE actors SET name = ?2 WHERE id = ?1",
-                    params![id, config.user_name],
-                )?;
-                id
-            }
-            None => conn.query_row(
-                "INSERT INTO actors (kind, name, first_seen, last_seen)
-                 VALUES ('user', ?1, ?2, ?2) RETURNING id",
-                params![config.user_name, now],
-                |row| row.get(0),
-            )?,
-        };
+        let user = user_row(db.connection(), &config)?;
         Ok(Self {
             db: Mutex::new(db),
             config,
-            user,
+            user: AtomicI64::new(user),
             subscribers: Mutex::new(Vec::new()),
         })
     }
@@ -447,7 +430,7 @@ impl Service {
     /// call by the lease holder does.
     fn touch(&self, conn: &Connection, actor: &Actor, now: Timestamp) -> Result<i64, ServiceError> {
         let Actor::Agent(agent) = actor else {
-            return Ok(self.user);
+            return Ok(self.user.load(Ordering::Relaxed));
         };
         check_agent_id(&agent.id, &self.config.user_name)?;
         let id: i64 = conn.query_row(
@@ -471,6 +454,33 @@ impl Service {
     fn date(&self, ms: i64) -> Date {
         date_in(&self.config.time_zone, ms)
     }
+}
+
+/// Your row in `actors`, added if missing, with its name set to
+/// [`Config::user_name`].
+fn user_row(conn: &Connection, config: &Config) -> Result<i64, ServiceError> {
+    let now = millis((config.clock)());
+    let existing: Option<i64> = conn
+        .query_row("SELECT id FROM actors WHERE kind = 'user'", [], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    Ok(match existing {
+        Some(id) => {
+            // Only when it differs, so opening writes nothing otherwise.
+            conn.execute(
+                "UPDATE actors SET name = ?2 WHERE id = ?1 AND name IS NOT ?2",
+                params![id, config.user_name],
+            )?;
+            id
+        }
+        None => conn.query_row(
+            "INSERT INTO actors (kind, name, first_seen, last_seen)
+             VALUES ('user', ?1, ?2, ?2) RETURNING id",
+            params![config.user_name, now],
+            |row| row.get(0),
+        )?,
+    })
 }
 
 /// One call's view of the project, inside its transaction.

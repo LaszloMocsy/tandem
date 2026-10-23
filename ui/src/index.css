@@ -1644,6 +1644,34 @@ button {
   overflow-wrap: anywhere;
 }
 
+.backups {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.backups li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.backups li + li {
+  border-top: 1px solid var(--border);
+}
+
+.backup-time {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-buttons {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
 .hint + .settings-action {
   margin-top: 12px;
   padding-top: 12px;

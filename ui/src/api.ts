@@ -47,6 +47,20 @@ export type Opened =
    */
   | { kind: 'outsideGit'; repoPath: string }
 
+/** A backup of a project's tasks, made on this machine. */
+export interface BackupInfo {
+  /** Identifies the backup, such as `20261023T093000.123Z`. */
+  name: string
+  createdAt: string
+  /** In bytes. */
+  size: number
+  /** The tasks on its board; `null` if the file can't be read. */
+  tasks: number | null
+}
+
+/** How Export writes the tasks: one JSON file, or a folder of Markdown files. */
+export type ExportFormat = 'json' | 'markdown'
+
 /** What stands in the way of deleting a task. */
 export interface DeleteCheck {
   /** Tasks whose parent is this task. */
@@ -268,9 +282,9 @@ export const api = {
     call<Opened>('open_project', { path, allowOutsideGit }),
   /**
    * Closes a project, removes it from the recent list and deletes its
-   * database, with every task and its history. The folder stays. Refused
-   * with `agents_working` while an agent holds a live lease on one of its
-   * tasks.
+   * database, with every task and its history. A last backup is kept, and
+   * every older one deleted. The folder stays. Refused with
+   * `agents_working` while an agent holds a live lease on one of its tasks.
    */
   removeProject: (project: string) => call<boolean>('remove_project', { project }),
   /** Asks for a folder with the system dialog; `null` if cancelled. */
@@ -324,6 +338,23 @@ export const api = {
    * how many went.
    */
   purgeDeletedTasks: (project: string) => call<number>('purge_deleted_tasks', { project }),
+
+  /** The project's backups, newest first. */
+  listBackups: (project: string) => call<BackupInfo[]>('list_backups', { project }),
+  backUpProject: (project: string) => call<BackupInfo>('back_up_project', { project }),
+  /**
+   * Replaces every task with the backup's, after backing up the current
+   * ones, and returns that backup, which undoes the restore. Refused with
+   * `agents_working` while an agent holds a live lease.
+   */
+  restoreBackup: (project: string, name: string) =>
+    call<BackupInfo>('restore_backup', { project, name }),
+  /**
+   * Exports the tasks after asking where with the system dialog. Returns
+   * the file or folder written, or `null` if cancelled.
+   */
+  exportTasks: (project: string, format: ExportFormat) =>
+    call<string | null>('export_tasks', { project, format }),
 
   /** Backlog → Todo. */
   approve: (project: string, id: string) => call<Saved>('approve_task', { project, id }),

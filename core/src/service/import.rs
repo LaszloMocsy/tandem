@@ -179,7 +179,7 @@ fn actor(
         .trim()
         .eq_ignore_ascii_case(service.config.user_name.trim())
     {
-        return Ok(service.user);
+        return Ok(service.user.load(std::sync::atomic::Ordering::Relaxed));
     }
     if let Some(&id) = cache.get(who) {
         return Ok(id);

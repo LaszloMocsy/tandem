@@ -1,10 +1,11 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import type { AppSettings, DeletedTask, ProjectInfo } from './api.ts'
+import type { AppSettings, BackupInfo, DeletedTask, ProjectInfo } from './api.ts'
 import { APP_VERSION, type BuildEnv } from './buildEnv.ts'
-import { CleanUpDeletedForm } from './dialogs.tsx'
+import { CleanUpDeletedForm, RestoreBackupForm } from './dialogs.tsx'
 import {
   AppSettingsView,
+  BackupsView,
   DeletedTasksView,
   ProjectSettingsView,
   Settings,
@@ -41,6 +42,10 @@ const api: SettingsApi = {
   listDeletedTasks: never,
   restoreTask: never,
   purgeDeletedTasks: never,
+  listBackups: never,
+  backUpProject: never,
+  restoreBackup: never,
+  exportTasks: never,
   openLink: never,
 }
 
@@ -153,7 +158,7 @@ test('the Project tab shows the name, the local values and the actions', () => {
     '<code>http://127.0.0.1:4317/p/tandem-2/mcp</code><button type="button" class="link" aria-label="Copy MCP URL">Copy</button>',
   )
   expect(html).not.toContain('Reset local state')
-  expect(html).toContain('Deletes this board and its tasks from this machine.')
+  expect(html).toContain('Deletes this board and its tasks from this machine, keeping one last backup')
   expect(html).toContain('Remove…')
 })
 
@@ -236,7 +241,68 @@ test('without deleted tasks, the section says so and Clean up is disabled', () =
   expect(deletedView(null)).toMatch(/disabled="">Clean up…/)
 })
 
-test('the Project tab places Deleted tasks before Remove', () => {
+const backups: BackupInfo[] = [
+  { name: '20261023T090000.000Z', createdAt: '2026-10-23T09:00:00.000Z', size: 40960, tasks: 12 },
+  { name: '20261022T090000.000Z', createdAt: '2026-10-22T09:00:00.000Z', size: 900, tasks: null },
+]
+
+function backupsView(list: BackupInfo[] | null, { notice = null as string | null } = {}) {
+  return renderToStaticMarkup(
+    <BackupsView
+      backups={list}
+      loadError={null}
+      busy={false}
+      notice={notice}
+      error={null}
+      onBackUp={noop}
+      onRestore={noop}
+      onExport={noop}
+    />,
+  )
+}
+
+test('the Backups section lists each backup with Restore, Back up now and Export', () => {
+  const html = backupsView(backups)
+  expect(html).toContain('<h3>Backups</h3>')
+  expect(html).toContain('12 tasks · 40 KB')
+  expect(html).toMatch(/aria-label="Restore the backup from [^"]+">Restore…<\/button>/)
+  // An unreadable backup can't be restored.
+  expect(html).toContain('unreadable · 900 B')
+  expect(html).toMatch(/disabled="">Restore…<\/button>/)
+  expect(html).toContain('>Back up now</button>')
+  expect(html).toContain('>JSON…</button>')
+  expect(html).toContain('>Markdown…</button>')
+  expect(html).toContain('every hour while it changes')
+  expect(html).not.toContain('.tandem')
+})
+
+test('without backups, the section says so', () => {
+  expect(backupsView([])).toContain('No backups yet.')
+  expect(backupsView(null)).toContain('Loading…')
+  expect(backupsView([], { notice: 'Exported to /tmp/x.json.' })).toContain(
+    '<p class="muted" role="status">Exported to /tmp/x.json.</p>',
+  )
+})
+
+test('the restore dialog says what is replaced and how to undo it', () => {
+  const html = renderToStaticMarkup(
+    <RestoreBackupForm
+      when="Oct 23, 09:00"
+      tasks="12 tasks"
+      busy={false}
+      error={null}
+      onSubmit={noop}
+      onCancel={noop}
+    />,
+  )
+  expect(html).toContain('Restore the backup from Oct 23, 09:00?')
+  expect(html).toContain('replaced with the backup&#x27;s 12 tasks')
+  expect(html).toContain('backed up first')
+  expect(html).toContain('<button type="submit" class="danger">Restore backup</button>')
+  expect(html).toContain('>Keep current tasks</button>')
+})
+
+test('the Project tab places Backups and Deleted tasks before Remove', () => {
   const html = renderToStaticMarkup(
     <ProjectSettingsView
       project={project}
@@ -247,8 +313,13 @@ test('the Project tab places Deleted tasks before Remove', () => {
       onName={noop}
       onSaveName={noop}
       onRemove={noop}
+      backups={<section aria-label="Backups" />}
       deletedTasks={<section aria-label="Deleted tasks" />}
     />,
+  )
+  expect(html.indexOf('aria-label="Backups"')).toBeGreaterThan(-1)
+  expect(html.indexOf('aria-label="Backups"')).toBeLessThan(
+    html.indexOf('aria-label="Deleted tasks"'),
   )
   expect(html.indexOf('aria-label="Deleted tasks"')).toBeGreaterThan(-1)
   expect(html.indexOf('aria-label="Deleted tasks"')).toBeLessThan(html.indexOf('Remove…'))

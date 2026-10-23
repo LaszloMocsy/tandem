@@ -7,6 +7,7 @@ Tasks live in the app, on your machine; nothing is added to your repo. Agents cl
 ## How it works
 
 - **Tasks live in the app.** Each project has its own SQLite database in the app's data folder, holding every task with its acceptance criteria and full history: the changelog and the agents' working notes, kept for good. Your repo stays untouched.
+- **Backed up automatically.** Tandem backs up each board every hour while it changes, and when the app starts and quits, keeping every backup from the last day and one a day for 30 days. Restore one from Settings, or export the tasks as JSON or Markdown to keep a copy yourself. Removing a board keeps its last backup.
 - **One board per repo.** A project is identified by its repo, so every git worktree of it opens the same board, and agents in parallel worktrees share it.
 - **Agents work through MCP.** An agent calls `start_task` to claim a task, `log_progress` and `set_blocked` while it works, and `finish_task` when it's done. Claims are leases, so a crashed agent's task can be taken over. Agents add a `Task: <id>` trailer to their commits, so git still links the code to the task.
 - **You stay in charge.** Tasks an agent proposes wait in Backlog until you approve them, and only you can mark finished work reviewed. Deleted tasks can be restored from Settings until you clean them up.
@@ -107,7 +108,7 @@ bun run test        # vitest
 
 | Path | What it is |
 | --- | --- |
-| `core/` | `tandem-board-core`: the task model, the SQLite databases and their migrations, the task service, the Markdown task format, git |
+| `core/` | `tandem-board-core`: the task model, the SQLite databases, their migrations and backups, the task service, the Markdown task format, git |
 | `mcp/` | `tandem-board-mcp`: MCP server on top of core |
 | `desktop/` | `tandem-board-desktop`: the Tauri 2 shell and `tauri.conf.json` |
 | `ui/` | React + TypeScript + Vite frontend |

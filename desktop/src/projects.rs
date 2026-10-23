@@ -8,6 +8,9 @@
 //!
 //! A project is identified by its repo's git common dir, so every worktree
 //! of a repo opens the same project, with one board and one MCP URL.
+//!
+//! Each project's database is backed up while it changes, at most once an
+//! hour, and on launch and quit; see [`Projects::back_up_changed`].
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,10 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
-use jiff::SignedDuration;
+use jiff::tz::TimeZone;
+use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
+use tandem_board_core::db::backup::{self, Backup, backup_dir, set_backups_owner};
 use tandem_board_core::db::{
-    AppDb, Changes, Project, Theme, delete_project_db, folder_name, normalize_project_name,
+    AppDb, Changes, Project, ProjectDb, Theme, delete_project_db, folder_name,
+    normalize_project_name, project_db_path, timestamp_text,
 };
 use tandem_board_core::git;
 use tandem_board_core::markdown::TASK_DIR;
@@ -64,6 +70,34 @@ pub struct AppSettingsInfo {
     /// `system`, `light` or `dark`.
     pub theme: &'static str,
 }
+
+/// A backup of a project's database, as Settings lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupInfo {
+    /// Identifies the backup, such as `20261023T093000.123Z`.
+    pub name: String,
+    /// In `timestamp_text` form.
+    pub created_at: String,
+    /// In bytes.
+    pub size: u64,
+    /// The tasks on its board; `None` if the file can't be read.
+    pub tasks: Option<u64>,
+}
+
+impl From<Backup> for BackupInfo {
+    fn from(backup: Backup) -> Self {
+        Self {
+            name: backup.name,
+            created_at: timestamp_text(backup.at),
+            size: backup.size,
+            tasks: backup.tasks,
+        }
+    }
+}
+
+/// How long a changed project waits after its last backup for the next.
+pub const BACKUP_INTERVAL: SignedDuration = SignedDuration::from_hours(1);
 
 /// What opening a folder did.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -222,20 +256,32 @@ impl Projects {
     }
 
     /// Closes the project, removes it from the list and deletes its
-    /// database, with every task in it. The folder is left alone. Refused
-    /// with `agents_working` while an agent holds a live lease on any of
-    /// its tasks. Returns `false` if there is no such project.
+    /// database, with every task in it. The folder is left alone. A last
+    /// backup is made first and every older backup deleted, so the project
+    /// can still be restored if its repo is opened again. Refused with
+    /// `agents_working` while an agent holds a live lease on any of its
+    /// tasks, and if the last backup fails. Returns `false` if there is no
+    /// such project.
     pub fn remove(&self, id: &str) -> Result<bool, Error> {
+        let Some(project) = lock(&self.app_db).project(id)? else {
+            return Ok(false);
+        };
         let service = lock(&self.open).get(id).cloned();
-        if let Some(service) = service {
-            check_no_agents_working(&service)?;
+        if let Some(service) = &service {
+            check_no_agents_working(service)?;
             // Close the endpoint so no agent can claim a task, then check
             // again for a claim that landed in between.
             self.mcp.endpoints().remove(id);
-            if let Err(e) = check_no_agents_working(&service) {
-                self.mcp.endpoints().insert(id, service);
+            if let Err(e) = check_no_agents_working(service) {
+                self.mcp.endpoints().insert(id, Arc::clone(service));
                 return Err(e);
             }
+        }
+        if let Err(e) = self.last_backup(&project, service.as_deref()) {
+            if let Some(service) = service {
+                self.mcp.endpoints().insert(id, service);
+            }
+            return Err(e);
         }
         lock(&self.open).remove(id);
         lock(&self.failed).remove(id);
@@ -246,6 +292,92 @@ impl Projects {
             report(&format!("cannot delete the database of {id}"), &e);
         }
         Ok(removed)
+    }
+
+    /// Backs up a project that is being removed, from its service or, when
+    /// it is not open, its database file, and deletes every other backup.
+    /// Without a database, the newest backup is the last one.
+    fn last_backup(&self, project: &Project, service: Option<&Service>) -> Result<(), Error> {
+        let dir = self.backup_dir(project)?;
+        let last = match service {
+            Some(service) => Some(service.back_up(&dir)?),
+            None if project_db_path(&self.data_dir, &project.id).is_file() => {
+                let db = ProjectDb::open(&self.data_dir, &project.id)?;
+                Some(backup::write(db.connection(), &dir, Timestamp::now())?)
+            }
+            None => backup::list(&dir)?.into_iter().next(),
+        };
+        if let Some(last) = last {
+            backup::keep_only(&dir, &last.name)?;
+        }
+        Ok(())
+    }
+
+    /// The project's backup folder, marked as the project's.
+    fn backup_dir(&self, project: &Project) -> Result<PathBuf, Error> {
+        let dir = backup_dir(&self.data_dir, &project.id);
+        set_backups_owner(&dir, &project.git_dir)?;
+        Ok(dir)
+    }
+
+    /// The project's backups, the newest first.
+    pub fn backups(&self, id: &str) -> Result<Vec<BackupInfo>, Error> {
+        let dir = backup_dir(&self.data_dir, id);
+        Ok(backup::list(&dir)?
+            .into_iter()
+            .map(BackupInfo::from)
+            .collect())
+    }
+
+    /// Backs up an open project now, then deletes the backups it no longer
+    /// needs to keep.
+    pub fn back_up(&self, id: &str) -> Result<BackupInfo, Error> {
+        let service = self.service(id)?;
+        let project = self.project(id)?;
+        let dir = self.backup_dir(&project)?;
+        let backup = service.back_up(&dir)?;
+        backup::prune(&dir, Timestamp::now(), &TimeZone::system())?;
+        Ok(backup.into())
+    }
+
+    /// Replaces an open project's tasks with one of its backups; see
+    /// `Service::restore_backup`. Returns the backup of the tasks as they
+    /// were, which undoes the restore.
+    pub fn restore_backup(&self, id: &str, name: &str) -> Result<BackupInfo, Error> {
+        let service = self.service(id)?;
+        let dir = self.backup_dir(&self.project(id)?)?;
+        Ok(service.restore_backup(&dir, name)?.into())
+    }
+
+    /// Backs up every open project changed since its newest backup, if that
+    /// is at least `min_age` old, and deletes the backups no longer needed.
+    /// Failures are reported to stderr.
+    pub fn back_up_changed(&self, min_age: SignedDuration) {
+        let open: Vec<String> = lock(&self.open).keys().cloned().collect();
+        let now = Timestamp::now();
+        for id in open {
+            let due = backup::list(&backup_dir(&self.data_dir, &id))
+                .map(|backups| match backups.first() {
+                    None => true,
+                    Some(newest) => {
+                        now.duration_since(newest.at) >= min_age
+                            && backup::changed_since(
+                                &project_db_path(&self.data_dir, &id),
+                                newest.at,
+                            )
+                    }
+                })
+                .unwrap_or(true);
+            if due && let Err(e) = self.back_up(&id) {
+                eprintln!("tandem: cannot back up {id}: {}", e.message);
+            }
+        }
+    }
+
+    fn project(&self, id: &str) -> Result<Project, Error> {
+        lock(&self.app_db)
+            .project(id)?
+            .ok_or_else(|| Error::project_not_found(id))
     }
 
     /// Renames the project, or gives it back its folder's name when `name`
@@ -733,6 +865,101 @@ mod tests {
         drop(service);
         assert!(env.projects.remove(&id).unwrap());
         assert!(env.projects.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_a_project_keeps_only_a_last_backup_for_its_repo() {
+        let env = Env::new(TempDir::new().unwrap());
+        let (_dir, repo) = repo();
+        let id = env.open(&repo).id;
+        let service = env.projects.service(&id).unwrap();
+        create(&service, "First");
+        env.projects.back_up(&id).unwrap();
+        create(&service, "Second");
+        env.projects.back_up(&id).unwrap();
+        create(&service, "Third");
+        drop(service);
+        assert_eq!(env.projects.backups(&id).unwrap().len(), 2);
+
+        assert!(env.projects.remove(&id).unwrap());
+        let backups = env.projects.backups(&id).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].tasks, Some(3));
+
+        // Opening the repo again finds the backup, which brings the tasks
+        // back.
+        let again = env.open(&repo);
+        assert_eq!(again.id, id);
+        assert!(env.titles(&id).is_empty());
+        env.projects.restore_backup(&id, &backups[0].name).unwrap();
+        let mut titles = env.titles(&id);
+        titles.sort();
+        assert_eq!(titles, ["First", "Second", "Third"]);
+    }
+
+    #[test]
+    fn a_project_that_is_not_open_is_backed_up_before_it_is_removed() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
+        create(&env.projects.service(&id).unwrap(), "Kept in the backup");
+        drop(folder);
+        let env = env.relaunch();
+
+        assert!(env.projects.remove(&id).unwrap());
+        let backups = env.projects.backups(&id).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].tasks, Some(1));
+    }
+
+    #[test]
+    fn only_changed_projects_are_backed_up() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
+        // A project without backups gets one.
+        env.projects.back_up_changed(SignedDuration::ZERO);
+        assert_eq!(env.projects.backups(&id).unwrap().len(), 1);
+        env.projects.back_up_changed(SignedDuration::ZERO);
+        assert_eq!(env.projects.backups(&id).unwrap().len(), 1);
+
+        thread::sleep(Duration::from_millis(20));
+        create(&env.projects.service(&id).unwrap(), "New");
+        // Changed, but the newest backup is too recent.
+        env.projects.back_up_changed(SignedDuration::from_hours(1));
+        assert_eq!(env.projects.backups(&id).unwrap().len(), 1);
+        env.projects.back_up_changed(SignedDuration::ZERO);
+        let backups = env.projects.backups(&id).unwrap();
+        assert_eq!(backups.len(), 2);
+        assert_eq!(backups[0].tasks, Some(1));
+    }
+
+    #[test]
+    fn a_restore_is_forwarded_and_can_be_undone() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
+        let service = env.projects.service(&id).unwrap();
+        let empty = env.projects.back_up(&id).unwrap();
+        let task = create(&service, "Undone");
+        env.events.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let undo = env.projects.restore_backup(&id, &empty.name).unwrap();
+        let (project, changes) = env.events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(project, id);
+        assert!(changes.removed.contains(&task));
+        assert!(env.titles(&id).is_empty());
+
+        env.projects.restore_backup(&id, &undo.name).unwrap();
+        assert_eq!(env.titles(&id), ["Undone"]);
+        assert_eq!(
+            env.projects.restore_backup(&id, "nope").unwrap_err().code,
+            "invalid_argument"
+        );
+        assert_eq!(
+            env.projects.back_up("missing").unwrap_err().code,
+            "project_not_found"
+        );
     }
 
     #[test]

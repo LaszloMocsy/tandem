@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, MAIN_DB, Transaction, TransactionBehavior};
 
 use super::{DB_DIR, DbError, io_error, is_valid_project_id, schema};
 use crate::model::TaskId;
@@ -89,6 +89,18 @@ impl ProjectDb {
 
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Replaces the whole database with the backup at `path`, then brings
+    /// its schema up to date. The copy is one write, so a failure leaves
+    /// the database as it was.
+    pub(crate) fn restore_from(&mut self, path: &Path) -> Result<(), DbError> {
+        self.conn
+            .restore(MAIN_DB, path, None::<fn(rusqlite::backup::Progress)>)?;
+        // A backup is not in WAL mode, and the copy brings its header along.
+        self.conn.pragma_update(None, "journal_mode", "WAL")?;
+        schema::migrate(&mut self.conn, path, schema::PROJECT_MIGRATIONS)?;
+        Ok(())
     }
 
     /// Starts a `BEGIN IMMEDIATE` transaction, which takes the write lock

@@ -83,13 +83,14 @@ function remove(working: { id: string; title: string }[] | null, error: string |
   )
 }
 
-test('removing says the tasks go for good, the codebase stays, and offers two choices', () => {
+test('removing says the tasks go but a last backup stays, the codebase stays, and offers two choices', () => {
   const html = remove([])
   expect(html).toContain('Remove “tandem” from Tandem?')
   expect(html).toContain("Tandem won&#x27;t touch <code>/repos/tandem</code>")
-  expect(html).toContain('deletes this board&#x27;s database from this machine for good')
+  expect(html).toContain('deletes this board&#x27;s database from this machine')
   expect(html).toContain('every task, its changelog and working log')
-  expect(html).toContain('This can&#x27;t be undone.')
+  expect(html).toContain('keeps one last backup and deletes the others')
+  expect(html).toContain('restore the last backup from Settings')
   expect(html).toContain('<button type="submit" class="danger">Remove from Tandem</button>')
   expect(html).toContain('>Keep board</button>')
 })
