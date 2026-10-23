@@ -1,6 +1,6 @@
 [package]
 name = "tandem-board-core"
-description = "Task store, index and service for Tandem"
+description = "Task database and service for Tandem"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,13 +10,11 @@ publish.workspace = true
 [dependencies]
 getrandom = "0.4.3"
 jiff = { version = "0.2.38", features = ["serde"] }
-notify = "8.2.0"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde-saphyr = { version = "2.0.0", default-features = false, features = ["deserialize"] }
 serde_json = "1.0.154"
-sha2 = "0.11.1"
-tempfile = "3.27.0"
 thiserror = "2.0.21"
-toml = { version = "1.1.8", default-features = false, features = ["std", "parse", "serde"] }
-toml_edit = { version = "0.25.17", default-features = false, features = ["parse", "display"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

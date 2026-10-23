@@ -95,7 +95,7 @@ export function Card({
         </div>
       )}
 
-      <h3 className="card-title">{task.title || <span className="muted">Unreadable file</span>}</h3>
+      <h3 className="card-title">{task.title}</h3>
 
       {task.labels.length > 0 && (
         <ul className="labels" aria-label="Labels">
@@ -107,7 +107,7 @@ export function Card({
         </ul>
       )}
 
-      {(lease || task.blocked !== null || task.problem || unmet.length > 0 || children) && (
+      {(lease || task.blocked !== null || unmet.length > 0 || children) && (
         <div className="badges">
           {lease &&
             (lease.live ? (
@@ -127,11 +127,6 @@ export function Card({
           {task.blocked !== null && (
             <span className="badge blocked" title={task.blocked}>
               Blocked
-            </span>
-          )}
-          {task.problem && (
-            <span className="badge invalid" title={task.problem.message}>
-              Invalid
             </span>
           )}
           {unmet.length > 0 && (

@@ -2,10 +2,6 @@
 
 Thanks for helping. Small, focused pull requests are the easiest to review; for anything larger, open an issue first so we can agree on the approach.
 
-## Start from the spec
-
-[docs/spec.md](docs/spec.md) is the source of truth for how Tandem behaves: the task file format, the states and transitions, the MCP tools and the UI. If your change needs to differ from it, update the spec in the same pull request and say why, or open an issue to discuss it first.
-
 ## Setting up
 
 Follow [Building from source](README.md#building-from-source) in the README: you need Rust, Bun, the Tauri prerequisites for your platform and the Tauri CLI. Then:
@@ -15,20 +11,16 @@ bun install --cwd ui
 cargo tauri dev
 ```
 
-The app keeps its project list and per-project databases in its data folder, such as `~/Library/Application Support/com.laszlomocsy.tandem` on macOS. To try changes without touching your real projects, use a scratch git repo.
+The app keeps its project list and every project's tasks in databases in its data folder, such as `~/Library/Application Support/com.laszlomocsy.tandem/db` on macOS. To try changes without touching your real boards, use a scratch git repo, and remove its project afterwards.
 
 ## Rules the code follows
 
 - `core` and `mcp` never depend on Tauri, directly or through another crate. Tauri code lives only in `desktop`.
 - Every change to `core` comes with tests.
-- Every file write and database change goes through the task service in `core`. The UI and the MCP server never write files themselves.
-- Task-file writes keep diffs minimal:
-  - Frontmatter is written in the spec's fixed key order, and empty optional fields are left out.
-  - Only the lines the app owns change. The body is kept byte for byte, including unknown sections, except for changelog appends.
-  - The changelog is append-only, oldest entry first, so diffs only add lines at the end.
-  - Files use LF line endings and end in exactly one newline.
-  - Writes are atomic: a temp file in `.tandem/`, then a rename.
-  - A file that fails to parse is marked invalid and never overwritten.
+- Every database change goes through the task service in `core`, one transaction per call. The UI and the MCP server never touch the databases themselves.
+- The schema is the migrations in `core/src/db/schema.rs`. Change it only by appending a migration, never by editing one that has shipped.
+- A task's events are append-only. Deleted tasks keep their rows until the user cleans them up.
+- The app never writes into a repo.
 - The UI uses plain CSS. Please discuss new dependencies, especially component libraries, in an issue first.
 
 ## Tests and checks
@@ -46,9 +38,9 @@ bun run typecheck   # tsc -b
 bun run test        # vitest
 ```
 
-Some Rust tests run the git CLI in temporary repos, so git must be on your `PATH`; they turn off commit signing and hooks so your own git config doesn't affect them. The file-watcher tests wait for real file events and take a few seconds.
+Some Rust tests run the git CLI in temporary repos, so git must be on your `PATH`; they turn off commit signing and hooks so your own git config doesn't affect them.
 
-Changes to the board should also be tried in the running app with `cargo tauri dev`. The spec's [Build plan and tests](docs/spec.md#build-plan-and-tests) lists the checks that still need a human.
+Changes to the board should also be tried in the running app with `cargo tauri dev`.
 
 ## Commits and pull requests
 

@@ -1,17 +1,15 @@
-use std::fs;
-use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use rusqlite::Connection;
-use tandem_board_core::index::project_db_path;
+use tandem_board_core::db::{Changes, project_db_path, timestamp_text};
+use tandem_board_core::model::{Date, Priority, Status, TaskId, Unmet, UnmetCriterion};
 use tandem_board_core::service::{
-    Actor, Config, Finish, LogKind, NewTask, Service, ServiceError, TaskEdit, TaskFilter,
-    TaskSummary, Written,
+    Actor, Config, Finish, LogKind, NewTask, Saved, Service, ServiceError, TaskEdit, TaskFilter,
+    TaskSummary,
 };
-use tandem_board_core::store::{Date, Priority, ReadOnly, Status, TaskId, Unmet, UnmetCriterion};
 use tempfile::TempDir;
 
 const START: &str = "2026-10-15T09:00:00Z";
@@ -19,7 +17,6 @@ const START: &str = "2026-10-15T09:00:00Z";
 /// A project with a service whose clock only moves when a test moves it.
 struct Env {
     data: TempDir,
-    repo: TempDir,
     now: Arc<Mutex<Timestamp>>,
     service: Service,
 }
@@ -31,28 +28,14 @@ impl Env {
 
     fn with_lease(lease: SignedDuration) -> Self {
         let data = TempDir::new().unwrap();
-        let repo = TempDir::new().unwrap();
         let now = Arc::new(Mutex::new(START.parse::<Timestamp>().unwrap()));
-        let service = open(&data, &repo, &now, lease);
-        Self {
-            data,
-            repo,
-            now,
-            service,
-        }
+        let service = open(&data, &now, lease);
+        Self { data, now, service }
     }
 
     fn advance(&self, secs: i64) {
         let mut now = self.now.lock().unwrap();
         *now += SignedDuration::from_secs(secs);
-    }
-
-    fn path(&self, id: TaskId) -> PathBuf {
-        self.repo.path().join(".tandem").join(id.file_name())
-    }
-
-    fn file(&self, id: TaskId) -> String {
-        fs::read_to_string(self.path(id)).unwrap()
     }
 
     fn db(&self) -> Connection {
@@ -63,11 +46,38 @@ impl Env {
     fn lease(&self, id: TaskId) -> Option<(String, String)> {
         self.db()
             .query_row(
-                "SELECT agent_id, expires_at FROM leases WHERE task_id = ?1",
+                "SELECT a.name, l.expires_at FROM leases l
+                 JOIN actors a ON a.id = l.actor JOIN tasks t ON t.seq = l.task
+                 WHERE t.id = ?1",
                 [id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| {
+                    let ms: i64 = row.get(1)?;
+                    Ok((
+                        row.get(0)?,
+                        timestamp_text(Timestamp::from_millisecond(ms).unwrap()),
+                    ))
+                },
             )
             .ok()
+    }
+
+    /// The task in the Markdown format, as `get_task` shows it.
+    fn markdown(&self, id: TaskId) -> String {
+        self.service.get_task(&Actor::User, id).unwrap().markdown
+    }
+
+    /// The changelog as `who · event` lines, with any text after a colon.
+    fn changelog(&self, id: TaskId) -> Vec<String> {
+        let detail = self.service.get_task(&Actor::User, id).unwrap();
+        detail
+            .content
+            .changelog
+            .iter()
+            .map(|e| match e.text.as_str() {
+                "" => format!("{} · {}", e.who, e.event),
+                text => format!("{} · {}: {text}", e.who, e.event),
+            })
+            .collect()
     }
 
     fn summary(&self, id: TaskId) -> TaskSummary {
@@ -98,14 +108,13 @@ impl Env {
             .unwrap()
             .id
     }
+
+    fn count(&self, sql: &str) -> i64 {
+        self.db().query_row(sql, [], |row| row.get(0)).unwrap()
+    }
 }
 
-fn open(
-    data: &TempDir,
-    repo: &TempDir,
-    now: &Arc<Mutex<Timestamp>>,
-    lease: SignedDuration,
-) -> Service {
+fn open(data: &TempDir, now: &Arc<Mutex<Timestamp>>, lease: SignedDuration) -> Service {
     let clock = Arc::clone(now);
     let config = Config {
         lease_duration: lease,
@@ -113,7 +122,7 @@ fn open(
         clock: Arc::new(move || *clock.lock().unwrap()),
         time_zone: TimeZone::UTC,
     };
-    Service::open(data.path(), "test", repo.path(), config).unwrap()
+    Service::open(data.path(), "test", config).unwrap()
 }
 
 fn agent(name: &str) -> Actor {
@@ -131,16 +140,14 @@ fn finish(summary: &str) -> Finish {
     }
 }
 
-/// `after` is `before` with `status` changed and `appended` added at the end.
-fn assert_appended(before: &str, after: &str, from: &str, to: &str, appended: &str) {
-    let expected = before.replacen(&format!("status: {from}\n"), &format!("status: {to}\n"), 1);
-    assert_eq!(after, format!("{expected}{appended}"));
+fn lines(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
 }
 
 #[test]
 fn agent_tasks_start_in_backlog_and_yours_in_todo() {
     let env = Env::new();
-    let written = env
+    let saved = env
         .service
         .create_task(
             &agent("claude-code-7f2a"),
@@ -153,26 +160,25 @@ fn agent_tasks_start_in_backlog_and_yours_in_todo() {
                     "A test covers two parallel 401 responses".into(),
                 ],
                 priority: Some(Priority::High),
-                labels: vec!["auth".into(), "backend".into(), "auth".into()],
+                labels: vec!["auth".into(), "backend".into(), "Auth".into()],
                 ..NewTask::default()
             },
         )
         .unwrap();
-    let id = written.id;
+    let id = saved.id;
     assert_eq!(
-        written,
-        Written {
+        saved,
+        Saved {
             id,
-            path: format!(".tandem/{id}.md"),
-            status: Status::Backlog,
+            status: Status::Backlog
         }
     );
     // Ids are random, and one YAML would read as a number is quoted.
-    let file = env
-        .file(id)
+    let markdown = env
+        .markdown(id)
         .replacen(&format!("id: \"{id}\"\n"), &format!("id: {id}\n"), 1);
     assert_eq!(
-        file,
+        markdown,
         format!(
             "---\nid: {id}\ntitle: Fix token refresh race\nstatus: backlog\npriority: high\n\
              labels: [auth, backend]\ncreated: 2026-10-15\n---\n\n\
@@ -185,8 +191,11 @@ fn agent_tasks_start_in_backlog_and_yours_in_todo() {
     );
 
     let mine = env.todo("Mine");
-    assert_eq!(env.summary(mine).status, Status::Todo);
-    assert!(env.file(mine).contains("### 2026-10-15 · sam · created\n"));
+    let summary = env.summary(mine);
+    assert_eq!(summary.status, Status::Todo);
+    assert_eq!(summary.priority, Priority::Medium);
+    assert_eq!(summary.created, Date::constant(2026, 10, 15));
+    assert_eq!(env.changelog(mine), ["sam · created"]);
 }
 
 #[test]
@@ -194,46 +203,30 @@ fn start_task_is_refused_on_a_backlog_task_until_approved() {
     let env = Env::new();
     let a = agent("agent-a");
     let id = env.create(&a, "Proposed", &[]);
-    let before = env.file(id);
     let err = env.service.start_task(&a, id).unwrap_err();
     assert_eq!(err.code(), "invalid_transition");
     assert_eq!(
         err.to_string(),
         format!("cannot start task `{id}` while it is backlog")
     );
-    assert_eq!(env.file(id), before);
+    assert_eq!(env.summary(id).status, Status::Backlog);
 
     // Backlog → Todo: you approve it.
     env.service.approve(id).unwrap();
-    let approved = env.file(id);
-    assert_appended(
-        &before,
-        &approved,
-        "backlog",
-        "todo",
-        "\n### 2026-10-15 · sam · approved\n",
-    );
+    assert_eq!(env.changelog(id), ["agent-a · created", "sam · approved"]);
     env.service.start_task(&a, id).unwrap();
     assert_eq!(env.summary(id).status, Status::InProgress);
 }
 
 #[test]
-fn every_transition_writes_exactly_its_changes() {
+fn every_transition_records_exactly_its_changes() {
     let env = Env::new();
     let (a, b) = (agent("agent-a"), agent("agent-b"));
     let id = env.create(&Actor::User, "Task", &["One", "Two"]);
-    let created = env.file(id);
 
     // Todo → In progress, by an agent: a lease is created.
     env.service.start_task(&a, id).unwrap();
-    let started = env.file(id);
-    assert_appended(
-        &created,
-        &started,
-        "todo",
-        "in_progress",
-        "\n### 2026-10-15 · agent-a · started\n",
-    );
+    assert_eq!(env.summary(id).status, Status::InProgress);
     assert_eq!(
         env.lease(id),
         Some(("agent-a".into(), "2026-10-15T09:15:00.000Z".into()))
@@ -247,7 +240,7 @@ fn every_transition_writes_exactly_its_changes() {
         Some(("agent-a".into(), "2026-10-15T09:20:00.000Z".into()))
     );
 
-    // Blocked on and off, and a note: SQLite only.
+    // Blocked on and off, and a note: the working log, not the changelog.
     env.service
         .set_blocked(&a, id, "Which API version?")
         .unwrap();
@@ -258,7 +251,6 @@ fn every_transition_writes_exactly_its_changes() {
     env.service.set_blocked(&a, id, "").unwrap();
     assert_eq!(env.summary(id).blocked, None);
     env.service.log_progress(&a, id, "Read the code.").unwrap();
-    assert_eq!(env.file(id), started);
     let log = env.service.get_task(&a, id).unwrap().work_log;
     assert_eq!(
         log.iter()
@@ -270,19 +262,20 @@ fn every_transition_writes_exactly_its_changes() {
             (Some("agent-a"), LogKind::Note, "Read the code."),
         ]
     );
+    assert_eq!(log[2].created_at, "2026-10-15T09:05:00.000Z");
+    assert_eq!(env.changelog(id), ["sam · created", "agent-a · started"]);
 
-    // A milestone changelog entry.
+    // A milestone.
     env.service
         .add_changelog_entry(&a, id, "Halfway.", vec!["src/a.rs".into()])
         .unwrap();
-    let milestone = env.file(id);
     assert_eq!(
-        milestone,
-        format!("{started}\n### 2026-10-15 · agent-a · milestone\nHalfway.\nFiles: src/a.rs\n")
+        env.changelog(id).last().unwrap(),
+        "agent-a · milestone: Halfway.\nFiles: src/a.rs"
     );
 
-    // In progress → Review: criteria ticked, changelog with summary, lease
-    // released.
+    // In progress → Review: criteria ticked, a finished entry with the
+    // summary, lease released.
     env.service
         .finish_task(
             &a,
@@ -296,58 +289,41 @@ fn every_transition_writes_exactly_its_changes() {
             },
         )
         .unwrap();
-    let finished = env.file(id);
-    assert_appended(
-        &milestone
-            .replace("- [ ] One", "- [x] One")
-            .replace("- [ ] Two", "- [x] Two"),
-        &finished,
-        "in_progress",
-        "finished",
-        "\n### 2026-10-15 · agent-a · finished\nDid it.\nFiles: src/a.rs, src/b.rs\n\
-         Follow-ups: none\n",
+    let markdown = env.markdown(id);
+    assert!(markdown.contains("status: finished\n"), "{markdown}");
+    assert!(markdown.contains("- [x] One\n- [x] Two\n"), "{markdown}");
+    assert!(
+        markdown.ends_with(
+            "### 2026-10-15 · agent-a · finished\nDid it.\nFiles: src/a.rs, src/b.rs\n\
+             Follow-ups: none\n"
+        ),
+        "{markdown}"
     );
     assert_eq!(env.lease(id), None);
 
-    // Review → In progress: reopen with feedback, stored for the next agent.
+    // Review → In progress: reopen with feedback, for the next agent.
     env.service.reopen(id, "Also handle 403.").unwrap();
-    let reopened = env.file(id);
-    assert_appended(
-        &finished,
-        &reopened,
-        "finished",
-        "in_progress",
-        "\n### 2026-10-15 · sam · reopened\nAlso handle 403.\n",
-    );
     let detail = env.service.get_task(&b, id).unwrap();
     assert_eq!(detail.review_feedback.as_deref(), Some("Also handle 403."));
-    assert_eq!(detail.markdown, reopened);
+    assert!(
+        detail
+            .markdown
+            .ends_with("### 2026-10-15 · sam · reopened\nAlso handle 403.\n")
+    );
     let last = detail.work_log.last().unwrap();
     assert_eq!(
-        (last.agent_id.as_deref(), last.kind),
-        (None, LogKind::Feedback)
+        (last.agent_id.as_deref(), last.kind, last.message.as_str()),
+        (None, LogKind::Feedback, "Also handle 403.")
     );
     assert_eq!(env.lease(id), None);
 
     // The next agent picks the reopened task up.
     env.service.start_task(&b, id).unwrap();
-    let restarted = env.file(id);
-    assert_eq!(
-        restarted,
-        format!("{reopened}\n### 2026-10-15 · agent-b · started\n")
-    );
     assert_eq!(env.lease(id).unwrap().0, "agent-b");
 
     // In progress → Todo: released with a note, lease removed.
     env.service.release_task(&b, id, "Out of time.").unwrap();
-    let released = env.file(id);
-    assert_appended(
-        &restarted,
-        &released,
-        "in_progress",
-        "todo",
-        "\n### 2026-10-15 · agent-b · released\nOut of time.\n",
-    );
+    assert_eq!(env.summary(id).status, Status::Todo);
     assert_eq!(env.lease(id), None);
 
     // Todo → In progress and on to Review, by you: no lease.
@@ -356,19 +332,48 @@ fn every_transition_writes_exactly_its_changes() {
     env.service
         .finish_task(&Actor::User, id, finish("Finished it myself."))
         .unwrap();
-    let finished = env.file(id);
 
-    // Review → Done: status and reviewed_at only, no changelog entry.
+    // Review → Done: status and reviewed_at, with a reviewed entry.
     env.advance(86_400);
     env.service.mark_reviewed(id).unwrap();
+    let detail = env.service.get_task(&Actor::User, id).unwrap();
+    assert_eq!(detail.summary.status, Status::Done);
     assert_eq!(
-        env.file(id),
-        finished.replace(
-            "status: finished\ncreated: 2026-10-15\n",
-            "status: done\ncreated: 2026-10-15\nreviewed_at: 2026-10-16\n"
-        )
+        detail.content.reviewed_at,
+        Some(Date::constant(2026, 10, 16))
     );
-    assert_eq!(env.summary(id).status, Status::Done);
+    assert!(detail.markdown.contains(
+        "status: done\npriority: medium\ncreated: 2026-10-15\nreviewed_at: 2026-10-16\n"
+    ));
+    assert_eq!(
+        env.changelog(id),
+        lines(&[
+            "sam · created",
+            "agent-a · started",
+            "agent-a · milestone: Halfway.\nFiles: src/a.rs",
+            "agent-a · finished: Did it.\nFiles: src/a.rs, src/b.rs\nFollow-ups: none",
+            "sam · reopened: Also handle 403.",
+            "agent-b · started",
+            "agent-b · released: Out of time.",
+            "sam · started",
+            "sam · finished: Finished it myself.",
+            "sam · reviewed",
+        ])
+    );
+
+    // Moving out of done clears reviewed_at.
+    env.db()
+        .execute("UPDATE tasks SET status = 'finished'", [])
+        .unwrap();
+    env.service.reopen(id, "Not quite.").unwrap();
+    assert_eq!(
+        env.service
+            .get_task(&Actor::User, id)
+            .unwrap()
+            .content
+            .reviewed_at,
+        None
+    );
 }
 
 #[test]
@@ -390,71 +395,58 @@ fn invalid_transitions_are_refused_and_change_nothing() {
         .finish_task(&Actor::User, done, finish("x"))
         .unwrap();
     env.service.mark_reviewed(done).unwrap();
+    let events = env.count("SELECT count(*) FROM events");
 
     let u = Actor::User;
-    let attempts: Vec<(&str, TaskId, Result<Written, ServiceError>)> = vec![
-        ("approve todo", todo, env.service.approve(todo)),
-        (
-            "approve in_progress",
-            in_progress,
-            env.service.approve(in_progress),
-        ),
-        (
-            "start backlog (you)",
-            backlog,
-            env.service.start_task(&u, backlog),
-        ),
+    let attempts: Vec<(&str, Result<Saved, ServiceError>)> = vec![
+        ("approve todo", env.service.approve(todo)),
+        ("approve in_progress", env.service.approve(in_progress)),
+        ("start backlog (you)", env.service.start_task(&u, backlog)),
         (
             "start in_progress (you)",
-            in_progress,
             env.service.start_task(&u, in_progress),
         ),
-        (
-            "start finished",
-            finished,
-            env.service.start_task(&a, finished),
-        ),
-        ("start done", done, env.service.start_task(&a, done)),
+        ("start finished", env.service.start_task(&a, finished)),
+        ("start done", env.service.start_task(&a, done)),
         (
             "finish todo",
-            todo,
             env.service.finish_task(&u, todo, finish("x")),
         ),
         (
             "finish done",
-            done,
             env.service.finish_task(&u, done, finish("x")),
         ),
-        ("release todo", todo, env.service.release_task(&u, todo, "")),
+        ("release todo", env.service.release_task(&u, todo, "")),
         (
             "release finished",
-            finished,
             env.service.release_task(&u, finished, ""),
         ),
-        (
-            "review in_progress",
-            in_progress,
-            env.service.mark_reviewed(in_progress),
-        ),
-        ("review done", done, env.service.mark_reviewed(done)),
-        ("reopen todo", todo, env.service.reopen(todo, "x")),
-        ("reopen done", done, env.service.reopen(done, "x")),
+        ("review in_progress", env.service.mark_reviewed(in_progress)),
+        ("review done", env.service.mark_reviewed(done)),
+        ("reopen todo", env.service.reopen(todo, "x")),
+        ("reopen done", env.service.reopen(done, "x")),
         (
             "milestone todo",
-            todo,
             env.service.add_changelog_entry(&u, todo, "x", vec![]),
         ),
     ];
-    let files: Vec<String> = [backlog, todo, in_progress, finished, done]
-        .map(|id| env.file(id))
-        .to_vec();
-    for (name, _, result) in attempts {
+    for (name, result) in attempts {
         assert_eq!(code(result), "invalid_transition", "{name}");
     }
-    let after: Vec<String> = [backlog, todo, in_progress, finished, done]
-        .map(|id| env.file(id))
+    assert_eq!(env.count("SELECT count(*) FROM events"), events);
+    let statuses: Vec<Status> = [backlog, todo, in_progress, finished, done]
+        .map(|id| env.summary(id).status)
         .to_vec();
-    assert_eq!(after, files);
+    assert_eq!(
+        statuses,
+        [
+            Status::Backlog,
+            Status::Todo,
+            Status::InProgress,
+            Status::Finished,
+            Status::Done
+        ]
+    );
 }
 
 #[test]
@@ -482,16 +474,16 @@ fn only_the_holder_or_you_may_act_on_a_task_in_progress() {
     assert_eq!(code(env.service.release_task(&b, id, "x")), "not_holder");
     assert_eq!(code(env.service.start_task(&b, id)), "claimed_by_other");
     // Starting again as the holder changes nothing.
-    let before = env.file(id);
+    let events = env.count("SELECT count(*) FROM events");
     env.service.start_task(&a, id).unwrap();
-    assert_eq!(env.file(id), before);
+    assert_eq!(env.count("SELECT count(*) FROM events"), events);
 
     // You may always act, from the board.
     env.service
         .log_progress(&Actor::User, id, "Note from you.")
         .unwrap();
     env.service.release_task(&Actor::User, id, "").unwrap();
-    assert!(env.file(id).ends_with("### 2026-10-15 · sam · released\n"));
+    assert_eq!(env.changelog(id).last().unwrap(), "sam · released");
     assert_eq!(env.lease(id), None);
     // No lease, so no agent holds it.
     let err = env.service.log_progress(&a, id, "x").unwrap_err();
@@ -524,7 +516,10 @@ fn start_task_waits_for_every_dependency_to_be_done() {
         err.to_string(),
         format!("task `{id}` depends on tasks that are not done: {dep}")
     );
-    assert!(env.service.next_task(&a, None, None).unwrap().unwrap().id == dep);
+    assert_eq!(
+        env.service.next_task(&a, None, None).unwrap().unwrap().id,
+        dep
+    );
 
     env.service.start_task(&Actor::User, dep).unwrap();
     env.service
@@ -540,6 +535,7 @@ fn start_task_waits_for_every_dependency_to_be_done() {
 fn one_hundred_concurrent_starts_have_exactly_one_winner() {
     let env = Env::new();
     let id = env.todo("Contended");
+    let db = env.db();
     let service = Arc::new(env.service);
     let barrier = Arc::new(Barrier::new(100));
     let handles: Vec<_> = (0..100)
@@ -562,9 +558,16 @@ fn one_hundred_concurrent_starts_have_exactly_one_winner() {
             .filter(|r| r.is_err())
             .all(|r| *r == Err("claimed_by_other"))
     );
-    let file = fs::read_to_string(env.repo.path().join(".tandem").join(id.file_name())).unwrap();
-    assert_eq!(file.matches("· started").count(), 1);
-    assert!(file.contains(&format!("· agent-{} · started", winners[0])));
+    let started: Vec<String> = db
+        .prepare(
+            "SELECT a.name FROM events e JOIN actors a ON a.id = e.actor WHERE e.kind = 'started'",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(started, [format!("agent-{}", winners[0])]);
 }
 
 #[test]
@@ -573,12 +576,8 @@ fn concurrent_starts_through_two_service_instances_have_one_winner() {
     // them apart.
     let env = Env::new();
     let id = env.todo("Contended");
-    let other = Arc::new(open(
-        &env.data,
-        &env.repo,
-        &env.now,
-        SignedDuration::from_mins(15),
-    ));
+    let other = Arc::new(open(&env.data, &env.now, SignedDuration::from_mins(15)));
+    let db = env.db();
     let first = Arc::new(env.service);
     let barrier = Arc::new(Barrier::new(100));
     let handles: Vec<_> = (0..100)
@@ -605,8 +604,14 @@ fn concurrent_starts_through_two_service_instances_have_one_winner() {
             .filter(|r| r.is_err())
             .all(|r| *r == Err("claimed_by_other"))
     );
-    let file = fs::read_to_string(env.repo.path().join(".tandem").join(id.file_name())).unwrap();
-    assert_eq!(file.matches("· started").count(), 1);
+    let started: i64 = db
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'started'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(started, 1);
 }
 
 #[test]
@@ -630,14 +635,10 @@ fn a_stale_lease_can_be_taken_over() {
     env.advance(11);
     let lease = env.summary(id).lease.unwrap();
     assert_eq!((lease.agent_id.as_str(), lease.live), ("agent-a", false));
-    let before = env.file(id);
     env.service.start_task(&b, id).unwrap();
     assert_eq!(
-        env.file(id),
-        format!(
-            "{before}\n### 2026-10-15 · agent-b · started\n\
-             Took over from agent-a after its lease expired.\n"
-        )
+        env.changelog(id).last().unwrap(),
+        "agent-b · started: Took over from agent-a after its lease expired."
     );
     let lease = env.summary(id).lease.unwrap();
     assert_eq!((lease.agent_id.as_str(), lease.live), ("agent-b", true));
@@ -654,7 +655,7 @@ fn finish_ticks_met_criteria_and_requires_a_reason_for_the_rest() {
     let a = agent("agent-a");
     let id = env.create(&Actor::User, "Task", &["One", "Two", "Three"]);
     env.service.start_task(&a, id).unwrap();
-    let before = env.file(id);
+    let before = env.markdown(id);
 
     let attempt = |met: Vec<u32>, unmet: Vec<(u32, &str)>| {
         env.service.finish_task(
@@ -690,29 +691,35 @@ fn finish_ticks_met_criteria_and_requires_a_reason_for_the_rest() {
         code(attempt(vec![1], vec![(2, "x"), (3, " ")])),
         "invalid_argument"
     );
-    assert_eq!(env.file(id), before);
-    assert_eq!(env.summary(id).status, Status::InProgress);
+    assert_eq!(env.markdown(id), before);
 
     attempt(vec![3, 1], vec![(2, "needs a staging account")]).unwrap();
-    assert_appended(
-        &before
-            .replace("- [ ] One", "- [x] One")
-            .replace("- [ ] Three", "- [x] Three"),
-        &env.file(id),
-        "in_progress",
-        "finished",
-        "\n### 2026-10-15 · agent-a · finished\nDone.\nUnmet: 2 (needs a staging account)\n",
-    );
-    let summary = env.summary(id);
+    let markdown = env.markdown(id);
+    assert!(markdown.contains("- [x] One\n- [ ] Two\n- [x] Three\n"));
+    assert!(markdown.ends_with(
+        "### 2026-10-15 · agent-a · finished\nDone.\nUnmet: 2 (needs a staging account)\n"
+    ));
     assert_eq!(
-        summary.unmet,
+        env.summary(id).unmet,
         [UnmetCriterion {
             number: 2,
             text: "Two".into(),
             reason: "needs a staging account".into(),
         }]
     );
-    assert_eq!(summary.created, Some(Date::constant(2026, 10, 15)));
+
+    // Ticked by you since, the criterion drops off the badge.
+    env.service
+        .update_task(
+            &Actor::User,
+            id,
+            TaskEdit {
+                acceptance_criteria: Some(lines(&["One", "Three"])),
+                ..TaskEdit::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(env.summary(id).unmet, []);
 
     // Reopened, the card is no longer in Review and shows no badge.
     env.service.reopen(id, "Try again.").unwrap();
@@ -759,8 +766,10 @@ fn create_and_update_refuse_loops_and_missing_tasks() {
             },
         )
     };
+    let tasks = env.count("SELECT count(*) FROM tasks");
     assert_eq!(code(create(Some(missing), vec![])), "parent_not_found");
     assert_eq!(code(create(None, vec![missing])), "not_found");
+    assert_eq!(env.count("SELECT count(*) FROM tasks"), tasks);
 
     let edit = |parent, depends_on| {
         env.service.update_task(
@@ -773,17 +782,26 @@ fn create_and_update_refuse_loops_and_missing_tasks() {
             },
         )
     };
-    let before = env.file(top);
+    let before = env.markdown(top);
     assert_eq!(code(edit(Some(Some(child)), None)), "cycle_detected");
     assert_eq!(code(edit(None, Some(vec![child]))), "cycle_detected");
     assert_eq!(code(edit(Some(Some(top)), None)), "cycle_detected");
     assert_eq!(code(edit(Some(Some(missing)), None)), "parent_not_found");
     assert_eq!(code(edit(None, Some(vec![missing]))), "not_found");
-    assert_eq!(env.file(top), before);
+    assert_eq!(env.markdown(top), before);
     assert_eq!(
         code(env.service.update_task(&u, missing, TaskEdit::default())),
         "not_found"
     );
+
+    let detail = env.service.get_task(&u, top).unwrap();
+    assert_eq!(
+        detail.children.iter().map(|c| c.id).collect::<Vec<_>>(),
+        [child]
+    );
+    let detail = env.service.get_task(&u, child).unwrap();
+    assert_eq!(detail.parent.map(|p| p.id), Some(top));
+    assert_eq!(detail.summary.depends_on, [top]);
 }
 
 #[test]
@@ -792,7 +810,7 @@ fn update_task_edits_the_spec_and_nothing_else() {
     let a = agent("agent-a");
     let id = env.create(&Actor::User, "Task", &["One"]);
     env.service.start_task(&a, id).unwrap();
-    let before = env.file(id);
+    let before = env.markdown(id);
 
     // You may change the spec of a task in progress; it stays in progress.
     env.service
@@ -801,7 +819,7 @@ fn update_task_edits_the_spec_and_nothing_else() {
             id,
             TaskEdit {
                 title: Some("Better title".into()),
-                description: Some("New description.".into()),
+                description: Some("New description.\n\n## Any heading\nis fine.".into()),
                 relevant_files: Some(vec!["src/a.rs".into()]),
                 priority: Some(Priority::Low),
                 labels: Some(vec!["ui".into()]),
@@ -810,13 +828,13 @@ fn update_task_edits_the_spec_and_nothing_else() {
         )
         .unwrap();
     assert_eq!(
-        env.file(id),
+        env.markdown(id),
         before
             .replace(
-                "title: Task\nstatus: in_progress\n",
+                "title: Task\nstatus: in_progress\npriority: medium\n",
                 "title: Better title\nstatus: in_progress\npriority: low\nlabels: [ui]\n"
             )
-            .replace("Task.\n", "New description.\n")
+            .replace("Task.\n", "New description.\n\n## Any heading\nis fine.\n")
             .replace(
                 "\n## Changelog",
                 "\n## Relevant files\n- src/a.rs\n\n## Changelog"
@@ -824,93 +842,40 @@ fn update_task_edits_the_spec_and_nothing_else() {
     );
     assert_eq!(env.summary(id).status, Status::InProgress);
 
-    // An edit that changes nothing doesn't write.
-    let mtime = fs::metadata(env.path(id)).unwrap().modified().unwrap();
-    env.service
-        .update_task(
-            &a,
-            id,
-            TaskEdit {
-                priority: Some(Priority::Low),
-                ..TaskEdit::default()
-            },
-        )
-        .unwrap();
-    assert_eq!(
-        fs::metadata(env.path(id)).unwrap().modified().unwrap(),
-        mtime
-    );
+    // An edit that changes nothing records nothing.
+    let events = env.subscribe_count(|| {
+        env.service
+            .update_task(
+                &a,
+                id,
+                TaskEdit {
+                    priority: Some(Priority::Low),
+                    labels: Some(vec!["UI".into()]),
+                    ..TaskEdit::default()
+                },
+            )
+            .unwrap();
+    });
+    assert_eq!(events, 0);
 
-    // Text that would break the sections is refused.
+    // Multi-line values are refused where one line is expected.
     let edit = TaskEdit {
-        description: Some("## Sneaky heading".into()),
+        title: Some("Two\nlines".into()),
         ..TaskEdit::default()
     };
     assert_eq!(
-        code(env.service.update_task(&a, id, edit)),
+        code(env.service.update_task(&Actor::User, id, edit)),
         "invalid_argument"
     );
 }
 
-#[test]
-fn an_invalid_file_is_refused_and_never_written() {
-    let env = Env::new();
-    let id = env.todo("Task");
-    let broken = env.file(id).replace("status: todo", "status: [");
-    fs::write(env.path(id), &broken).unwrap();
-    let err = env.service.start_task(&agent("a"), id).unwrap_err();
-    assert_eq!(err.code(), "invalid_file");
-    assert_eq!(code(env.service.approve(id)), "invalid_file");
-    assert_eq!(env.file(id), broken);
-    let detail = env.service.get_task(&Actor::User, id).unwrap();
-    assert_eq!((detail.markdown, detail.content), (broken, None));
-
-    let missing: TaskId = "zzzzzzz".parse().unwrap();
-    assert_eq!(
-        code(env.service.start_task(&agent("a"), missing)),
-        "not_found"
-    );
-    assert_eq!(
-        code(env.service.get_task(&Actor::User, missing)),
-        "not_found"
-    );
-    assert_eq!(
-        code(env.service.log_progress(&Actor::User, missing, "x")),
-        "not_found"
-    );
-}
-
-#[test]
-fn a_read_only_project_refuses_file_writes() {
-    let data = TempDir::new().unwrap();
-    let repo = TempDir::new().unwrap();
-    fs::create_dir(repo.path().join(".tandem")).unwrap();
-    fs::write(
-        repo.path().join(".tandem/config.toml"),
-        "format_version = 2\n",
-    )
-    .unwrap();
-    let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
-    assert_eq!(
-        service.read_only(),
-        Some(&ReadOnly::NewerFormat { version: 2 })
-    );
-    let err = service
-        .create_task(
-            &Actor::User,
-            NewTask {
-                title: "x".into(),
-                ..NewTask::default()
-            },
-        )
-        .unwrap_err();
-    assert_eq!(err.code(), "read_only");
-    assert!(
-        service
-            .list_tasks(&Actor::User, &TaskFilter::default())
-            .unwrap()
-            .is_empty()
-    );
+impl Env {
+    /// How many change notifications `f` sends.
+    fn subscribe_count(&self, f: impl FnOnce()) -> usize {
+        let events = self.service.subscribe();
+        f();
+        events.try_iter().count()
+    }
 }
 
 #[test]
@@ -923,6 +888,7 @@ fn next_task_picks_the_highest_priority_ready_task() {
                 &Actor::User,
                 NewTask {
                     title: title.into(),
+                    description: format!("About {}.", title.to_lowercase()),
                     priority,
                     labels: labels.into_iter().map(String::from).collect(),
                     ..NewTask::default()
@@ -945,53 +911,32 @@ fn next_task_picks_the_highest_priority_ready_task() {
     assert_eq!(next(&a, None), Some(high));
     env.service.start_task(&a, high).unwrap();
     assert_eq!(next(&b, None), Some(medium));
-    assert_eq!(next(&b, Some("ui")), Some(low));
+    assert_eq!(next(&b, Some("UI")), Some(low));
 
-    let ready = env
-        .service
-        .list_tasks(
-            &b,
-            &TaskFilter {
-                ready_only: true,
-                ..TaskFilter::default()
-            },
-        )
-        .unwrap();
-    assert_eq!(ready.iter().map(|t| t.id).collect::<Vec<_>>().len(), 2);
-    let found = env
-        .service
-        .list_tasks(
-            &b,
-            &TaskFilter {
-                query: Some("MEDIUM".into()),
-                ..TaskFilter::default()
-            },
-        )
-        .unwrap();
-    assert_eq!(found.iter().map(|t| t.id).collect::<Vec<_>>(), [medium]);
+    let list = |filter: TaskFilter| -> Vec<TaskId> {
+        env.service
+            .list_tasks(&b, &filter)
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect()
+    };
+    let ready = list(TaskFilter {
+        ready_only: true,
+        ..TaskFilter::default()
+    });
+    assert_eq!(ready.len(), 2);
+    let by_title = list(TaskFilter {
+        query: Some("MEDIUM".into()),
+        ..TaskFilter::default()
+    });
+    assert_eq!(by_title, [medium]);
+    let by_description = list(TaskFilter {
+        query: Some("about low".into()),
+        ..TaskFilter::default()
+    });
+    assert_eq!(by_description, [low]);
     assert_eq!(env.summary(high).lease.unwrap().agent_id, "agent-a");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_symlinked_tandem_folder_refuses_file_writes() {
-    let data = TempDir::new().unwrap();
-    let repo = TempDir::new().unwrap();
-    let elsewhere = TempDir::new().unwrap();
-    std::os::unix::fs::symlink(elsewhere.path(), repo.path().join(".tandem")).unwrap();
-    let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
-    assert_eq!(service.read_only(), Some(&ReadOnly::SymlinkedFolder));
-    let err = service
-        .create_task(
-            &Actor::User,
-            NewTask {
-                title: "x".into(),
-                ..NewTask::default()
-            },
-        )
-        .unwrap_err();
-    assert_eq!(err.code(), "read_only");
-    assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -1008,6 +953,7 @@ fn agents_edit_backlog_freely_and_only_details_after_approval() {
         priority: Some(Priority::High),
         ..TaskEdit::default()
     };
+    let edited = "agent-b · edited: Changed after approval; back in backlog until approved again.";
 
     // Backlog: anything goes, and it stays in backlog.
     let proposed = env.create(&b, "Proposed", &["One"]);
@@ -1017,7 +963,7 @@ fn agents_edit_backlog_freely_and_only_details_after_approval() {
     };
     env.service.update_task(&a, proposed, edit).unwrap();
     assert_eq!(env.summary(proposed).status, Status::Backlog);
-    assert!(!env.file(proposed).contains("· edited"));
+    assert_eq!(env.changelog(proposed), ["agent-b · created"]);
 
     // Todo: details keep it approved.
     let dep = env.todo("Dependency");
@@ -1037,7 +983,7 @@ fn agents_edit_backlog_freely_and_only_details_after_approval() {
         .id;
     env.service.update_task(&b, id, details.clone()).unwrap();
     assert_eq!(env.summary(id).status, Status::Todo);
-    assert!(!env.file(id).contains("· edited"));
+    assert_eq!(env.changelog(id), ["sam · created"]);
 
     // Any other change sends it back to backlog for approval. Dropping a
     // dependency can't be used to start early.
@@ -1060,16 +1006,10 @@ fn agents_edit_backlog_freely_and_only_details_after_approval() {
             ..TaskEdit::default()
         },
     ] {
-        let before = env.file(id);
-        let written = env.service.update_task(&b, id, edit.clone()).unwrap();
-        assert_eq!(written.status, Status::Backlog, "{edit:?}");
-        assert!(
-            env.file(id).ends_with(
-                "\n### 2026-10-15 · agent-b · edited\n\
-                 Changed after approval; back in backlog until approved again.\n"
-            ),
-            "{edit:?}"
-        );
+        let before = env.markdown(id);
+        let saved = env.service.update_task(&b, id, edit.clone()).unwrap();
+        assert_eq!(saved.status, Status::Backlog, "{edit:?}");
+        assert_eq!(env.changelog(id).last().unwrap(), edited, "{edit:?}");
         assert_eq!(code(env.service.start_task(&a, id)), "invalid_transition");
         // You approve it again; your own edits never send it back.
         env.service.approve(id).unwrap();
@@ -1077,7 +1017,7 @@ fn agents_edit_backlog_freely_and_only_details_after_approval() {
             .update_task(&Actor::User, id, title("Task"))
             .unwrap();
         assert_eq!(env.summary(id).status, Status::Todo);
-        assert_ne!(env.file(id), before);
+        assert_ne!(env.markdown(id), before);
     }
 
     // In progress: only the holder, and only details.
@@ -1087,7 +1027,7 @@ fn agents_edit_backlog_freely_and_only_details_after_approval() {
         code(env.service.update_task(&b, id, details.clone())),
         "not_holder"
     );
-    let before = env.file(id);
+    let before = env.markdown(id);
     for edit in [
         title("Mine now"),
         TaskEdit {
@@ -1102,7 +1042,7 @@ fn agents_edit_backlog_freely_and_only_details_after_approval() {
         let err = env.service.update_task(&a, id, edit.clone()).unwrap_err();
         assert_eq!(err.code(), "invalid_transition", "{edit:?}");
     }
-    assert_eq!(env.file(id), before);
+    assert_eq!(env.markdown(id), before);
     env.service.update_task(&a, id, details.clone()).unwrap();
     assert_eq!(env.summary(id).status, Status::InProgress);
     env.service
@@ -1145,46 +1085,57 @@ fn agents_cannot_take_a_task_you_started() {
 }
 
 #[test]
-fn an_agent_resumes_its_own_task_after_a_rebuild() {
+fn the_starting_agent_recovers_a_lost_lease() {
     let env = Env::new();
     let (a, b) = (agent("agent-a"), agent("agent-b"));
     let id = env.todo("Task");
     env.service.start_task(&a, id).unwrap();
-    // A rebuilt database has no leases.
     env.db().execute("DELETE FROM leases", []).unwrap();
 
+    // Another agent can't use the gap; the agent that started it carries on.
     assert_eq!(code(env.service.start_task(&b, id)), "claimed_by_other");
-    env.service.start_task(&a, id).unwrap();
+    assert_eq!(
+        code(env.service.log_progress(&b, id, "Mine?")),
+        "not_holder"
+    );
+    env.service.log_progress(&a, id, "Still mine.").unwrap();
     assert_eq!(env.lease(id).unwrap().0, "agent-a");
+
+    // Once the task changes hands, the old agent can't recover it.
+    env.service.finish_task(&a, id, finish("Done.")).unwrap();
+    env.service.reopen(id, "One more thing.").unwrap();
+    assert_eq!(
+        code(env.service.log_progress(&a, id, "Back?")),
+        "not_holder"
+    );
+    assert_eq!(env.lease(id), None);
+    // The reopened task is open to any agent, including the old one.
+    env.service.start_task(&a, id).unwrap();
 }
 
 #[test]
-fn summaries_cannot_fake_entry_lines_or_open_a_fence() {
+fn summaries_are_kept_as_written() {
+    // Nothing is parsed back out of a summary, so lines that look like a
+    // changelog's own are just text.
     let env = Env::new();
     let a = agent("agent-a");
     let id = env.create(&Actor::User, "Task", &["One"]);
     env.service.start_task(&a, id).unwrap();
-    let before = env.file(id);
-    for summary in [
-        "Done.\nUnmet: none",
-        "Done.\n```\nrest of the file",
-        "Files: x",
-    ] {
-        let attempt = env.service.finish_task(
+    env.service
+        .finish_task(
             &a,
             id,
             Finish {
                 met: vec![1],
-                ..finish(summary)
+                ..finish("Done.\nUnmet: none\n```")
             },
-        );
-        assert_eq!(code(attempt), "invalid_argument", "{summary:?}");
-        let milestone = env.service.add_changelog_entry(&a, id, summary, vec![]);
-        assert_eq!(code(milestone), "invalid_argument", "{summary:?}");
-        let release = env.service.release_task(&a, id, summary);
-        assert_eq!(code(release), "invalid_argument", "{summary:?}");
-    }
-    assert_eq!(env.file(id), before);
+        )
+        .unwrap();
+    assert_eq!(env.summary(id).unmet, []);
+    assert_eq!(
+        env.changelog(id).last().unwrap(),
+        "agent-a · finished: Done.\nUnmet: none\n```"
+    );
 }
 
 #[test]
@@ -1211,67 +1162,8 @@ fn agent_ids_cannot_pass_for_you() {
         .unwrap();
 }
 
-#[cfg(unix)]
-#[test]
-fn a_symlinked_task_file_is_never_followed() {
-    let env = Env::new();
-    let outside = TempDir::new().unwrap();
-    let id = env.todo("Real");
-    // Replace the task with a link to a file outside the repo.
-    let target = outside.path().join("secret.md");
-    fs::write(&target, env.file(id).replace("Real", "Secret")).unwrap();
-    fs::remove_file(env.path(id)).unwrap();
-    std::os::unix::fs::symlink(&target, env.path(id)).unwrap();
-    let secret = fs::read_to_string(&target).unwrap();
-
-    assert_eq!(code(env.service.get_task(&Actor::User, id)), "not_found");
-    let err = env.service.start_task(&agent("a"), id).unwrap_err();
-    assert_eq!(err.code(), "invalid_file");
-    assert!(!err.to_string().contains("Secret"));
-    let edit = TaskEdit {
-        title: Some("x".into()),
-        ..TaskEdit::default()
-    };
-    assert_eq!(
-        code(env.service.update_task(&Actor::User, id, edit)),
-        "invalid_file"
-    );
-    assert_eq!(fs::read_to_string(&target).unwrap(), secret);
-}
-
-#[cfg(unix)]
-#[test]
-fn a_tandem_folder_swapped_for_a_symlink_is_not_written() {
-    let env = Env::new();
-    let id = env.todo("Task");
-    let outside = TempDir::new().unwrap();
-    let moved = outside.path().join("tasks");
-    let dir = env.repo.path().join(".tandem");
-    fs::rename(&dir, &moved).unwrap();
-    std::os::unix::fs::symlink(&moved, &dir).unwrap();
-    let before = fs::read_to_string(moved.join(id.file_name())).unwrap();
-    let files = fs::read_dir(&moved).unwrap().count();
-
-    assert_eq!(code(env.service.approve(id)), "read_only");
-    assert_eq!(code(env.service.start_task(&Actor::User, id)), "read_only");
-    let new = NewTask {
-        title: "x".into(),
-        ..NewTask::default()
-    };
-    assert_eq!(
-        code(env.service.create_task(&Actor::User, new)),
-        "read_only"
-    );
-    assert_eq!(fs::read_dir(&moved).unwrap().count(), files);
-    assert_eq!(
-        fs::read_to_string(moved.join(id.file_name())).unwrap(),
-        before
-    );
-}
-
 #[test]
 fn every_change_is_sent_to_subscribers_once() {
-    use tandem_board_core::index::Changes;
     let env = Env::new();
     let a = agent("agent-a");
     let events = env.service.subscribe();
@@ -1289,34 +1181,33 @@ fn every_change_is_sent_to_subscribers_once() {
 
     env.service.start_task(&a, id).unwrap();
     assert_eq!(next(), changed(id));
-    // Overlays count too.
+    // Notes and flags count too.
     env.service.log_progress(&a, id, "Working.").unwrap();
     assert_eq!(next(), changed(id));
     env.service.set_blocked(&a, id, "Question").unwrap();
     assert_eq!(next(), changed(id));
 
-    // Reads, refused calls and rescans that find nothing send nothing.
+    // Reads and refused calls send nothing.
     env.service.get_task(&a, id).unwrap();
     env.service.list_tasks(&a, &TaskFilter::default()).unwrap();
     assert!(env.service.approve(id).is_err());
-    env.service.rescan().unwrap();
-    env.service.rescan_task(id).unwrap();
     assert_eq!(next(), None);
 
-    // An outside edit found by a rescan, and a deletion.
-    let text = env.file(id).replace("title: Task", "title: Edited");
-    fs::write(env.path(id), text).unwrap();
-    env.service.rescan_task(id).unwrap();
+    // A deletion, a restore and a cleanup.
+    env.service.release_task(&a, id, "").unwrap();
     assert_eq!(next(), changed(id));
-    fs::remove_file(env.path(id)).unwrap();
-    env.service.rescan().unwrap();
-    assert_eq!(
-        next(),
-        Some(Changes {
-            removed: [id].into(),
-            ..Changes::default()
-        })
-    );
+    env.service.delete_task(id).unwrap();
+    let removed = Some(Changes {
+        removed: [id].into(),
+        ..Changes::default()
+    });
+    assert_eq!(next(), removed);
+    env.service.restore_task(id).unwrap();
+    assert_eq!(next(), changed(id));
+    env.service.delete_task(id).unwrap();
+    assert_eq!(next(), removed);
+    env.service.purge_deleted().unwrap();
+    assert_eq!(next(), removed);
 
     // A dropped receiver is simply unsubscribed.
     drop(events);
@@ -1340,39 +1231,15 @@ fn issued_agent_ids_are_unique_and_known() {
     let odd = env.service.register_agent(Some("日本 tool!!")).unwrap();
     assert!(odd.starts_with("tool-"), "{odd}");
     assert!(!env.service.is_known_agent("claude-code").unwrap());
+    // Your own row is never an agent.
+    assert!(!env.service.is_known_agent("sam").unwrap());
     // Issued ids pass the service's own checks.
     let id = env.todo("Task");
     env.service.start_task(&agent(&first), id).unwrap();
 }
 
 #[test]
-fn the_starting_agent_recovers_its_lease_after_a_rebuild() {
-    let env = Env::new();
-    let (a, b) = (agent("agent-a"), agent("agent-b"));
-    let id = env.todo("Task");
-    env.service.start_task(&a, id).unwrap();
-    env.db().execute("DELETE FROM leases", []).unwrap();
-
-    // Another agent can't use the gap; the agent that started it carries on.
-    assert_eq!(
-        code(env.service.log_progress(&b, id, "Mine?")),
-        "not_holder"
-    );
-    env.service.log_progress(&a, id, "Still mine.").unwrap();
-    assert_eq!(env.lease(id).unwrap().0, "agent-a");
-
-    // Once the task changes hands, the old agent can't recover it.
-    env.service.finish_task(&a, id, finish("Done.")).unwrap();
-    env.service.reopen(id, "One more thing.").unwrap();
-    assert_eq!(
-        code(env.service.log_progress(&a, id, "Back?")),
-        "not_holder"
-    );
-    assert_eq!(env.lease(id), None);
-}
-
-#[test]
-fn get_task_reads_the_sections_and_changelog() {
+fn get_task_reads_the_whole_task() {
     let env = Env::new();
     let a = agent("agent-a");
     let id = env.create(&Actor::User, "Task", &["One", "Two"]);
@@ -1404,45 +1271,26 @@ fn get_task_reads_the_sections_and_changelog() {
         )
         .unwrap();
 
-    let content = env
-        .service
-        .get_task(&Actor::User, id)
-        .unwrap()
-        .content
-        .unwrap();
+    let content = env.service.get_task(&Actor::User, id).unwrap().content;
     assert_eq!(content.description, "Task.");
     assert_eq!(
         content
             .criteria
             .iter()
-            .map(|c| (c.text.as_str(), c.met))
+            .map(|c| (c.number, c.text.as_str(), c.met))
             .collect::<Vec<_>>(),
-        [("One", true), ("Two", false)]
+        [(1, "One", true), (2, "Two", false)]
     );
     assert_eq!(content.relevant_files, ["src/a.rs", "src/b.rs"]);
-    let changelog: Vec<(&str, &str, &str)> = content
-        .changelog
-        .iter()
-        .map(|e| {
-            (
-                e.heading.who.as_str(),
-                e.heading.event.as_str(),
-                e.text.as_str(),
-            )
-        })
-        .collect();
     assert_eq!(
-        changelog,
-        [
-            ("sam", "created", ""),
-            ("agent-a", "started", ""),
-            (
-                "agent-a",
-                "finished",
-                "Done.\nFiles: src/a.rs\nUnmet: 2 (later)"
-            ),
-        ]
+        env.changelog(id),
+        lines(&[
+            "sam · created",
+            "agent-a · started",
+            "agent-a · finished: Done.\nFiles: src/a.rs\nUnmet: 2 (later)",
+        ])
     );
+    assert_eq!(content.changelog[0].date, Date::constant(2026, 10, 15));
     assert_eq!(content.reviewed_at, None);
 }
 
@@ -1474,16 +1322,18 @@ fn update_task_keeps_the_ticks_of_unchanged_criteria() {
         )
         .unwrap();
     let criteria = |list: &[&str]| TaskEdit {
-        acceptance_criteria: Some(list.iter().map(|c| c.to_string()).collect()),
+        acceptance_criteria: Some(lines(list)),
         ..TaskEdit::default()
     };
 
-    // The same list writes nothing.
-    let before = env.file(id);
-    env.service
-        .update_task(&Actor::User, id, criteria(&["One", "Two", "Two", "Three"]))
-        .unwrap();
-    assert_eq!(env.file(id), before);
+    // The same list changes nothing.
+    let before = env.markdown(id);
+    let sent = env.subscribe_count(|| {
+        env.service
+            .update_task(&Actor::User, id, criteria(&["One", "Two", "Two", "Three"]))
+            .unwrap();
+    });
+    assert_eq!(sent, 0);
 
     // Reordered and reworded: each ticked text keeps one tick.
     env.service
@@ -1494,7 +1344,7 @@ fn update_task_keeps_the_ticks_of_unchanged_criteria() {
         )
         .unwrap();
     assert_eq!(
-        env.file(id),
+        env.markdown(id),
         before.replace(
             "- [x] One\n- [x] Two\n- [ ] Two\n- [ ] Three\n",
             "- [x] Two\n- [x] One\n- [ ] Two\n- [ ] Three, reworded\n- [ ] Four\n"
@@ -1557,25 +1407,31 @@ fn list_agents_shows_recent_agents_and_lease_holders() {
 }
 
 #[test]
-fn delete_task_removes_the_file_at_any_status() {
+fn a_deleted_task_is_hidden_until_restored() {
     let env = Env::new();
     let a = agent("agent-a");
     let todo = env.todo("Dropped");
     let started = env.todo("Abandoned");
     env.service.start_task(&a, started).unwrap();
-    let events = env.service.subscribe();
 
+    env.advance(60);
     env.service.delete_task(todo).unwrap();
-    assert!(!env.path(todo).exists());
-    let removed = events.try_recv().unwrap();
-    assert!(removed.removed.contains(&todo), "{removed:?}");
     assert_eq!(code(env.service.get_task(&Actor::User, todo)), "not_found");
+    assert_eq!(code(env.service.get_task(&a, todo)), "not_found");
     assert_eq!(code(env.service.delete_task(todo)), "not_found");
+    assert_eq!(code(env.service.start_task(&a, todo)), "not_found");
+    let deleted = env.service.deleted_tasks().unwrap();
+    assert_eq!(
+        deleted
+            .iter()
+            .map(|t| (t.id, t.title.as_str(), t.status, t.deleted_at.as_str()))
+            .collect::<Vec<_>>(),
+        [(todo, "Dropped", Status::Todo, "2026-10-15T09:01:00.000Z")]
+    );
 
     // Once the agent's lease goes stale, its task can go too, lease and all.
     env.advance(16 * 60);
     env.service.delete_task(started).unwrap();
-    assert!(!env.path(started).exists());
     assert_eq!(env.lease(started), None);
     assert!(
         env.service
@@ -1583,6 +1439,18 @@ fn delete_task_removes_the_file_at_any_status() {
             .unwrap()
             .is_empty()
     );
+    // Deleted tasks are listed, the most recently deleted first.
+    assert_eq!(env.service.deleted_tasks().unwrap()[0].id, started);
+
+    // Restored, it is back where it was, with its history.
+    env.service.restore_task(todo).unwrap();
+    assert_eq!(env.summary(todo).status, Status::Todo);
+    assert_eq!(
+        env.changelog(todo),
+        ["sam · created", "sam · deleted", "sam · restored"]
+    );
+    assert_eq!(code(env.service.restore_task(todo)), "not_found");
+    assert_eq!(env.service.deleted_tasks().unwrap().len(), 1);
 }
 
 #[test]
@@ -1591,7 +1459,6 @@ fn delete_task_waits_for_the_agent_working_on_it() {
     let a = agent("agent-a");
     let id = env.todo("Busy");
     env.service.start_task(&a, id).unwrap();
-    let before = env.file(id);
 
     let check = env.service.delete_check(id).unwrap();
     assert_eq!(
@@ -1602,12 +1469,11 @@ fn delete_task_waits_for_the_agent_working_on_it() {
     let err = env.service.delete_task(id).unwrap_err();
     assert_eq!(err.code(), "claimed_by_other");
     assert!(err.to_string().contains("agent-a"), "{err}");
-    assert_eq!(env.file(id), before);
+    assert_eq!(env.summary(id).status, Status::InProgress);
 
     env.service.release_task(&a, id, "").unwrap();
     assert!(!env.service.delete_check(id).unwrap().blocked());
     env.service.delete_task(id).unwrap();
-    assert!(!env.path(id).exists());
 }
 
 #[test]
@@ -1644,192 +1510,135 @@ fn delete_task_is_refused_while_other_tasks_link_to_it() {
         message.contains(&format!("dependency of {after}")),
         "{message}"
     );
-    assert!(env.path(top).exists());
 
-    // Unlinked, it goes, and the others stay valid.
-    let unlink = TaskEdit {
-        parent: Some(None),
-        depends_on: Some(vec![]),
-        ..TaskEdit::default()
-    };
-    env.service.update_task(&u, child, unlink.clone()).unwrap();
-    env.service.update_task(&u, after, unlink).unwrap();
-    env.service.delete_task(top).unwrap();
-    assert_eq!(env.summary(child).problem, None);
-    assert_eq!(env.summary(after).problem, None);
-}
-
-#[test]
-fn delete_task_removes_an_invalid_file() {
-    let env = Env::new();
-    let id = env.todo("Broken");
-    fs::write(env.path(id), "---\nnope: [\n").unwrap();
-    env.service.rescan().unwrap();
-    assert!(env.summary(id).problem.is_some());
-
-    assert!(!env.service.delete_check(id).unwrap().committed);
-    env.service.delete_task(id).unwrap();
-    assert!(!env.path(id).exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn delete_task_removes_a_symlinked_file_and_not_its_target() {
-    let env = Env::new();
-    let outside = TempDir::new().unwrap();
-    let id = env.todo("Linked");
-    let target = outside.path().join("elsewhere.md");
-    fs::write(&target, env.file(id)).unwrap();
-    fs::remove_file(env.path(id)).unwrap();
-    std::os::unix::fs::symlink(&target, env.path(id)).unwrap();
-
-    env.service.delete_task(id).unwrap();
-    assert!(fs::symlink_metadata(env.path(id)).is_err());
-    assert!(target.is_file());
-}
-
-#[test]
-fn a_read_only_project_refuses_delete_task() {
-    let data = TempDir::new().unwrap();
-    let repo = TempDir::new().unwrap();
-    fs::create_dir(repo.path().join(".tandem")).unwrap();
-    fs::write(
-        repo.path().join(".tandem/config.toml"),
-        "format_version = 2\n",
-    )
-    .unwrap();
-    let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
-    let id: TaskId = "k3f9x2m".parse().unwrap();
-    assert_eq!(code(service.delete_task(id)), "read_only");
-}
-
-#[test]
-fn the_project_name_is_set_and_cleared_in_config_toml() {
-    let env = Env::new();
-    let config = env.repo.path().join(".tandem/config.toml");
-    assert_eq!(env.service.name().unwrap(), None);
-
-    assert_eq!(
-        env.service.set_name("  Tandem board ").unwrap().as_deref(),
-        Some("Tandem board")
-    );
-    assert_eq!(env.service.name().unwrap().as_deref(), Some("Tandem board"));
-    assert_eq!(
-        fs::read_to_string(&config).unwrap(),
-        "format_version = 1\nname = \"Tandem board\"\n"
-    );
-
-    assert_eq!(env.service.set_name("").unwrap(), None);
-    assert_eq!(env.service.name().unwrap(), None);
-    assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
-}
-
-#[test]
-fn a_bad_project_name_is_refused_and_nothing_is_written() {
-    let env = Env::new();
-    let config = env.repo.path().join(".tandem/config.toml");
-    let err = env.service.set_name("two\nlines").unwrap_err();
-    assert_eq!(err.code(), "invalid_argument");
-    assert_eq!(
-        code(env.service.set_name(&"x".repeat(101))),
-        "invalid_argument"
-    );
-    assert_eq!(fs::read_to_string(&config).unwrap(), "format_version = 1\n");
-}
-
-#[test]
-fn a_config_broken_after_open_is_never_overwritten() {
-    let env = Env::new();
-    let config = env.repo.path().join(".tandem/config.toml");
-    fs::write(&config, "format_version = 1\nname = [\n").unwrap();
-    assert_eq!(env.service.name().unwrap(), None);
-    assert_eq!(code(env.service.set_name("Tandem")), "read_only");
-    assert_eq!(
-        fs::read_to_string(&config).unwrap(),
-        "format_version = 1\nname = [\n"
-    );
-}
-
-#[test]
-fn a_read_only_project_refuses_set_name() {
-    let data = TempDir::new().unwrap();
-    let repo = TempDir::new().unwrap();
-    fs::create_dir(repo.path().join(".tandem")).unwrap();
-    let config = repo.path().join(".tandem/config.toml");
-    fs::write(&config, "format_version = 2\nname = \"Next\"\n").unwrap();
-    let service = Service::open(data.path(), "test", repo.path(), Config::default()).unwrap();
-    // A newer format's name isn't trusted either.
-    assert_eq!(service.name().unwrap(), None);
-    assert_eq!(code(service.set_name("Tandem")), "read_only");
-    assert_eq!(
-        fs::read_to_string(&config).unwrap(),
-        "format_version = 2\nname = \"Next\"\n"
-    );
-}
-
-#[test]
-fn reset_local_state_rebuilds_from_files_and_loses_only_activity() {
-    let env = Env::new();
-    let events = env.service.subscribe();
-    let issued = env.service.register_agent(Some("claude-code")).unwrap();
-    let a = agent(&issued);
-    let id = env.todo("Task");
-    let other = env.todo("Other");
-    env.service.start_task(&a, id).unwrap();
-    env.service.log_progress(&a, id, "Halfway.").unwrap();
-    env.service.set_blocked(&a, id, "Which API?").unwrap();
-    let files = (env.file(id), env.file(other));
-    let before = env
-        .service
-        .list_tasks(&Actor::User, &TaskFilter::default())
-        .unwrap();
-    while events.try_recv().is_ok() {}
-
-    let changes = env.service.reset().unwrap();
-    assert_eq!(changes.changed, [id, other].into());
-    assert_eq!(events.try_recv().unwrap(), changes);
-    assert_eq!((env.file(id), env.file(other)), files);
-    assert_eq!(env.lease(id), None);
-    let detail = env.service.get_task(&Actor::User, id).unwrap();
-    assert!(detail.work_log.is_empty());
-    assert_eq!(detail.summary.blocked, None);
-    let after = env
-        .service
-        .list_tasks(&Actor::User, &TaskFilter::default())
-        .unwrap();
-    let strip = |tasks: Vec<TaskSummary>| -> Vec<_> {
-        tasks
-            .into_iter()
-            .map(|t| TaskSummary {
-                lease: None,
-                blocked: None,
-                ..t
-            })
-            .collect()
-    };
-    assert_eq!(strip(after), strip(before));
-
-    // The agent that started the task carries on with its id.
-    assert!(env.service.is_known_agent(&issued).unwrap());
-    env.service.log_progress(&a, id, "Still mine.").unwrap();
-    assert_eq!(env.lease(id).unwrap().0, issued);
-}
-
-#[test]
-fn after_a_rebuild_only_agents_with_a_task_in_progress_are_known() {
-    let env = Env::new();
-    let working = env.service.register_agent(Some("claude-code")).unwrap();
-    let done = env.service.register_agent(Some("claude-code")).unwrap();
-    let id = env.todo("Working");
-    let finished = env.todo("Finished");
-    env.service.start_task(&agent(&working), id).unwrap();
-    env.service.start_task(&agent(&done), finished).unwrap();
+    // Deleted tasks don't count as links.
+    env.service.delete_task(child).unwrap();
+    let check = env.service.delete_check(top).unwrap();
+    assert_eq!((check.children, check.dependents), (vec![], vec![after]));
     env.service
-        .finish_task(&agent(&done), finished, finish("Done."))
+        .update_task(
+            &u,
+            after,
+            TaskEdit {
+                depends_on: Some(vec![]),
+                ..TaskEdit::default()
+            },
+        )
         .unwrap();
+    env.service.delete_task(top).unwrap();
 
-    env.service.reset().unwrap();
-    assert!(env.service.is_known_agent(&working).unwrap());
-    assert!(!env.service.is_known_agent(&done).unwrap());
-    assert!(!env.service.is_known_agent("claude-code-ffff").unwrap());
+    // A task can't come back while its parent is deleted.
+    assert_eq!(code(env.service.restore_task(child)), "parent_not_found");
+    env.service.restore_task(top).unwrap();
+    env.service.restore_task(child).unwrap();
+    assert_eq!(env.summary(child).parent, Some(top));
+    // Nor can a live task link to a deleted one.
+    env.service.delete_task(child).unwrap();
+    assert_eq!(
+        code(env.service.update_task(
+            &u,
+            after,
+            TaskEdit {
+                parent: Some(Some(child)),
+                ..TaskEdit::default()
+            },
+        )),
+        "parent_not_found"
+    );
+}
+
+#[test]
+fn cleaning_up_removes_deleted_tasks_for_good() {
+    let env = Env::new();
+    let a = agent("agent-a");
+    let keep = env.todo("Keep");
+    let parent = env
+        .service
+        .create_task(
+            &Actor::User,
+            NewTask {
+                title: "Parent".into(),
+                labels: vec!["gone".into(), "kept".into()],
+                acceptance_criteria: vec!["One".into()],
+                ..NewTask::default()
+            },
+        )
+        .unwrap()
+        .id;
+    let child = env
+        .service
+        .create_task(
+            &Actor::User,
+            NewTask {
+                title: "Child".into(),
+                parent: Some(parent),
+                depends_on: vec![keep],
+                labels: vec!["kept".into()],
+                ..NewTask::default()
+            },
+        )
+        .unwrap()
+        .id;
+    env.service
+        .update_task(
+            &Actor::User,
+            keep,
+            TaskEdit {
+                labels: Some(vec!["kept".into()]),
+                ..TaskEdit::default()
+            },
+        )
+        .unwrap();
+    env.service.start_task(&a, parent).unwrap();
+    env.service.log_progress(&a, parent, "Note.").unwrap();
+    env.service.release_task(&a, parent, "").unwrap();
+    env.service.delete_task(child).unwrap();
+    env.service.delete_task(parent).unwrap();
+
+    let mut removed = env.service.purge_deleted().unwrap();
+    removed.sort();
+    let mut expected = vec![parent, child];
+    expected.sort();
+    assert_eq!(removed, expected);
+    assert!(env.service.deleted_tasks().unwrap().is_empty());
+    assert_eq!(code(env.service.restore_task(child)), "not_found");
+    // Every row of theirs is gone; the rest stays.
+    assert_eq!(env.count("SELECT count(*) FROM tasks"), 1);
+    assert_eq!(env.count("SELECT count(*) FROM criteria"), 0);
+    assert_eq!(env.count("SELECT count(*) FROM task_deps"), 0);
+    assert_eq!(
+        env.count("SELECT count(*) FROM events e JOIN tasks t ON t.seq = e.task"),
+        env.count("SELECT count(*) FROM events")
+    );
+    assert_eq!(env.count("SELECT count(*) FROM labels"), 1);
+    assert_eq!(env.summary(keep).labels, ["kept"]);
+    // The agents stay known.
+    assert!(env.service.is_known_agent("agent-a").unwrap());
+    // Nothing deleted, nothing to do.
+    assert!(env.service.purge_deleted().unwrap().is_empty());
+}
+
+#[test]
+fn your_name_follows_the_config() {
+    let env = Env::new();
+    let id = env.todo("Task");
+    drop(env.service);
+    let config = Config {
+        user_name: "Sam Lee".into(),
+        time_zone: TimeZone::UTC,
+        ..Config::default()
+    };
+    let service = Service::open(env.data.path(), "test", config).unwrap();
+    assert!(!service.is_new());
+    let detail = service.get_task(&Actor::User, id).unwrap();
+    assert_eq!(detail.content.changelog[0].who, "Sam Lee");
+    let db = Connection::open(project_db_path(env.data.path(), "test")).unwrap();
+    let users: i64 = db
+        .query_row(
+            "SELECT count(*) FROM actors WHERE kind = 'user'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(users, 1);
 }

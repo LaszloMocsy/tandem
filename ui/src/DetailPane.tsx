@@ -29,7 +29,7 @@ export type Field =
 /** The latest refusal per field, shown next to it. */
 export type FieldErrors = Partial<Record<Field, string>>
 
-/** Saves an edit; resolves to whether it was written. */
+/** Saves an edit; resolves to whether it was saved. */
 type Save = (field: Field, edit: TaskEdit) => Promise<boolean>
 
 /** The commands the pane uses. */
@@ -40,8 +40,6 @@ export type PaneApi = Pick<
   | 'approve'
   | 'markReviewed'
   | 'reopen'
-  | 'hasUncommittedChanges'
-  | 'commitReview'
   | 'deleteCheck'
   | 'deleteTask'
 >
@@ -55,7 +53,6 @@ export function DetailPane({
   project,
   id,
   tasks,
-  readOnly,
   onClose,
   api = tauriApi,
 }: {
@@ -63,7 +60,6 @@ export function DetailPane({
   id: string
   /** The project's tasks, for the pickers and to know when to refetch. */
   tasks: readonly TaskSummary[]
-  readOnly: boolean
   onClose: () => void
   api?: PaneApi
 }) {
@@ -71,11 +67,8 @@ export function DetailPane({
   const [loadError, setLoadError] = useState<string | null>(null)
   const [errors, setErrors] = useState<FieldErrors>({})
   const [saves, setSaves] = useState(0)
-  const [uncommitted, setUncommitted] = useState(false)
-  const [committed, setCommitted] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
-  const isDone = detail?.summary.status === 'done'
   // The Delete task dialog, and what stands in its way.
   const [deleting, setDeleting] = useState(false)
   const [deleteCheck, setDeleteCheck] = useState<DeleteCheck | null>(null)
@@ -98,30 +91,6 @@ export function DetailPane({
       current = false
     }
   }, [api, project, id, tasks, saves])
-
-  // Whether Commit review applies. A commit made outside the app changes
-  // no task file, so no event announces it; check again on window focus.
-  useEffect(() => {
-    if (!isDone) return
-    let current = true
-    const check = () =>
-      api.hasUncommittedChanges(project, id).then(
-        (changed) => {
-          if (current) setUncommitted(changed)
-        },
-        // Not a git repo, or no git on PATH: nothing to commit from here.
-        () => {
-          if (current) setUncommitted(false)
-        },
-      )
-    void check()
-    const onFocus = () => void check()
-    window.addEventListener('focus', onFocus)
-    return () => {
-      current = false
-      window.removeEventListener('focus', onFocus)
-    }
-  }, [api, project, id, isDone, detail])
 
   // Checked when the dialog opens, and again when tasks change or you ask,
   // so a released task or a removed link unblocks it.
@@ -218,37 +187,22 @@ export function DetailPane({
         <TaskView
           detail={detail}
           tasks={tasks}
-          readOnly={readOnly}
           errors={errors}
           onSave={save}
           onClearError={clearError}
           actions={
             <ReviewBar
               status={detail.summary.status}
-              disabled={readOnly || detail.content === null}
-              uncommitted={uncommitted}
-              committed={committed}
               busy={busy}
               error={actionError}
               onApprove={() => void act(() => api.approve(project, id))}
               onMarkReviewed={() => void act(() => api.markReviewed(project, id))}
               onReopen={(feedback) => act(() => api.reopen(project, id, feedback))}
-              onCommit={() =>
-                void act(async () => {
-                  setCommitted(await api.commitReview(project, id))
-                  setUncommitted(false)
-                })
-              }
             />
           }
           footer={
             <div className="detail-footer">
-              <button
-                type="button"
-                className="delete-task"
-                disabled={readOnly}
-                onClick={openDelete}
-              >
+              <button type="button" className="delete-task" onClick={openDelete}>
                 Delete task…
               </button>
             </div>
@@ -283,7 +237,6 @@ export function DetailPane({
 export function TaskView({
   detail,
   tasks,
-  readOnly,
   errors,
   onSave,
   onClearError,
@@ -292,7 +245,6 @@ export function TaskView({
 }: {
   detail: TaskDetail
   tasks: readonly TaskSummary[]
-  readOnly: boolean
   errors: FieldErrors
   onSave: Save
   onClearError: (field: Field) => void
@@ -302,8 +254,6 @@ export function TaskView({
   footer?: ReactNode
 }) {
   const { summary, content } = detail
-  // An unreadable file is never written, so nothing is editable.
-  const locked = readOnly || content === null
   const status = COLUMNS.find((column) => column.status === summary.status)?.title
   const unmet = new Map(summary.unmet.map((u) => [u.criterion, u.reason]))
 
@@ -312,148 +262,122 @@ export function TaskView({
       <div className="detail-top">
         <code>{summary.id}</code>
         <span className="status">{status}</span>
-        {content?.reviewedAt && <span className="muted">reviewed {content.reviewedAt}</span>}
+        {content.reviewedAt && <span className="muted">reviewed {content.reviewedAt}</span>}
       </div>
 
       <Editable
         label="title"
         value={summary.title}
-        disabled={locked}
-        error={errors.title}
+                error={errors.title}
         onCancel={() => onClearError('title')}
         onSave={(draft) =>
           draft.trim() === summary.title ? done() : onSave('title', { title: draft.trim() })
         }
       >
-        <h2 className="detail-title">
-          {summary.title || <span className="muted">Unreadable file</span>}
-        </h2>
+        <h2 className="detail-title">{summary.title}</h2>
       </Editable>
-
-      {summary.problem && (
-        <p className="problem" role="alert">
-          <strong>Invalid.</strong> {summary.problem.message}
-        </p>
-      )}
 
       {actions}
 
-      {content === null ? (
-        <Section title="File">
-          <pre className="raw">{detail.markdown}</pre>
-        </Section>
-      ) : (
-        <>
-          <Metadata
-            summary={summary}
-            tasks={tasks}
-            disabled={locked}
-            errors={errors}
-            onSave={onSave}
-          />
+      <Metadata summary={summary} tasks={tasks} errors={errors} onSave={onSave} />
 
-          <Section title="Description">
-            <Editable
-              label="description"
-              multiline
-              value={content.description}
-              disabled={locked}
-              error={errors.description}
-              onCancel={() => onClearError('description')}
-              onSave={(draft) =>
-                draft.trim() === content.description
-                  ? done()
-                  : onSave('description', { description: draft })
-              }
-            >
-              {content.description ? (
-                <p className="prose">{content.description}</p>
-              ) : (
-                <p className="muted">No description.</p>
-              )}
-            </Editable>
-          </Section>
+      <Section title="Description">
+        <Editable
+          label="description"
+          multiline
+          value={content.description}
+                        error={errors.description}
+          onCancel={() => onClearError('description')}
+          onSave={(draft) =>
+            draft.trim() === content.description
+              ? done()
+              : onSave('description', { description: draft })
+          }
+        >
+          {content.description ? (
+            <p className="prose">{content.description}</p>
+          ) : (
+            <p className="muted">No description.</p>
+          )}
+        </Editable>
+      </Section>
 
-          <Section title="Acceptance criteria">
-            <Editable
-              label="acceptance criteria"
-              multiline
-              value={content.criteria.map((c) => c.text).join('\n')}
-              hint={
-                content.criteria.some((c) => c.met)
-                  ? 'One per line. Reworded or new criteria start unticked.'
-                  : 'One per line.'
-              }
-              disabled={locked}
-              error={errors.criteria}
-              onCancel={() => onClearError('criteria')}
-              onSave={(draft) => {
-                const criteria = parseLines(draft)
-                return sameList(
-                  criteria,
-                  content.criteria.map((c) => c.text),
-                )
-                  ? done()
-                  : onSave('criteria', { acceptanceCriteria: criteria })
-              }}
-            >
-              {content.criteria.length > 0 ? (
-                <ul className="criteria">
-                  {content.criteria.map((c) => (
-                    <li key={c.number}>
-                      <input type="checkbox" checked={c.met} readOnly disabled aria-label={c.met ? 'Met' : 'Not met'} />
-                      <span>
-                        {c.text}
-                        {unmet.has(c.number) && (
-                          <span className="unmet-reason">Unmet: {unmet.get(c.number)}</span>
-                        )}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted">No acceptance criteria.</p>
-              )}
-            </Editable>
-          </Section>
+      <Section title="Acceptance criteria">
+        <Editable
+          label="acceptance criteria"
+          multiline
+          value={content.criteria.map((c) => c.text).join('\n')}
+          hint={
+            content.criteria.some((c) => c.met)
+              ? 'One per line. Reworded or new criteria start unticked.'
+              : 'One per line.'
+          }
+                        error={errors.criteria}
+          onCancel={() => onClearError('criteria')}
+          onSave={(draft) => {
+            const criteria = parseLines(draft)
+            return sameList(
+              criteria,
+              content.criteria.map((c) => c.text),
+            )
+              ? done()
+              : onSave('criteria', { acceptanceCriteria: criteria })
+          }}
+        >
+          {content.criteria.length > 0 ? (
+            <ul className="criteria">
+              {content.criteria.map((c) => (
+                <li key={c.number}>
+                  <input type="checkbox" checked={c.met} readOnly disabled aria-label={c.met ? 'Met' : 'Not met'} />
+                  <span>
+                    {c.text}
+                    {unmet.has(c.number) && (
+                      <span className="unmet-reason">Unmet: {unmet.get(c.number)}</span>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">No acceptance criteria.</p>
+          )}
+        </Editable>
+      </Section>
 
-          <Section title="Relevant files">
-            <Editable
-              label="relevant files"
-              multiline
-              value={content.relevantFiles.join('\n')}
-              hint="One per line."
-              disabled={locked}
-              error={errors.files}
-              onCancel={() => onClearError('files')}
-              onSave={(draft) => {
-                const files = parseLines(draft)
-                return sameList(files, content.relevantFiles)
-                  ? done()
-                  : onSave('files', { relevantFiles: files })
-              }}
-            >
-              {content.relevantFiles.length > 0 ? (
-                <ul className="files">
-                  {content.relevantFiles.map((file) => (
-                    <li key={file}>
-                      <code>{file}</code>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted">No relevant files.</p>
-              )}
-            </Editable>
-          </Section>
+      <Section title="Relevant files">
+        <Editable
+          label="relevant files"
+          multiline
+          value={content.relevantFiles.join('\n')}
+          hint="One per line."
+                        error={errors.files}
+          onCancel={() => onClearError('files')}
+          onSave={(draft) => {
+            const files = parseLines(draft)
+            return sameList(files, content.relevantFiles)
+              ? done()
+              : onSave('files', { relevantFiles: files })
+          }}
+        >
+          {content.relevantFiles.length > 0 ? (
+            <ul className="files">
+              {content.relevantFiles.map((file) => (
+                <li key={file}>
+                  <code>{file}</code>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">No relevant files.</p>
+          )}
+        </Editable>
+      </Section>
 
-          <Section title="Changelog">
-            <Changelog entries={content.changelog} />
-          </Section>
-        </>
-      )}
+      <Section title="Changelog">
+        <Changelog entries={content.changelog} />
+      </Section>
 
-      <Section title="Working log" tag="local only, not committed">
+      <Section title="Working log">
         <WorkLog entries={detail.workLog} />
       </Section>
       {footer}
@@ -464,13 +388,10 @@ export function TaskView({
 /** An unchanged draft: nothing to write. */
 const done = () => Promise.resolve(true)
 
-function Section({ title, tag, children }: { title: string; tag?: string; children: ReactNode }) {
+function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="detail-section" aria-label={title}>
-      <h3>
-        {title}
-        {tag && <span className="tag">{tag}</span>}
-      </h3>
+      <h3>{title}</h3>
       {children}
     </section>
   )
@@ -486,7 +407,6 @@ function Editable({
   value,
   multiline = false,
   hint,
-  disabled,
   error,
   onSave,
   onCancel,
@@ -497,7 +417,6 @@ function Editable({
   value: string
   multiline?: boolean
   hint?: string
-  disabled: boolean
   error?: string
   onSave: (draft: string) => Promise<boolean>
   onCancel: () => void
@@ -534,16 +453,14 @@ function Editable({
       <div className="editable">
         <div className="editable-view">
           {children}
-          {!disabled && (
-            <button
-              type="button"
-              className="link"
-              aria-label={`Edit ${label}`}
-              onClick={() => setDraft(value)}
-            >
-              Edit
-            </button>
-          )}
+          <button
+            type="button"
+            className="link"
+            aria-label={`Edit ${label}`}
+            onClick={() => setDraft(value)}
+          >
+            Edit
+          </button>
         </div>
         <FieldError message={error} />
       </div>
@@ -598,13 +515,11 @@ const PRIORITIES: { value: Priority; name: string }[] = [
 function Metadata({
   summary,
   tasks,
-  disabled,
   errors,
   onSave,
 }: {
   summary: TaskSummary
   tasks: readonly TaskSummary[]
-  disabled: boolean
   errors: FieldErrors
   onSave: Save
 }) {
@@ -618,7 +533,6 @@ function Metadata({
         <select
           aria-label="Priority"
           value={summary.priority}
-          disabled={disabled}
           onChange={(event) => void onSave('priority', { priority: event.target.value as Priority })}
         >
           {PRIORITIES.map(({ value, name }) => (
@@ -634,7 +548,6 @@ function Metadata({
       <dd>
         <Labels
           labels={summary.labels}
-          disabled={disabled}
           onChange={(labels) => onSave('labels', { labels })}
         />
         <FieldError message={errors.labels} />
@@ -645,7 +558,6 @@ function Metadata({
         <select
           aria-label="Parent"
           value={parent ?? ''}
-          disabled={disabled}
           onChange={(event) => void onSave('parent', { parent: event.target.value || null })}
         >
           <option value="">None</option>
@@ -665,7 +577,7 @@ function Metadata({
           value={dependsOn}
           tasks={tasks}
           exclude={[id]}
-          disabled={disabled}
+          disabled={false}
           onChange={(dependsOn) => void onSave('dependsOn', { dependsOn })}
         />
         <FieldError message={errors.dependsOn} />
@@ -676,11 +588,9 @@ function Metadata({
 
 function Labels({
   labels,
-  disabled,
   onChange,
 }: {
   labels: string[]
-  disabled: boolean
   onChange: (labels: string[]) => Promise<boolean>
 }) {
   const [draft, setDraft] = useState('')
@@ -701,37 +611,33 @@ function Labels({
           {labels.map((label) => (
             <li key={label} className="chip">
               {label}
-              {!disabled && (
-                <button
-                  type="button"
-                  aria-label={`Remove label ${label}`}
-                  onClick={() => void onChange(labels.filter((l) => l !== label))}
-                >
-                  ×
-                </button>
-              )}
+              <button
+                type="button"
+                aria-label={`Remove label ${label}`}
+                onClick={() => void onChange(labels.filter((l) => l !== label))}
+              >
+                ×
+              </button>
             </li>
           ))}
         </ul>
       )}
-      {!disabled && (
-        <input
-          className="chip-input"
-          aria-label="Add label"
-          placeholder="Add label"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              void add()
-            } else if (event.key === 'Escape' && draft !== '') {
-              event.stopPropagation()
-              setDraft('')
-            }
-          }}
-        />
-      )}
+      <input
+        className="chip-input"
+        aria-label="Add label"
+        placeholder="Add label"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            void add()
+          } else if (event.key === 'Escape' && draft !== '') {
+            event.stopPropagation()
+            setDraft('')
+          }
+        }}
+      />
     </div>
   )
 }

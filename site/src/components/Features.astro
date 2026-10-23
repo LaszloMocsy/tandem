@@ -1,9 +1,9 @@
 ---
-// Feature cards. Every claim here must match docs/spec.md and the README.
+// Feature cards. Every claim here must match the app and the README.
 const features = [
   {
-    title: 'Git is the history',
-    body: 'A task file changes only when something worth reading happens, and its changelog only grows. Commit review commits that one file and nothing else.',
+    title: 'Nothing is forgotten',
+    body: 'Every change to a task is kept: created, started, finished, reviewed, and each note an agent logs. Agents tag their commits with the task, so git links the code to it.',
     who: 'human',
   },
   {
@@ -22,8 +22,8 @@ const features = [
     who: 'agent',
   },
   {
-    title: 'The files are the truth',
-    body: 'Leases and working logs live in a SQLite database in the app’s data folder, never in the repo. Delete it, and the board rebuilds from the files.',
+    title: 'Nothing in your repo',
+    body: 'Tasks live in a SQLite database in the app’s data folder, one per project. Your repo gets no new files, and every worktree of it shares one board.',
     who: 'agent',
   },
   {

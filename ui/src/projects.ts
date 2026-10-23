@@ -1,4 +1,4 @@
-// Managing projects from the app: New board, Open board and Remove. The
+// Managing projects from the app: Open folder, switching and Remove. The
 // flows are plain functions over the folder picker and the store, so they
 // can be tested without the desktop app; `useProjectActions` wires them to
 // the dialogs.
@@ -8,69 +8,45 @@ import { CommandError, type AgentInfo, type Api, type Opened, type ProjectInfo }
 import { errorMessage } from './edit.ts'
 import type { BoardStore } from './store.ts'
 
-/** A folder with no board, offered to you before `.tandem/` is created. */
-export interface CreateOffer {
-  repoPath: string
-  /** Whether the folder is in a git repo; if not, the offer warns you. */
-  gitRepo: boolean
-  /** Whether you asked for a new board, rather than opening a folder. */
-  asked: boolean
-}
-
-/** What a New board or Open board flow did. */
+/** What an Open folder flow did. */
 export type Outcome =
   | { kind: 'cancelled' }
-  /** The board is open. `existing` if you asked for a new one and the folder had one. */
-  | { kind: 'opened'; project: ProjectInfo; existing: boolean }
-  /** Nothing is created until you accept the offer. */
-  | { kind: 'offer'; offer: CreateOffer }
+  | { kind: 'opened'; project: ProjectInfo }
+  /** The folder is not in a git repo; nothing is added until you confirm. */
+  | { kind: 'outsideGit'; repoPath: string }
 
 export interface FlowDeps {
   /** The system folder picker; `null` if you cancel. */
   chooseFolder: () => Promise<string | null>
   /** Opens a folder and shows it, as `BoardStore.openProject` does. */
-  openProject: (path: string, createFolder?: boolean) => Promise<Opened>
+  openProject: (path: string, allowOutsideGit?: boolean) => Promise<Opened>
 }
 
-function opened(result: Opened, existing: boolean): Outcome {
-  if (result.kind !== 'project') throw new Error(`could not open ${result.repoPath}`)
-  return { kind: 'opened', project: result.project, existing }
-}
-
-/**
- * New board: picks a folder and creates `.tandem/` in it. A folder git
- * doesn't track gets an offer with a warning instead, and a folder that
- * already has a board is just opened.
- */
-export async function newBoard(deps: FlowDeps): Promise<Outcome> {
-  const path = await deps.chooseFolder()
-  if (path === null) return { kind: 'cancelled' }
-  const result = await deps.openProject(path)
-  if (result.kind === 'project') return opened(result, true)
-  if (!result.gitRepo) {
-    return { kind: 'offer', offer: { repoPath: result.repoPath, gitRepo: false, asked: true } }
-  }
-  return opened(await deps.openProject(result.repoPath, true), false)
+function outcome(result: Opened): Outcome {
+  return result.kind === 'project'
+    ? { kind: 'opened', project: result.project }
+    : { kind: 'outsideGit', repoPath: result.repoPath }
 }
 
 /**
- * Open board: opens `path`, or a folder you pick. A folder without a board
- * gets an offer to create one, as the spec's project switcher does.
+ * Open folder: opens `path`, or a folder you pick. A folder in a git repo
+ * opens its repo's board, starting an empty one the first time. A folder
+ * outside git needs your confirmation first, unless `allowOutsideGit`, as
+ * for a project already in the list.
  */
-export async function openBoard(deps: FlowDeps, path?: string): Promise<Outcome> {
+export async function openFolder(
+  deps: FlowDeps,
+  path?: string,
+  allowOutsideGit = false,
+): Promise<Outcome> {
   const chosen = path ?? (await deps.chooseFolder())
   if (chosen === null) return { kind: 'cancelled' }
-  const result = await deps.openProject(chosen)
-  if (result.kind === 'project') return opened(result, false)
-  return {
-    kind: 'offer',
-    offer: { repoPath: result.repoPath, gitRepo: result.gitRepo, asked: false },
-  }
+  return outcome(await deps.openProject(chosen, allowOutsideGit))
 }
 
-/** Accepts an offer: creates `.tandem/` and opens the board. */
-export async function createBoard(deps: FlowDeps, offer: CreateOffer): Promise<Outcome> {
-  return opened(await deps.openProject(offer.repoPath, true), false)
+/** Confirms a folder outside git: it becomes a project of its own. */
+export async function openOutsideGit(deps: FlowDeps, repoPath: string): Promise<Outcome> {
+  return outcome(await deps.openProject(repoPath, true))
 }
 
 /** A task an agent is working on now. */
@@ -91,7 +67,8 @@ export function workingTasks(agents: readonly AgentInfo[]): WorkingTask[] {
 /** A short label for why a listed project isn't open. */
 export function problemLabel(error: string): string {
   if (error === 'the folder is missing') return 'folder missing'
-  if (error.startsWith('the folder has no ')) return 'no board'
+  if (error === 'the project path is not a folder') return 'not a folder'
+  if (error === 'the project is not open') return 'not open'
   return "can't open"
 }
 
@@ -135,7 +112,8 @@ export function useProjectActions({
   onError: (message: string) => void
   onInfo: (message: string | null) => void
 }) {
-  const [offer, setOffer] = useState<CreateOffer | null>(null)
+  // A folder outside git, waiting for you to confirm it.
+  const [outsideGit, setOutsideGit] = useState<string | null>(null)
   const [removing, setRemoving] = useState<ProjectInfo | null>(null)
   // `null` while the first check runs.
   const [working, setWorking] = useState<WorkingTask[] | null>(null)
@@ -145,31 +123,26 @@ export function useProjectActions({
 
   const deps: FlowDeps = { chooseFolder: api.chooseFolder, openProject: store.openProject }
 
-  function settle(outcome: Outcome) {
-    if (outcome.kind === 'offer') {
-      setError(null)
-      setOffer(outcome.offer)
-    } else if (outcome.kind === 'opened' && outcome.existing) {
-      onInfo(`${outcome.project.repoPath} already has a board, so Tandem opened it.`)
-    }
-  }
-
   async function start(flow: () => Promise<Outcome>) {
     onInfo(null)
     try {
-      settle(await flow())
+      const outcome = await flow()
+      if (outcome.kind === 'outsideGit') {
+        setError(null)
+        setOutsideGit(outcome.repoPath)
+      }
     } catch (error) {
       onError(errorMessage(error))
     }
   }
 
-  async function accept() {
-    if (offer === null) return
+  async function confirmOutsideGit() {
+    if (outsideGit === null) return
     setBusy(true)
     setError(null)
     try {
-      await createBoard(deps, offer)
-      setOffer(null)
+      await openOutsideGit(deps, outsideGit)
+      setOutsideGit(null)
     } catch (error) {
       setError(errorMessage(error))
     } finally {
@@ -191,7 +164,7 @@ export function useProjectActions({
     setError(null)
     try {
       await store.removeProject(removing.id)
-      onInfo(`Removed ${removing.name} from Tandem. Its files are still in ${removing.repoPath}.`)
+      onInfo(`Removed ${removing.name} from Tandem. Its folder is still in ${removing.repoPath}.`)
       setRemoving(null)
     } catch (error) {
       setError(errorMessage(error))
@@ -220,11 +193,12 @@ export function useProjectActions({
   }, [listAgents, removing, checks, tasks])
 
   return {
-    newBoard: () => void start(() => newBoard(deps)),
-    openBoard: (path?: string) => void start(() => openBoard(deps, path)),
-    offer,
-    accept: () => void accept(),
-    closeOffer: useCallback(() => setOffer(null), []),
+    openFolder: () => void start(() => openFolder(deps)),
+    /** Shows a project from the list, which you confirmed when you added it. */
+    switchTo: (project: ProjectInfo) => void start(() => openFolder(deps, project.repoPath, true)),
+    outsideGit,
+    confirmOutsideGit: () => void confirmOutsideGit(),
+    closeOutsideGit: useCallback(() => setOutsideGit(null), []),
     removing,
     working,
     askRemove,

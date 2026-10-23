@@ -3,27 +3,15 @@ import { expect, test } from 'vitest'
 import type { Status } from './api.ts'
 import { ReviewBar } from './ReviewBar.tsx'
 
-function render(
-  status: Status,
-  {
-    disabled = false,
-    uncommitted = false,
-    committed = null as string | null,
-    error = null as string | null,
-  } = {},
-) {
+function render(status: Status, { busy = false, error = null as string | null } = {}) {
   return renderToStaticMarkup(
     <ReviewBar
       status={status}
-      disabled={disabled}
-      uncommitted={uncommitted}
-      committed={committed}
-      busy={false}
+      busy={busy}
       error={error}
       onApprove={() => {}}
       onMarkReviewed={() => {}}
       onReopen={async () => true}
-      onCommit={() => {}}
     />,
   )
 }
@@ -45,22 +33,15 @@ test('Review offers Mark reviewed and Reopen with feedback, with a dialog', () =
   expect(html).toContain('<dialog class="dialog" aria-label="Reopen with feedback"></dialog>')
 })
 
-test('Done offers Commit review only while the file has uncommitted changes', () => {
-  expect(buttons(render('done', { uncommitted: true }))).toEqual(['Commit review'])
-  expect(render('done')).toBe('')
-  expect(render('done', { committed: '0123456789abcdef' })).toContain(
-    'Review committed as <code>0123456</code>.',
-  )
-})
-
 test('other statuses show no bar', () => {
   expect(render('todo')).toBe('')
-  expect(render('in_progress', { uncommitted: true })).toBe('')
+  expect(render('in_progress')).toBe('')
+  expect(render('done')).toBe('')
 })
 
-test('actions are disabled for a read-only project or invalid file', () => {
-  expect(render('backlog', { disabled: true })).toMatch(/disabled="">Approve/)
-  expect(render('finished', { disabled: true })).toMatch(
+test('actions are disabled while one runs', () => {
+  expect(render('backlog', { busy: true })).toMatch(/disabled="">Approve/)
+  expect(render('finished', { busy: true })).toMatch(
     /disabled="">Mark reviewed.*disabled="">Reopen with feedback…/,
   )
 })

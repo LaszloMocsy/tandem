@@ -2,23 +2,21 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import type { ProjectInfo } from './api.ts'
 
 /**
- * The project on screen, as a menu: the other projects to switch to, New
- * board, Open board and Remove. Arrow keys move between items and Escape
+ * The project on screen, as a menu: the other projects to switch to, Open
+ * folder and Remove. Arrow keys move between items and Escape
  * closes it.
  */
 export function ProjectSwitcher({
   projects,
   current,
   onSwitch,
-  onNewBoard,
-  onOpenBoard,
+  onOpenFolder,
   onRemove,
 }: {
   projects: readonly ProjectInfo[]
   current: ProjectInfo
   onSwitch: (project: ProjectInfo) => void
-  onNewBoard: () => void
-  onOpenBoard: () => void
+  onOpenFolder: () => void
   onRemove: (project: ProjectInfo) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -80,7 +78,7 @@ export function ProjectSwitcher({
         title={current.repoPath}
         onClick={() => setOpen((open) => !open)}
       >
-        <span className={current.readOnly === null ? 'dot live' : 'dot read-only'} />
+        <span className="dot live" />
         {current.name}
         <span className="chevron" aria-hidden="true">
           ▾
@@ -116,21 +114,12 @@ export function ProjectSwitcher({
             type="button"
             role="menuitem"
             className="menu-item"
-            onClick={() => choose(onNewBoard)}
+            onClick={() => choose(onOpenFolder)}
           >
             <span className="menu-check" aria-hidden="true">
               ＋
             </span>
-            New board…
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className="menu-item"
-            onClick={() => choose(onOpenBoard)}
-          >
-            <span className="menu-check" />
-            Open board…
+            Open folder…
           </button>
           <div className="menu-separator" role="separator" />
           <button

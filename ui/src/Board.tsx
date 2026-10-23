@@ -25,7 +25,6 @@ export function Board({
   columns,
   now,
   selected,
-  readOnly,
   onOpen,
   onMove,
 }: {
@@ -33,7 +32,6 @@ export function Board({
   now: number
   /** The id of the task open in the detail pane. */
   selected: string | null
-  readOnly: boolean
   onOpen: (id: string) => void
   onMove: (task: TaskSummary, to: Status) => void
 }) {
@@ -78,7 +76,6 @@ export function Board({
                 card={card}
                 now={now}
                 selected={card.task.id === selected}
-                disabled={readOnly}
                 onOpen={onOpen}
               />
             ))}
@@ -131,18 +128,15 @@ function DraggableCard({
   card,
   now,
   selected,
-  disabled,
   onOpen,
 }: {
   card: CardData
   now: number
   selected: boolean
-  disabled: boolean
   onOpen: (id: string) => void
 }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: card.task.id,
-    disabled,
   })
   return (
     <Card

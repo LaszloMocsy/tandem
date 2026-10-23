@@ -1,4 +1,4 @@
-//! The MCP tools from the spec's tools table, each a thin layer over
+//! The MCP tools, each a thin layer over
 //! [`Service`]: parse the arguments, work out who is calling, run the
 //! service call on a blocking thread, and shape the result.
 //!
@@ -21,28 +21,25 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use tandem_board_core::index::Problem;
+use tandem_board_core::model::{InvalidId, Priority, Status, TaskId, Unmet};
 use tandem_board_core::service::{
-    Actor, Agent, Finish, NewTask, Service, ServiceError, TaskDetail, TaskEdit, TaskFilter,
-    TaskSummary, Written, client_agent_id,
+    Actor, Agent, Finish, NewTask, Saved, Service, ServiceError, TaskDetail, TaskEdit, TaskFilter,
+    TaskSummary, client_agent_id,
 };
-use tandem_board_core::store::{Priority, Status, TaskId, Unmet};
 
-/// The commit rules, repeated in the descriptions of the tools that write
-/// task files, so agents follow them even without an `AGENTS.md`.
-macro_rules! commit_rules {
+/// The rules for working on a task, repeated in the descriptions of the
+/// tools that change tasks, so agents follow them even without an
+/// `AGENTS.md`.
+macro_rules! task_rules {
     () => {
-        " Commit rules: include the task file in your first commit for the task \
-         (status in_progress) and in your final commit (status finished), add a \
-         `Task: <id>` trailer to every commit for the task, and never edit task \
-         frontmatter or the Changelog section by hand. If the tandem server is \
-         unreachable, ask the user to open the Tandem app instead of editing files."
+        " Add a `Task: <id>` trailer to every commit for the task. If the tandem \
+         server is unreachable, ask the user to open the Tandem app."
     };
 }
 
 /// The server's instructions, sent to every client.
 const INSTRUCTIONS: &str = concat!(
-    "This repo tracks work in `.tandem/` through these tools. Before starting \
+    "This repo's tasks live in the Tandem app; work on them through these tools. Before starting \
      work, call start_task on the task (use next_task if none was given) and \
      keep the agent id it returns: pass it as `agent` to log_progress, \
      set_blocked, add_changelog_entry, finish_task and release_task, and to \
@@ -53,7 +50,7 @@ const INSTRUCTIONS: &str = concat!(
      finish_task with a short summary before the final commit, ticking each \
      acceptance criterion you met and explaining each one you didn't. Never \
      mark tasks reviewed.",
-    commit_rules!()
+    task_rules!()
 );
 
 /// The tool handler for one project.
@@ -71,8 +68,8 @@ impl TandemTools {
         }
     }
 
-    /// Runs a service call on a blocking thread: the service does file and
-    /// database work and waits on the project lock.
+    /// Runs a service call on a blocking thread: the service does database
+    /// work and waits on the project lock.
     async fn run<T: Send + 'static>(
         &self,
         f: impl FnOnce(&Service) -> Result<T, ServiceError> + Send + 'static,
@@ -182,9 +179,8 @@ impl TandemTools {
             "Create a task. It starts in backlog and waits until the user approves it \
              into todo; only tasks in todo can be started. Use parent to split large \
              work into child tasks. Refused with cycle_detected, parent_not_found or \
-             not_found when parent or depends_on is missing or would close a loop. \
-             Writes the task file and returns its path.",
-            commit_rules!()
+             not_found when parent or depends_on is missing or would close a loop.",
+            task_rules!()
         )
     )]
     async fn create_task(
@@ -202,10 +198,10 @@ impl TandemTools {
             depends_on: task_ids(args.depends_on.unwrap_or_default())?,
         };
         let actor = self.actor(&context, args.agent).await?;
-        let written = self
+        let saved = self
             .run(move |service| service.create_task(&actor, new))
             .await?;
-        Ok(written_result(&written, None, Reminder::Next))
+        Ok(saved_result(&saved, None))
     }
 
     #[tool(
@@ -216,8 +212,8 @@ impl TandemTools {
              change. After approval, relevant_files, labels and priority stay open; \
              any other change sends a todo task back to backlog until the user \
              approves it again, and is refused on a task in progress, which only \
-             its lease holder may edit. Writes the task file and returns its path.",
-            commit_rules!()
+             its lease holder may edit.",
+            task_rules!()
         )
     )]
     async fn update_task(
@@ -240,10 +236,10 @@ impl TandemTools {
             depends_on: args.depends_on.map(task_ids).transpose()?,
         };
         let actor = self.actor(&context, args.agent).await?;
-        let written = self
+        let saved = self
             .run(move |service| service.update_task(&actor, id, edit))
             .await?;
-        Ok(written_result(&written, None, Reminder::Next))
+        Ok(saved_result(&saved, None))
     }
 
     #[tool(
@@ -253,9 +249,8 @@ impl TandemTools {
              log_progress, set_blocked, add_changelog_entry, finish_task and \
              release_task, and to any other call to keep your lease alive. The lease \
              lasts 15 minutes after your latest call. Refused with claimed_by_other, \
-             deps_not_done or invalid_transition. Writes the task file and returns \
-             its path.",
-            commit_rules!()
+             deps_not_done or invalid_transition.",
+            task_rules!()
         )
     )]
     async fn start_task(
@@ -265,7 +260,7 @@ impl TandemTools {
     ) -> Result<CallToolResult, CallToolResult> {
         let id = task_id(&args.id)?;
         let client_name = context.client_info().map(|info| info.name);
-        let (agent, written) = self
+        let (agent, saved) = self
             .run(move |service| {
                 let agent = service.register_agent(client_name.as_deref())?;
                 let actor = Actor::Agent(Agent {
@@ -275,12 +270,12 @@ impl TandemTools {
                 Ok((agent, service.start_task(&actor, id)?))
             })
             .await?;
-        Ok(written_result(&written, Some(&agent), Reminder::First))
+        Ok(saved_result(&saved, Some(&agent)))
     }
 
     #[tool(
-        description = "Add a note to the task's working log, shown on the board and \
-                       never committed. Requires your agent id from start_task."
+        description = "Add a note to the task's working log, shown on the board. \
+                       Requires your agent id from start_task."
     )]
     async fn log_progress(
         &self,
@@ -316,8 +311,8 @@ impl TandemTools {
         description = concat!(
             "Add a milestone entry to the changelog of a long task, before a \
              meaningful intermediate commit. Optional. Requires your agent id from \
-             start_task. Writes the task file and returns its path.",
-            commit_rules!()
+             start_task.",
+            task_rules!()
         )
     )]
     async fn add_changelog_entry(
@@ -328,10 +323,10 @@ impl TandemTools {
         let id = task_id(&args.id)?;
         let actor = self.actor(&context, Some(args.agent)).await?;
         let files = args.files.unwrap_or_default();
-        let written = self
+        let saved = self
             .run(move |service| service.add_changelog_entry(&actor, id, &args.summary, files))
             .await?;
-        Ok(written_result(&written, None, Reminder::Intermediate))
+        Ok(saved_result(&saved, None))
     }
 
     #[tool(
@@ -341,9 +336,8 @@ impl TandemTools {
              the acceptance criteria you met by number (counting from 1) in met, and \
              put every other unticked criterion in unmet with a reason, or the call \
              fails with criteria_unmet. Never mark tasks reviewed; the user does. \
-             Requires your agent id from start_task. Writes the task file and returns \
-             its path.",
-            commit_rules!()
+             Requires your agent id from start_task.",
+            task_rules!()
         )
     )]
     async fn finish_task(
@@ -368,18 +362,17 @@ impl TandemTools {
                 })
                 .collect(),
         };
-        let written = self
+        let saved = self
             .run(move |service| service.finish_task(&actor, id, finish))
             .await?;
-        Ok(written_result(&written, None, Reminder::Final))
+        Ok(saved_result(&saved, None))
     }
 
     #[tool(
         description = concat!(
             "Give the task back: set it to todo, add a released changelog entry with \
-             your note, and remove your lease. Requires your agent id from start_task. \
-             Writes the task file and returns its path.",
-            commit_rules!()
+             your note, and remove your lease. Requires your agent id from start_task.",
+            task_rules!()
         )
     )]
     async fn release_task(
@@ -389,10 +382,10 @@ impl TandemTools {
     ) -> Result<CallToolResult, CallToolResult> {
         let id = task_id(&args.id)?;
         let actor = self.actor(&context, Some(args.agent)).await?;
-        let written = self
+        let saved = self
             .run(move |service| service.release_task(&actor, id, &args.note))
             .await?;
-        Ok(written_result(&written, None, Reminder::Next))
+        Ok(saved_result(&saved, None))
     }
 }
 
@@ -430,9 +423,9 @@ impl ServerHandler for TandemTools {
     }
 }
 
-// ---- Arguments, exactly as in the spec's tools table, plus `agent`.
+// ---- Arguments, plus `agent`.
 
-/// A status, as written in task files.
+/// A status.
 #[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 #[serde(rename_all = "snake_case")]
@@ -483,7 +476,7 @@ pub struct ListTasksArgs {
     pub label: Option<String>,
     /// Only children of this task id.
     pub parent: Option<String>,
-    /// Matches the id, title, labels or body, ignoring case.
+    /// Matches the id, title, labels or description, ignoring case.
     pub query: Option<String>,
     /// Only tasks start_task would accept: in todo, every dependency done,
     /// no live lease.
@@ -518,9 +511,9 @@ pub struct NextTaskArgs {
 #[serde(deny_unknown_fields)]
 pub struct CreateTaskArgs {
     pub title: String,
-    /// Markdown for the Description section.
+    /// Markdown.
     pub description: String,
-    /// One line each; written as unticked checkboxes.
+    /// One line each; they start unticked.
     pub acceptance_criteria: Vec<String>,
     pub priority: Option<PriorityArg>,
     /// The parent task id, to make this a child task.
@@ -539,7 +532,7 @@ pub struct UpdateTaskArgs {
     /// The task id, such as k3f9x2m.
     pub id: String,
     pub title: Option<String>,
-    /// Markdown for the Description section; blank removes it.
+    /// Markdown; blank clears it.
     pub description: Option<String>,
     /// Replaces every criterion; unchanged ticked ones stay ticked, new or
     /// reworded ones start unticked. An empty list removes them.
@@ -645,44 +638,24 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
 
 // ---- Results.
 
-/// What to remind the agent about after a file write.
-#[derive(Clone, Copy)]
-enum Reminder {
-    First,
-    Intermediate,
-    Final,
-    Next,
-}
-
-fn written_result(written: &Written, agent: Option<&str>, reminder: Reminder) -> CallToolResult {
-    let (path, id) = (&written.path, written.id);
-    let reminder = match reminder {
-        Reminder::First => format!(
-            "Include {path} (status in_progress) in your first commit for this task, \
-             with a `Task: {id}` trailer."
-        ),
-        Reminder::Intermediate => format!(
-            "Include {path} in the intermediate commit this entry describes, with a \
-             `Task: {id}` trailer."
-        ),
-        Reminder::Final => format!(
-            "Include {path} (status finished) in your final commit for this task, with \
-             a `Task: {id}` trailer."
-        ),
-        Reminder::Next => format!("Include {path} in your next commit."),
-    };
+/// The result of a call that changed a task. `start_task` adds the agent
+/// id it issued.
+fn saved_result(saved: &Saved, agent: Option<&str>) -> CallToolResult {
+    let id = saved.id;
     let mut value = json!({
         "id": id.as_str(),
-        "path": path,
-        "status": written.status.as_str(),
-        "reminder": reminder,
+        "status": saved.status.as_str(),
     });
-    if let Some(agent) = agent {
-        value["agent"] = json!(agent);
-    }
     let text = match agent {
-        Some(agent) => format!("{reminder} Your agent id for this task is {agent}.\n{value}"),
-        None => format!("{reminder}\n{value}"),
+        Some(agent) => {
+            value["agent"] = json!(agent);
+            format!(
+                "Your agent id for this task is {agent}; pass it as `agent` to every \
+                 later call for it. Add a `Task: {id}` trailer to every commit for this \
+                 task.\n{value}"
+            )
+        }
+        None => value.to_string(),
     };
     with_text(CallToolResult::structured(value), text)
 }
@@ -710,7 +683,7 @@ fn with_text(mut result: CallToolResult, text: String) -> CallToolResult {
 
 fn task_id(s: &str) -> Result<TaskId, CallToolResult> {
     s.parse()
-        .map_err(|e: tandem_board_core::store::InvalidId| error("invalid_argument", &e.to_string()))
+        .map_err(|e: InvalidId| error("invalid_argument", &e.to_string()))
 }
 
 fn task_ids(ids: Vec<String>) -> Result<Vec<TaskId>, CallToolResult> {
@@ -729,9 +702,6 @@ fn summary(task: &TaskSummary) -> Value {
         "lease_holder": task.lease.as_ref().map(|l| l.agent_id.clone()),
         "lease_stale": task.lease.as_ref().map(|l| !l.live),
         "blocked": task.blocked,
-        "invalid": task.problem.as_ref().map(|p| match p {
-            Problem::InvalidFile(message) | Problem::Graph(message) => message.clone(),
-        }),
     })
 }
 

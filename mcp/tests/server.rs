@@ -8,8 +8,8 @@ use rmcp::model::{
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
 use serde_json::{Value, json};
-use tandem_board_core::service::{Actor, Config, NewTask, Service};
-use tandem_board_core::store::{Status, TaskId};
+use tandem_board_core::model::{Status, TaskId};
+use tandem_board_core::service::{Actor, Config, NewTask, Service, TaskFilter};
 use tandem_board_mcp::{Endpoints, McpServer, ServeError, endpoint_path};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -30,7 +30,6 @@ const PROTOCOLS: [Protocol; 2] = [Protocol::Latest, Protocol::Legacy];
 /// A project, its service and a running MCP server on a free port.
 struct Env {
     _data: TempDir,
-    _repo: TempDir,
     service: Arc<Service>,
     endpoints: Endpoints,
     addr: SocketAddr,
@@ -40,9 +39,7 @@ struct Env {
 impl Env {
     async fn new() -> Self {
         let data = TempDir::new().unwrap();
-        let repo = TempDir::new().unwrap();
-        let service =
-            Arc::new(Service::open(data.path(), "demo", repo.path(), Config::default()).unwrap());
+        let service = Arc::new(Service::open(data.path(), "demo", Config::default()).unwrap());
         let cancel = CancellationToken::new();
         let endpoints = Endpoints::new(&cancel);
         endpoints.insert("demo", Arc::clone(&service));
@@ -57,7 +54,6 @@ impl Env {
         tokio::spawn(server.run());
         Self {
             _data: data,
-            _repo: repo,
             service,
             endpoints,
             addr,
@@ -87,8 +83,9 @@ impl Env {
             .id
     }
 
-    fn file(&self, id: TaskId) -> String {
-        std::fs::read_to_string(self.service.task_dir().join(id.file_name())).unwrap()
+    /// The task in the Markdown format, as `get_task` shows it.
+    fn markdown(&self, id: TaskId) -> String {
+        self.service.get_task(&Actor::User, id).unwrap().markdown
     }
 }
 
@@ -177,7 +174,7 @@ async fn every_tool_has_exactly_the_specs_arguments() {
             .instructions
             .as_deref()
             .unwrap()
-            .contains("Commit rules:")
+            .contains("Add a `Task: <id>` trailer")
     );
 
     // (tool, every argument, required arguments). `agent` is the id
@@ -274,7 +271,7 @@ async fn every_tool_has_exactly_the_specs_arguments() {
         );
     }
 
-    // Tools that write task files repeat the commit rules.
+    // Tools that change tasks repeat the commit trailer rule.
     for tool in &tools {
         let description = tool.description.as_deref().unwrap_or_default();
         let writes = [
@@ -287,7 +284,7 @@ async fn every_tool_has_exactly_the_specs_arguments() {
         ]
         .contains(&tool.name.as_ref());
         assert_eq!(
-            description.contains("Commit rules: include the task file in your first commit"),
+            description.contains("Add a `Task: <id>` trailer to every commit for the task."),
             writes,
             "{}",
             tool.name
@@ -315,15 +312,9 @@ async fn an_agent_works_a_task_through_on_either_protocol() {
         .await
         .unwrap();
         let id: TaskId = created["id"].as_str().unwrap().parse().unwrap();
-        let path = format!(".tandem/{id}.md");
-        assert_eq!(created["path"], json!(path));
-        assert_eq!(created["status"], json!("backlog"));
-        assert_eq!(
-            created["reminder"],
-            json!(format!("Include {path} in your next commit."))
-        );
+        assert_eq!(created, json!({ "id": id.as_str(), "status": "backlog" }));
         assert!(
-            env.file(id).contains("· claude-code · created"),
+            env.markdown(id).contains("· claude-code · created"),
             "{protocol:?}"
         );
         assert_eq!(
@@ -341,13 +332,6 @@ async fn an_agent_works_a_task_through_on_either_protocol() {
         let agent = started["agent"].as_str().unwrap().to_owned();
         assert!(agent.starts_with("claude-code-"), "{agent}");
         assert_eq!(started["status"], json!("in_progress"));
-        assert_eq!(
-            started["reminder"],
-            json!(format!(
-                "Include {path} (status in_progress) in your first commit for this task, \
-                 with a `Task: {id}` trailer."
-            ))
-        );
 
         // Holder calls carry the issued id.
         call(
@@ -383,7 +367,7 @@ async fn an_agent_works_a_task_through_on_either_protocol() {
         )
         .await
         .unwrap();
-        assert_eq!(detail["markdown"], json!(env.file(id)));
+        assert_eq!(detail["markdown"], json!(env.markdown(id)));
         assert_eq!(detail["work_log"][0]["message"], json!("Found the race."));
         assert_eq!(detail["work_log"][0]["agent"], json!(agent));
 
@@ -409,15 +393,8 @@ async fn an_agent_works_a_task_through_on_either_protocol() {
         )
         .await
         .unwrap();
-        assert_eq!(finished["status"], json!("finished"));
-        assert_eq!(
-            finished["reminder"],
-            json!(format!(
-                "Include {path} (status finished) in your final commit for this task, with \
-                 a `Task: {id}` trailer."
-            ))
-        );
-        let file = env.file(id);
+        assert_eq!(finished, json!({ "id": id.as_str(), "status": "finished" }));
+        let file = env.markdown(id);
         assert!(file.contains("- [x] One refresh at a time"));
         assert!(file.contains(&format!("· {agent} · finished\nSerialized the refresh.\n")));
         assert!(file.contains("Unmet: 2 (needs a staging account)"));
@@ -479,30 +456,6 @@ async fn holder_tools_need_the_issued_agent_id() {
 }
 
 #[tokio::test]
-async fn an_agent_carries_on_after_reset_local_state() {
-    let env = Env::new().await;
-    let client = env.client("claude-code", Protocol::Latest).await;
-    let id = env.todo("Task");
-    let started = call(&client, "start_task", json!({ "id": id.as_str() }))
-        .await
-        .unwrap();
-    let agent = started["agent"].as_str().unwrap();
-
-    env.service.reset().unwrap();
-    // The issued ids are gone with the database, but the changelog shows
-    // this agent started the task, so its id still works.
-    let args = json!({ "id": id.as_str(), "message": "Still here.", "agent": agent });
-    call(&client, "log_progress", args).await.unwrap();
-    let lease = env
-        .service
-        .get_task(&Actor::User, id)
-        .unwrap()
-        .summary
-        .lease;
-    assert_eq!(lease.unwrap().agent_id, agent);
-}
-
-#[tokio::test]
 async fn errors_carry_the_specs_codes() {
     let env = Env::new().await;
     let client = env.client("claude-code", Protocol::Latest).await;
@@ -555,7 +508,7 @@ async fn errors_carry_the_specs_codes() {
     let edit = json!({ "id": child["id"], "parent": null });
     call(&client, "update_task", edit).await.unwrap();
     assert!(
-        !env.file(child["id"].as_str().unwrap().parse().unwrap())
+        !env.markdown(child["id"].as_str().unwrap().parse().unwrap())
             .contains("parent:")
     );
 
@@ -579,7 +532,7 @@ async fn errors_carry_the_specs_codes() {
     // The dependency waits on the task that waits on it: a loop.
     let edit = json!({ "id": dep.as_str(), "depends_on": [blocked.as_str()] });
     assert_eq!(code(&client, "update_task", edit).await, "cycle_detected");
-    assert!(!env.file(dep).contains("depends_on"));
+    assert!(!env.markdown(dep).contains("depends_on"));
 }
 
 #[tokio::test]
@@ -601,7 +554,7 @@ async fn two_agents_racing_for_a_task_have_one_winner() {
             other => panic!("round {round}: expected one winner, got {other:?}"),
         };
         assert_eq!(loser["code"], json!("claimed_by_other"));
-        let file = env.file(id);
+        let file = env.markdown(id);
         assert_eq!(file.matches("· started").count(), 1);
         assert!(file.contains(winner["agent"].as_str().unwrap()));
     }
@@ -653,9 +606,7 @@ async fn only_project_endpoints_on_localhost_answer() {
 async fn projects_can_be_added_and_removed_while_serving() {
     let env = Env::new().await;
     let data = TempDir::new().unwrap();
-    let repo = TempDir::new().unwrap();
-    let other =
-        Arc::new(Service::open(data.path(), "other", repo.path(), Config::default()).unwrap());
+    let other = Arc::new(Service::open(data.path(), "other", Config::default()).unwrap());
     let other_url = format!("http://{}{}", env.addr, endpoint_path("other"));
     let ping = |url: String| async move {
         reqwest::Client::new()
@@ -700,8 +651,16 @@ async fn projects_can_be_added_and_removed_while_serving() {
     .await
     .unwrap();
     let id: TaskId = created["id"].as_str().unwrap().parse().unwrap();
-    assert!(other.task_dir().join(id.file_name()).exists());
-    assert!(!env.service.task_dir().join(id.file_name()).exists());
+    let ids = |service: &Service| -> Vec<TaskId> {
+        service
+            .list_tasks(&Actor::User, &TaskFilter::default())
+            .unwrap()
+            .iter()
+            .map(|t| t.id)
+            .collect()
+    };
+    assert_eq!(ids(&other), [id]);
+    assert!(ids(&env.service).is_empty());
 
     assert!(env.endpoints.remove("other"));
     assert!(!env.endpoints.remove("other"));
@@ -712,9 +671,7 @@ async fn projects_can_be_added_and_removed_while_serving() {
 #[tokio::test]
 async fn the_endpoints_move_to_a_new_server_and_old_sessions_end() {
     let data = TempDir::new().unwrap();
-    let repo = TempDir::new().unwrap();
-    let service =
-        Arc::new(Service::open(data.path(), "demo", repo.path(), Config::default()).unwrap());
+    let service = Arc::new(Service::open(data.path(), "demo", Config::default()).unwrap());
     let app = CancellationToken::new();
     let endpoints = Endpoints::new(&app);
     endpoints.insert("demo", service);

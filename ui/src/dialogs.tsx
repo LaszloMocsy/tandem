@@ -10,7 +10,7 @@ import type {
 } from './api.ts'
 import { DependencyPicker } from './DependencyPicker.tsx'
 import { parseLines, taskName, taskOptions } from './edit.ts'
-import type { CreateOffer, WorkingTask } from './projects.ts'
+import type { WorkingTask } from './projects.ts'
 
 /**
  * A modal native `<dialog>`, shown while `open`. Its content mounts only
@@ -344,29 +344,18 @@ export function NewTaskForm({
   )
 }
 
-/** Why a board in a folder git doesn't track is a trade-off. */
-function NoGitWarning({ repoPath }: { repoPath: string }) {
-  return (
-    <p className="dialog-callout warning">
-      <code>{repoPath}</code> is not in a git repository. Tandem keeps tasks as files you commit
-      with your code, so without git they have no history and Commit review won't work. You can
-      run <code>git init</code> there now or later.
-    </p>
-  )
-}
-
 /**
- * Creating `.tandem/` in a folder without one: after Open board found no
- * board, or after New board picked a folder git doesn't track.
+ * Opening a folder outside git, which becomes a board of its own. Folders
+ * in a git repo open without asking.
  */
-export function CreateBoardForm({
-  offer,
+export function OutsideGitForm({
+  repoPath,
   busy,
   error,
   onSubmit,
   onCancel,
 }: {
-  offer: CreateOffer
+  repoPath: string
   busy: boolean
   error: string | null
   onSubmit: () => void
@@ -374,21 +363,17 @@ export function CreateBoardForm({
 }) {
   return (
     <form onSubmit={onSubmitted(onSubmit)}>
-      <h3>{offer.asked ? 'Create a board without git?' : 'No board in this folder'}</h3>
-      {!offer.asked && (
-        <p className="hint">
-          <code>{offer.repoPath}</code> has no <code>.tandem/</code> folder. Create one, with
-          its <code>README.md</code>, to start a board here?
-        </p>
-      )}
-      {!offer.gitRepo && <NoGitWarning repoPath={offer.repoPath} />}
+      <h3>Open a folder outside git?</h3>
+      <p className="dialog-callout warning">
+        <code>{repoPath}</code> is not in a git repository. Tandem gives every git repo one
+        board, shared by all its worktrees. This folder gets a board of its own, tied to this
+        path.
+      </p>
+      <p className="hint">
+        To share a board across worktrees, run <code>git init</code> there first.
+      </p>
       <FormError error={error} />
-      <Actions
-        submit={offer.gitRepo ? 'Create board' : 'Create board anyway'}
-        ready
-        busy={busy}
-        onCancel={onCancel}
-      />
+      <Actions submit="Open anyway" ready busy={busy} onCancel={onCancel} />
     </form>
   )
 }
@@ -420,13 +405,17 @@ export function RemoveProjectForm({
     <form onSubmit={onSubmitted(onSubmit)}>
       <h3>Remove “{project.name}” from Tandem?</h3>
       <p className="dialog-callout safe">
-        Your codebase stays as it is. Tandem won't delete <code>{project.repoPath}</code> or the
-        task files in its <code>.tandem/</code> folder.
+        Your codebase stays as it is. Tandem won't touch <code>{project.repoPath}</code> or any
+        file in it.
+      </p>
+      <p className="dialog-callout danger">
+        Tandem deletes this board's database from this machine: every task, its changelog and
+        working log, and the deleted tasks. It keeps one last backup and deletes the others.
       </p>
       <p className="hint">
-        The board leaves Tandem's project list, agents lose its MCP endpoint, and its local
-        activity (leases and working logs) is deleted. Open the folder again any time to bring the
-        board back.
+        The board leaves Tandem's project list and agents lose its MCP endpoint. Opening the
+        folder again starts an empty board; restore the last backup from Settings to bring the
+        tasks back.
       </p>
       {blocked && (
         <div className="dialog-callout danger" role="status">
@@ -473,65 +462,9 @@ function TaskList({ ids, tasks }: { ids: readonly string[]; tasks: readonly Task
 }
 
 /**
- * Reset local state: the board's database is deleted and rebuilt from the
- * task files. `working` lists the tasks agents hold now, which lose their
- * working logs; `null` while that is checked.
- */
-export function ResetLocalStateForm({
-  project,
-  working,
-  busy,
-  error,
-  onSubmit,
-  onCancel,
-}: {
-  project: ProjectInfo
-  working: readonly WorkingTask[] | null
-  busy: boolean
-  error: string | null
-  onSubmit: () => void
-  onCancel: () => void
-}) {
-  return (
-    <form onSubmit={onSubmitted(onSubmit)}>
-      <h3>Reset local state of “{project.name}”?</h3>
-      <p className="dialog-callout safe">
-        The task files stay as they are. Tandem rebuilds the board from <code>.tandem/</code>.
-      </p>
-      <p className="dialog-callout danger">
-        Leases, blocked flags, review feedback and working logs are lost. They exist only on this
-        machine, so they can't be brought back.
-      </p>
-      {working !== null && working.length > 0 && (
-        <div className="dialog-callout warning" role="status">
-          <p>
-            Agents are working on {working.length === 1 ? 'this task' : 'these tasks'}. They keep
-            working with the same agent id, but lose the notes logged so far.
-          </p>
-          <ul className="working">
-            {working.map((task) => (
-              <li key={task.id}>
-                <code>{task.id}</code> {task.title}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <FormError error={error} />
-      <Actions
-        submit={working === null ? 'Checking agents…' : 'Reset local state'}
-        ready={working !== null}
-        busy={busy}
-        danger
-        onCancel={onCancel}
-      />
-    </form>
-  )
-}
-
-/**
- * Deleting a task's file. Blocked while an agent works on it or another
- * task links to it; `check` is `null` while that is being checked.
+ * Deleting a task, which moves it to Deleted tasks until they are cleaned
+ * up. Blocked while an agent works on it or another task links to it;
+ * `check` is `null` while that is being checked.
  */
 export function DeleteTaskForm({
   task,
@@ -558,20 +491,9 @@ export function DeleteTaskForm({
     <form onSubmit={onSubmitted(onSubmit)}>
       <h3>Delete “{task.title || task.id}”?</h3>
       <p className="hint">
-        Tandem deletes <code>.tandem/{task.id}.md</code> from your repo, at any status. Nothing is
-        committed for you.
+        The task leaves the board, at any status, and moves to Deleted tasks. You can restore it
+        from Settings → Project until deleted tasks are cleaned up.
       </p>
-      {check !== null &&
-        (check.committed ? (
-          <p className="dialog-callout safe">
-            Git history keeps its last committed version, and the deletion shows up in your next
-            commit.
-          </p>
-        ) : (
-          <p className="dialog-callout warning">
-            This task was never committed, so deleting it can't be undone.
-          </p>
-        ))}
       {blocked && (
         <div className="dialog-callout danger" role="status">
           {check.lease && (
@@ -604,6 +526,89 @@ export function DeleteTaskForm({
         ready={(check !== null || error !== null) && !blocked}
         busy={busy}
         cancel="Keep task"
+        danger
+        onCancel={onCancel}
+      />
+    </form>
+  )
+}
+
+/**
+ * Clean up deleted tasks: removes every deleted task for good, so none of
+ * them can be restored.
+ */
+export function CleanUpDeletedForm({
+  count,
+  busy,
+  error,
+  onSubmit,
+  onCancel,
+}: {
+  count: number
+  busy: boolean
+  error: string | null
+  onSubmit: () => void
+  onCancel: () => void
+}) {
+  const tasks = count === 1 ? '1 deleted task' : `${count} deleted tasks`
+  return (
+    <form onSubmit={onSubmitted(onSubmit)}>
+      <h3>Clean up {tasks}?</h3>
+      <p className="dialog-callout danger">
+        Cleaning up permanently deletes the {tasks} and their history. This can't be undone.
+      </p>
+      <p className="hint">
+        It also resets the undo history: after cleaning up, none of them can be restored.
+      </p>
+      <FormError error={error} />
+      <Actions
+        submit="Clean up for good"
+        ready
+        busy={busy}
+        cancel="Keep them"
+        danger
+        onCancel={onCancel}
+      />
+    </form>
+  )
+}
+
+/**
+ * Restore a backup: replaces every task with the backup's. The current
+ * tasks are backed up first, so it can be undone.
+ */
+export function RestoreBackupForm({
+  when,
+  tasks,
+  busy,
+  error,
+  onSubmit,
+  onCancel,
+}: {
+  /** When the backup was made, as shown. */
+  when: string
+  /** Its tasks, such as `12 tasks`. */
+  tasks: string
+  busy: boolean
+  error: string | null
+  onSubmit: () => void
+  onCancel: () => void
+}) {
+  return (
+    <form onSubmit={onSubmitted(onSubmit)}>
+      <h3>Restore the backup from {when}?</h3>
+      <p className="dialog-callout danger">
+        Every task on this board, and its history, is replaced with the backup's {tasks}.
+      </p>
+      <p className="hint">
+        Your current tasks are backed up first, so you can undo this by restoring that backup.
+      </p>
+      <FormError error={error} />
+      <Actions
+        submit="Restore backup"
+        ready
+        busy={busy}
+        cancel="Keep current tasks"
         danger
         onCancel={onCancel}
       />

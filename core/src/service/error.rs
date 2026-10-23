@@ -1,10 +1,9 @@
-use crate::git::GitError;
+use crate::db::DbError;
 use crate::graph::GraphError;
-use crate::index::IndexError;
-use crate::store::{ReadOnly, Status, StoreError, TaskId};
+use crate::model::{Status, TaskId};
 
-/// Why a service call was refused. [`code`](Self::code) gives the spec's
-/// error code, which MCP responses carry so agents can act on it.
+/// Why a service call was refused. [`code`](Self::code) gives the error
+/// code, which MCP responses carry so agents can act on it.
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
     #[error("task `{0}` does not exist")]
@@ -13,7 +12,7 @@ pub enum ServiceError {
     ClaimedByOther {
         task: TaskId,
         holder: String,
-        /// `None` when you hold it, or an agent did before a rebuild.
+        /// `None` when you hold it, or an agent holds it without a lease.
         expires_at: Option<String>,
     },
     #[error("task `{task}` depends on tasks that are not done: {}", list(.pending))]
@@ -23,8 +22,6 @@ pub enum ServiceError {
         task: TaskId,
         holder: Option<String>,
     },
-    #[error("task `{task}` has an invalid file: {message}")]
-    InvalidFile { task: TaskId, message: String },
     #[error("cannot {action} task `{task}` while it is {}", .status.as_str())]
     InvalidTransition {
         task: TaskId,
@@ -51,66 +48,48 @@ pub enum ServiceError {
         /// Tasks that list this task in `depends_on`.
         dependents: Vec<TaskId>,
     },
+    #[error(
+        "an agent is working on {}; wait until it finishes or releases them",
+        tasks_text(.0)
+    )]
+    AgentsWorking(Vec<TaskId>),
     #[error("{0}")]
     InvalidArgument(String),
     #[error(transparent)]
-    Git(#[from] GitError),
-    #[error("the project is read-only: {0}")]
-    ReadOnly(ReadOnly),
-    #[error(transparent)]
-    Index(Box<IndexError>),
-    #[error(transparent)]
-    Store(Box<StoreError>),
+    Db(Box<DbError>),
 }
 
 impl ServiceError {
-    /// The error code: one of the spec's `not_found`, `claimed_by_other`,
-    /// `deps_not_done`, `not_holder`, `invalid_file`, `invalid_transition`,
-    /// `cycle_detected`, `parent_not_found` and `criteria_unmet`, or
-    /// `task_referenced`, `invalid_argument`, `read_only`, `git_failed` and
-    /// `internal`, which the spec doesn't name.
+    /// The error code: `not_found`, `claimed_by_other`, `deps_not_done`,
+    /// `not_holder`, `invalid_transition`, `cycle_detected`,
+    /// `parent_not_found`, `criteria_unmet`, `task_referenced`,
+    /// `agents_working`, `invalid_argument` or `internal`.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotFound(_) => "not_found",
             Self::ClaimedByOther { .. } => "claimed_by_other",
             Self::DepsNotDone { .. } => "deps_not_done",
             Self::NotHolder { .. } => "not_holder",
-            Self::InvalidFile { .. } => "invalid_file",
             Self::InvalidTransition { .. } => "invalid_transition",
             Self::Graph(e) => e.code(),
             Self::CriteriaUnmet { .. } => "criteria_unmet",
             Self::Referenced { .. } => "task_referenced",
+            Self::AgentsWorking(_) => "agents_working",
             Self::InvalidArgument(_) => "invalid_argument",
-            Self::ReadOnly(_) => "read_only",
-            Self::Git(_) => "git_failed",
-            Self::Store(e)
-                if matches!(
-                    **e,
-                    StoreError::Invalid { .. } | StoreError::NotRegularFile { .. }
-                ) =>
-            {
-                "invalid_file"
-            }
-            Self::Index(_) | Self::Store(_) => "internal",
+            Self::Db(_) => "internal",
         }
     }
 }
 
-impl From<IndexError> for ServiceError {
-    fn from(e: IndexError) -> Self {
-        Self::Index(Box::new(e))
-    }
-}
-
-impl From<StoreError> for ServiceError {
-    fn from(e: StoreError) -> Self {
-        Self::Store(Box::new(e))
+impl From<DbError> for ServiceError {
+    fn from(e: DbError) -> Self {
+        Self::Db(Box::new(e))
     }
 }
 
 impl From<rusqlite::Error> for ServiceError {
     fn from(e: rusqlite::Error) -> Self {
-        IndexError::from(e).into()
+        DbError::from(e).into()
     }
 }
 
@@ -124,6 +103,11 @@ fn linked(what: &str, tasks: &[TaskId]) -> String {
         return String::new();
     }
     format!("{what} {}", list(tasks))
+}
+
+fn tasks_text(tasks: &[TaskId]) -> String {
+    let noun = if tasks.len() == 1 { "task" } else { "tasks" };
+    format!("{noun} {}", list(tasks))
 }
 
 fn until(expires_at: &Option<String>) -> String {

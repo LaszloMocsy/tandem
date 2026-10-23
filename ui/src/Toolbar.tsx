@@ -9,7 +9,6 @@ export function Toolbar({
   query,
   label,
   parent,
-  readOnly,
   searchRef,
   onQuery,
   onLabel,
@@ -20,7 +19,6 @@ export function Toolbar({
   query: string
   label: string | null
   parent: string | null
-  readOnly: boolean
   searchRef: Ref<HTMLInputElement>
   onQuery: (query: string) => void
   onLabel: (label: string | null) => void
@@ -95,7 +93,6 @@ export function Toolbar({
       <button
         type="button"
         className="primary new-task-button"
-        disabled={readOnly}
         title="New task (N)"
         onClick={onNewTask}
       >

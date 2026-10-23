@@ -2,9 +2,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use tandem_board_core::git::{self, GitError};
-use tandem_board_core::service::{Actor, Config, Finish, NewTask, Service};
-use tandem_board_core::store::TaskId;
+use tandem_board_core::db::{AppDb, folder_name};
+use tandem_board_core::git;
 use tempfile::TempDir;
 
 /// Runs git in `repo`, asserting it succeeds, and returns its output.
@@ -26,12 +25,13 @@ fn run(repo: &Path, args: &[&str]) -> String {
     String::from_utf8(out.stdout).unwrap()
 }
 
-/// A repo with one commit of `README.md` and `other.txt`, an identity, and
-/// no signing or hooks from your own git config.
-fn repo() -> TempDir {
+/// A folder holding a repo `app` with one commit, an identity, and no
+/// signing or hooks from your own git config.
+fn repo() -> (TempDir, std::path::PathBuf) {
     let dir = TempDir::new().unwrap();
-    let repo = dir.path();
-    run(repo, &["init", "--quiet"]);
+    let repo = dir.path().join("app");
+    fs::create_dir(&repo).unwrap();
+    run(&repo, &["init", "--quiet"]);
     let hooks = repo.join(".git").join("no-hooks");
     for (key, value) in [
         ("user.name", "Sam"),
@@ -39,198 +39,93 @@ fn repo() -> TempDir {
         ("commit.gpgsign", "false"),
         ("core.hooksPath", hooks.to_str().unwrap()),
     ] {
-        run(repo, &["config", key, value]);
+        run(&repo, &["config", key, value]);
     }
     fs::write(repo.join("README.md"), "readme\n").unwrap();
-    fs::write(repo.join("other.txt"), "one\n").unwrap();
-    run(repo, &["add", "."]);
-    run(repo, &["commit", "--quiet", "-m", "Initial"]);
-    fs::create_dir_all(repo.join(".tandem")).unwrap();
-    dir
-}
-
-const TASK: &str = ".tandem/k3f9x2m.md";
-
-fn lines(text: &str) -> Vec<&str> {
-    text.lines().collect()
+    run(&repo, &["add", "."]);
+    run(&repo, &["commit", "--quiet", "-m", "Initial"]);
+    (dir, repo)
 }
 
 #[test]
 fn is_repo_is_true_anywhere_inside_a_work_tree() {
-    let repo = repo();
-    assert!(git::is_repo(repo.path()));
-    let sub = repo.path().join("sub");
+    let (dir, repo) = repo();
+    let sub = repo.join("src");
     fs::create_dir(&sub).unwrap();
+    assert!(git::is_repo(&repo));
     assert!(git::is_repo(&sub));
-    assert!(!git::is_repo(&repo.path().join(".git")));
-
-    let plain = TempDir::new().unwrap();
-    assert!(!git::is_repo(plain.path()));
-    assert!(!git::is_repo(&plain.path().join("missing")));
+    let outside = dir.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    assert!(!git::is_repo(&outside));
 }
 
 #[test]
-fn has_changes_sees_new_edited_and_staged_files() {
-    let dir = repo();
-    let repo = dir.path();
-    assert!(!git::has_changes(repo, TASK).unwrap(), "missing file");
+fn every_worktree_of_a_repo_has_the_same_common_dir() {
+    let (dir, repo) = repo();
+    let worktree = dir.path().join("app-feature");
+    run(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "feature",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let sub = worktree.join("docs");
+    fs::create_dir(&sub).unwrap();
 
-    fs::write(repo.join(TASK), "v1\n").unwrap();
-    assert!(git::has_changes(repo, TASK).unwrap(), "untracked");
-    run(repo, &["add", TASK]);
-    assert!(git::has_changes(repo, TASK).unwrap(), "staged");
-    run(repo, &["commit", "--quiet", "-m", "Add task"]);
-    assert!(!git::has_changes(repo, TASK).unwrap(), "committed");
+    let common = git::common_dir(&repo).unwrap();
+    assert_eq!(common, repo.join(".git").canonicalize().unwrap());
+    assert_eq!(git::common_dir(&worktree), Some(common.clone()));
+    assert_eq!(git::common_dir(&sub), Some(common.clone()));
+    assert_eq!(folder_name(&common), "app");
 
-    fs::write(repo.join(TASK), "v2\n").unwrap();
-    assert!(git::has_changes(repo, TASK).unwrap(), "edited");
-    // Other changed files don't count.
-    fs::write(repo.join(TASK), "v1\n").unwrap();
-    fs::write(repo.join("other.txt"), "two\n").unwrap();
-    assert!(!git::has_changes(repo, TASK).unwrap(), "other file edited");
+    let outside = dir.path().join("notes");
+    fs::create_dir(&outside).unwrap();
+    assert_eq!(git::common_dir(&outside), None);
 }
 
 #[test]
-fn commit_file_commits_only_that_file_and_leaves_the_rest_staged() {
-    let dir = repo();
-    let repo = dir.path();
-    // Staged: an edit and a new file. Unstaged: another edit.
-    fs::write(repo.join("other.txt"), "two\n").unwrap();
-    fs::write(repo.join("new.txt"), "new\n").unwrap();
-    run(repo, &["add", "other.txt", "new.txt"]);
-    fs::write(repo.join("README.md"), "edited\n").unwrap();
-    // The task file is staged in an older version, then edited again.
-    fs::write(repo.join(TASK), "v1\n").unwrap();
-    run(repo, &["add", TASK]);
-    fs::write(repo.join(TASK), "v2\n").unwrap();
-
-    let message = "Review k3f9x2m: Fix token refresh race\n\nTask: k3f9x2m";
-    let hash = git::commit_file(repo, TASK, message).unwrap();
-
-    assert_eq!(hash, run(repo, &["rev-parse", "HEAD"]).trim());
-    assert_eq!(
-        lines(&run(repo, &["show", "--name-only", "--format=", "HEAD"])),
-        [TASK]
+fn two_worktrees_open_the_same_project() {
+    let (dir, repo) = repo();
+    let worktree = dir.path().join("app-feature");
+    run(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "feature",
+            worktree.to_str().unwrap(),
+        ],
     );
-    assert_eq!(run(repo, &["show", &format!("HEAD:{TASK}")]), "v2\n");
-    assert_eq!(run(repo, &["log", "-1", "--format=%B"]).trim_end(), message);
-    assert_eq!(
-        run(
-            repo,
-            &["log", "-1", "--format=%(trailers:key=Task,valueonly)"]
-        )
-        .trim(),
-        "k3f9x2m"
-    );
-    // Everything else is as it was.
-    assert_eq!(
-        lines(&run(repo, &["diff", "--cached", "--name-only"])),
-        ["new.txt", "other.txt"]
-    );
-    assert_eq!(lines(&run(repo, &["diff", "--name-only"])), ["README.md"]);
-    assert_eq!(run(repo, &["show", ":other.txt"]), "two\n");
-    assert!(!git::has_changes(repo, TASK).unwrap());
-}
-
-#[test]
-fn failures_carry_gits_message() {
-    let dir = TempDir::new().unwrap();
-    let err = git::has_changes(dir.path(), TASK).unwrap_err();
-    assert!(
-        matches!(&err, GitError::Failed { command, message }
-            if command == "status" && message.contains("not a git repository")),
-        "{err}"
-    );
-}
-
-#[test]
-fn commit_review_commits_a_done_tasks_file_alone() {
-    let dir = repo();
-    let repo = dir.path();
     let data = TempDir::new().unwrap();
-    let config = Config {
-        user_name: "sam".into(),
-        ..Config::default()
-    };
-    let service = Service::open(data.path(), "test", repo, config).unwrap();
-    let user = Actor::User;
-    let id: TaskId = service
-        .create_task(
-            &user,
-            NewTask {
-                title: "Fix  token\trefresh race".into(),
-                ..NewTask::default()
-            },
-        )
-        .unwrap()
-        .id;
-    let path = format!(".tandem/{id}.md");
-    service.start_task(&user, id).unwrap();
-    service
-        .finish_task(
-            &user,
-            id,
-            Finish {
-                summary: "Done.".into(),
-                ..Finish::default()
-            },
-        )
+    let mut app = AppDb::open(data.path()).unwrap();
+    let common = git::common_dir(&repo).unwrap();
+
+    let first = app
+        .add_project(&common, &repo, &folder_name(&common))
         .unwrap();
-    assert_eq!(
-        service.commit_review(id).unwrap_err().code(),
-        "invalid_transition"
-    );
-
-    service.mark_reviewed(id).unwrap();
-    assert!(service.has_uncommitted_changes(id).unwrap());
-    assert!(!service.delete_check(id).unwrap().committed);
-    fs::write(repo.join("other.txt"), "two\n").unwrap();
-    run(repo, &["add", "other.txt"]);
-
-    service.commit_review(id).unwrap();
-    assert_eq!(
-        run(repo, &["log", "-1", "--format=%B"]).trim_end(),
-        format!("Review {id}: Fix token refresh race\n\nTask: {id}")
-    );
-    assert_eq!(
-        lines(&run(repo, &["show", "--name-only", "--format=", "HEAD"])),
-        [path.as_str()]
-    );
-    assert_eq!(
-        run(repo, &["show", &format!("HEAD:{path}")]),
-        fs::read_to_string(repo.join(&path)).unwrap()
-    );
-    assert_eq!(
-        lines(&run(repo, &["diff", "--cached", "--name-only"])),
-        ["other.txt"]
-    );
-    assert!(!service.has_uncommitted_changes(id).unwrap());
-    // Committed, so deleting it would leave a copy in git history.
-    assert!(service.delete_check(id).unwrap().committed);
-
-    // With nothing left to commit, git refuses.
-    assert_eq!(service.commit_review(id).unwrap_err().code(), "git_failed");
+    let common = git::common_dir(&worktree).unwrap();
+    let second = app
+        .add_project(&common, &worktree, &folder_name(&common))
+        .unwrap();
+    assert_eq!(first.id, "app");
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.last_path, worktree.canonicalize().unwrap());
+    assert_eq!(app.projects().unwrap().len(), 1);
 }
 
 #[test]
-fn is_committed_sees_only_files_in_the_latest_commit() {
-    let repo = repo();
-    let dir = repo.path();
-    assert!(git::is_committed(dir, "README.md"));
-    fs::write(dir.join("new.md"), "new\n").unwrap();
-    assert!(!git::is_committed(dir, "new.md"));
-    run(dir, &["add", "new.md"]);
-    assert!(!git::is_committed(dir, "new.md"));
-    run(dir, &["commit", "--quiet", "-m", "Add new"]);
-    assert!(git::is_committed(dir, "new.md"));
-
-    // Paths are relative to the folder, even below the work tree's root.
-    fs::create_dir(dir.join("sub")).unwrap();
-    fs::write(dir.join("sub/inner.md"), "inner\n").unwrap();
-    run(dir, &["add", "sub/inner.md"]);
-    run(dir, &["commit", "--quiet", "-m", "Add inner"]);
-    assert!(git::is_committed(&dir.join("sub"), "inner.md"));
-
-    let plain = TempDir::new().unwrap();
-    assert!(!git::is_committed(plain.path(), "README.md"));
+fn the_user_name_comes_from_git_config() {
+    let (dir, repo) = repo();
+    assert_eq!(git::user_name(&repo).as_deref(), Some("Sam"));
+    run(&repo, &["config", "user.name", ""]);
+    // An empty name counts as none, whatever the global config says.
+    assert_eq!(git::user_name(&repo), None);
+    drop(dir);
 }

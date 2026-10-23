@@ -2,7 +2,7 @@
 
 The landing page's hero is an 18-second loop of the real app: an agent picks up a task, works it and finishes it, and you review it. This kit makes every take the same.
 
-- `seed.ts` builds the demo repo, a small CLI called `pocket-weather`, at `/tmp/tandem-demo`. Its tasks are written by Tandem's own service (`core/examples/demo_seed.rs`), not by hand. Rerun it to reset the board between takes.
+- `seed.ts` builds the demo repo, a small CLI called `pocket-weather`, at `/tmp/tandem-demo`, and its board in the app's database. The tasks are written by Tandem's own service (`core/examples/demo_seed.rs`), not by hand. Rerun it to reset the repo and the board between takes; quit Tandem first, since seeding replaces the board's database.
 - `drive.ts` calls Tandem's MCP tools on a fixed timeline, as Codex and Claude Code.
 
 ## The board after seeding
@@ -15,18 +15,18 @@ The landing page's hero is an 18-second loop of the real app: an agent picks up 
 | Review      | Parse city names with spaces                                                                     |
 | Done        | Set up the project and CI · Fetch current conditions · Print a one-line summary                  |
 
-Right after `seed.ts`, the retry task is still in Todo; `drive.ts` claims it as Codex before the timeline starts, so its lease is live on camera. Every task has real commits: the code with the task file in progress, the finished task file, and for Done tasks the review commit.
+Right after `seed.ts`, the retry task is still in Todo; `drive.ts` claims it as Codex before the timeline starts, so its lease is live on camera. Every finished task has a real commit of its code, with a `Task:` trailer.
 
 ## Setup, once
 
 1. Build a release app, so there's no DEV strip: `cargo tauri build`, then open the bundle under `target/release/bundle/`. Quit any other Tandem first; only one app can serve MCP on port 4317.
-2. `bun site/demo/seed.ts`
-3. In Tandem, open `/tmp/tandem-demo` from the project switcher (**Open folder…**).
+2. Quit Tandem, then run `bun site/demo/seed.ts`.
+3. Open Tandem and pick **tandem-demo** in the project switcher.
 4. Open the **Setup** panel and copy the project's MCP URL, such as `http://127.0.0.1:4317/p/tandem-demo/mcp`.
 
 ## Each take
 
-1. `bun site/demo/seed.ts` to reset the repo. Tandem picks up the new files; if the board looks wrong, use **Settings → Project → Reset local state**.
+1. Quit Tandem, run `bun site/demo/seed.ts` to reset the repo and the board, then open Tandem again.
 2. `bun site/demo/drive.ts <mcp-url>`. It claims the retry task as Codex and waits.
 3. Start recording, hold the board at rest for a moment, then press Enter in the terminal. That moment is 0s below.
 4. Follow the shot list. Stop recording, then Ctrl-C `drive.ts`.
@@ -51,7 +51,7 @@ The timeline lives in `TIMELINE` at the top of `drive.ts`. If you change it, cha
 
 Record these only if you want them for How it works; otherwise the page keeps its HTML mocks.
 
-- **A: the task file diff.** After a take, show `git diff` of the `--units` task file in a terminal or editor: `status: todo` → `status: in_progress`, then the finished changelog entry.
+- **A: the commit trailer.** After a take, show `git log` in the demo repo: each task's code commit ends in a `Task: <id>` trailer.
 - **B: Setup panel copy.** Open the Setup panel and click the copy button for the Claude Code command.
 - **C: an agent proposes, you approve.** Ask an agent connected to the demo project to propose a child task of **Add a `--units` flag** with `create_task` and `parent`. It lands in Backlog; select it and press **A** to approve it into Todo.
 

@@ -4,10 +4,10 @@ import { Board } from './Board.tsx'
 import { buildColumns, COLUMNS } from './columns.ts'
 import { DetailPane, type PaneApi } from './DetailPane.tsx'
 import {
-  CreateBoardForm,
   Dialog,
   FinishForm,
   NewTaskForm,
+  OutsideGitForm,
   RemoveProjectForm,
   ReopenForm,
 } from './dialogs.tsx'
@@ -57,7 +57,6 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
   const { projects, project, tasks, loading, error } = useBoard((state) => state, store)
   const now = useNow(LEASE_TICK_MS)
   const current = projects.find((p) => p.id === project)
-  const readOnly = current?.readOnly != null
 
   const [query, setQuery] = useState('')
   const [label, setLabel] = useState<string | null>(null)
@@ -176,7 +175,7 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
         return run(async () => {
           const detail = await api.getTask(project, id)
           setDialogError(null)
-          setFinishing({ task, criteria: detail.content?.criteria ?? [] })
+          setFinishing({ task, criteria: detail.content.criteria })
         })
     }
   }
@@ -204,13 +203,13 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
       if (shortcut === 'search') {
         event.preventDefault()
         searchRef.current?.focus()
-      } else if (shortcut === 'newTask' && !readOnly) {
+      } else if (shortcut === 'newTask') {
         event.preventDefault()
         openNewTask()
       } else if (shortcut === 'markReviewed' || shortcut === 'approve') {
         // The focused card, or else the one open in the pane.
         const id = focusedTask() ?? open
-        if (id === null || readOnly) return
+        if (id === null) return
         event.preventDefault()
         void run(() =>
           shortcut === 'approve' ? api.approve(project, id) : api.markReviewed(project, id),
@@ -219,7 +218,7 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
     }
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
-  }, [api, project, open, readOnly, run, openNewTask, settings])
+  }, [api, project, open, run, openNewTask, settings])
 
   return (
     <div className="app">
@@ -232,16 +231,10 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
           <ProjectSwitcher
             projects={projects}
             current={current}
-            onSwitch={(project) => projectActions.openBoard(project.repoPath)}
-            onNewBoard={projectActions.newBoard}
-            onOpenBoard={() => projectActions.openBoard()}
+            onSwitch={projectActions.switchTo}
+            onOpenFolder={projectActions.openFolder}
             onRemove={projectActions.askRemove}
           />
-        )}
-        {current?.readOnly && (
-          <span className="badge" title={current.readOnly}>
-            Read-only
-          </span>
         )}
         {project !== null && (
           <Toolbar
@@ -249,7 +242,6 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
             query={query}
             label={label}
             parent={parent}
-            readOnly={readOnly}
             searchRef={searchRef}
             onQuery={setQuery}
             onLabel={setLabel}
@@ -286,11 +278,6 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
           </button>
         </nav>
       </header>
-      {current?.readOnly && (
-        <p className="read-only-notice" role="status">
-          Read-only: {current.readOnly}
-        </p>
-      )}
       {error && (
         <p className="error" role="alert">
           {error.message}
@@ -316,23 +303,19 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
         <Settings
           tab={settingsTab}
           project={current}
+          tasks={tasks}
           api={api}
           onTab={setSettingsTab}
           onClose={closeSettings}
           onProjectsChanged={() => void store.refreshProjects()}
-          onReset={(project) => {
-            void store.refetch()
-            setInfo(`Reset the local state of ${project.name}; the board was rebuilt from its files.`)
-          }}
           onRemove={projectActions.askRemove}
         />
       ) : project === null ? (
         <Welcome
           projects={projects}
           now={now}
-          onNewBoard={projectActions.newBoard}
-          onOpenBoard={() => projectActions.openBoard()}
-          onOpenProject={(project) => projectActions.openBoard(project.repoPath)}
+          onOpenFolder={projectActions.openFolder}
+          onOpenProject={projectActions.switchTo}
           onRemoveProject={projectActions.askRemove}
         />
       ) : loading ? (
@@ -343,7 +326,6 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
             columns={columns}
             now={now}
             selected={open}
-            readOnly={readOnly}
             onOpen={openTask}
             onMove={(task, to) => void move(task, to)}
           />
@@ -353,7 +335,6 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
               project={project}
               id={open}
               tasks={tasks}
-              readOnly={readOnly}
               onClose={close}
               api={api}
             />
@@ -374,17 +355,17 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
       )}
 
       <Dialog
-        open={projectActions.offer !== null}
-        label="Create board"
-        onClose={projectActions.closeOffer}
+        open={projectActions.outsideGit !== null}
+        label="Open a folder outside git"
+        onClose={projectActions.closeOutsideGit}
       >
-        {projectActions.offer && (
-          <CreateBoardForm
-            offer={projectActions.offer}
+        {projectActions.outsideGit !== null && (
+          <OutsideGitForm
+            repoPath={projectActions.outsideGit}
             busy={projectActions.busy}
             error={projectActions.error}
-            onCancel={projectActions.closeOffer}
-            onSubmit={projectActions.accept}
+            onCancel={projectActions.closeOutsideGit}
+            onSubmit={projectActions.confirmOutsideGit}
           />
         )}
       </Dialog>
@@ -417,9 +398,9 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
               onCancel={() => setCreating(false)}
               onSubmit={(task) =>
                 void submit(async () => {
-                  const written = await api.createTask(project, task)
+                  const saved = await api.createTask(project, task)
                   setCreating(false)
-                  openTask(written.id)
+                  openTask(saved.id)
                 })
               }
             />

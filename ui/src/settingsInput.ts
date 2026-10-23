@@ -10,13 +10,13 @@ export function parsePort(text: string): { port: number } | { problem: string } 
   return { port }
 }
 
-/** The name a project gets without one in its `config.toml`. */
+/** The name a project gets without one of its own. */
 export function folderName(repoPath: string): string {
   const parts = repoPath.split(/[\\/]/).filter((part) => part !== '')
   return parts.at(-1) ?? repoPath
 }
 
-/** The longest project name, as `config.toml` allows it. */
+/** The longest project name the app allows. */
 export const MAX_NAME_LENGTH = 100
 
 /** Why a project name can't be saved, if it can't. */

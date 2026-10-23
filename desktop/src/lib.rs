@@ -7,17 +7,20 @@ mod mcp;
 mod projects;
 
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-use tandem_board_core::index::{Changes, Theme};
+use jiff::SignedDuration;
+use tandem_board_core::db::{Changes, Theme};
 use tandem_board_mcp::Endpoints;
 use tauri::{Emitter, Manager, RunEvent};
 use tokio_util::sync::CancellationToken;
 
 use crate::build_env::BuildEnv;
-use crate::dto::{PROJECTS_CHANGED, ProjectsChanged, TASKS_CHANGED, TasksChanged};
+use crate::dto::{TASKS_CHANGED, TasksChanged};
 use crate::error::report;
 use crate::mcp::Mcp;
-use crate::projects::Projects;
+use crate::projects::{BACKUP_INTERVAL, Projects};
 
 pub fn run() {
     // Cancelled when the app exits, which stops the MCP server.
@@ -32,25 +35,17 @@ pub fn run() {
             let mcp = Mcp::new(Endpoints::new(&setup_cancel), setup_cancel.clone());
             let handle = app.handle().clone();
             let on_change = Arc::new(move |project: &str, changes: &Changes| {
-                if changes.has_tasks()
-                    && let Err(e) = handle.emit(TASKS_CHANGED, TasksChanged::new(project, changes))
-                {
+                if let Err(e) = handle.emit(TASKS_CHANGED, TasksChanged::new(project, changes)) {
                     report("cannot send tasks-changed", &e);
-                }
-                let payload = ProjectsChanged {
-                    project: project.to_owned(),
-                };
-                if changes.config
-                    && let Err(e) = handle.emit(PROJECTS_CHANGED, payload)
-                {
-                    report("cannot send projects-changed", &e);
                 }
             });
             let projects = Projects::new(&data_dir, mcp, on_change)?;
             apply_theme(app.handle(), projects.theme()?);
             projects.start_mcp()?;
             projects.open_all()?;
-            app.manage(Arc::new(projects));
+            let projects = Arc::new(projects);
+            start_backups(Arc::clone(&projects));
+            app.manage(projects);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -63,7 +58,6 @@ pub fn run() {
             commands::set_mcp_port,
             commands::set_theme,
             commands::set_project_name,
-            commands::reset_project,
             commands::list_tasks,
             commands::get_task,
             commands::list_agents,
@@ -71,25 +65,54 @@ pub fn run() {
             commands::update_task,
             commands::delete_check,
             commands::delete_task,
+            commands::list_deleted_tasks,
+            commands::restore_task,
+            commands::purge_deleted_tasks,
+            commands::list_backups,
+            commands::back_up_project,
+            commands::restore_backup,
+            commands::export_tasks,
             commands::approve_task,
             commands::start_task,
             commands::finish_task,
             commands::release_task,
             commands::mark_reviewed,
             commands::reopen_task,
-            commands::has_uncommitted_changes,
-            commands::commit_review,
             commands::set_blocked,
             commands::log_progress,
             commands::add_changelog_entry,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(move |_, event| {
+        .run(move |app, event| {
             if let RunEvent::Exit = event {
                 cancel.cancel();
+                if let Some(projects) = app.try_state::<Arc<Projects>>() {
+                    projects.back_up_changed(SignedDuration::ZERO);
+                }
             }
         });
+}
+
+/// How often the backup thread checks for changed projects.
+const BACKUP_CHECK: Duration = Duration::from_secs(10 * 60);
+
+/// Backs up every changed project now, as on launch, then each one that
+/// keeps changing at most once per [`BACKUP_INTERVAL`], on a thread of its
+/// own that lasts as long as the app.
+fn start_backups(projects: Arc<Projects>) {
+    let spawned = thread::Builder::new()
+        .name("tandem-backups".to_owned())
+        .spawn(move || {
+            projects.back_up_changed(SignedDuration::ZERO);
+            loop {
+                thread::sleep(BACKUP_CHECK);
+                projects.back_up_changed(BACKUP_INTERVAL);
+            }
+        });
+    if let Err(e) = spawned {
+        report("cannot start backups", &e);
+    }
 }
 
 /// Opens the main window from its config, titled with the build environment.

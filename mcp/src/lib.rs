@@ -1,4 +1,4 @@
-//! The MCP server for Tandem: the spec's tools over Streamable HTTP, one
+//! The MCP server for Tandem: the task tools over Streamable HTTP, one
 //! endpoint per project at `http://127.0.0.1:4317/p/<project-id>/mcp`, on
 //! the port set in the app's settings; projects can be added and removed
 //! while it runs.

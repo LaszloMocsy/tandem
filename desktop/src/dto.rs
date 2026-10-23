@@ -2,25 +2,15 @@
 //! mirror the service's types; `ui/src/api.ts` declares the same shapes.
 
 use serde::{Deserialize, Deserializer, Serialize};
-use tandem_board_core::index::{Changes, Problem};
+use tandem_board_core::db::Changes;
+use tandem_board_core::model::{self, Priority, Status, TaskId};
 use tandem_board_core::service::{self, LogEntry};
-use tandem_board_core::store::{self, Priority, Status, TaskId};
 
 /// The `tasks-changed` event.
 pub const TASKS_CHANGED: &str = "tasks-changed";
 
-/// The `projects-changed` event: a project's entry in the list changed,
-/// such as its name after an edit to its `config.toml`.
-pub const PROJECTS_CHANGED: &str = "projects-changed";
-
-/// The payload of `projects-changed`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ProjectsChanged {
-    pub project: String,
-}
-
 /// The payload of `tasks-changed`: the tasks of one project that changed,
-/// from the board, an agent or an outside edit.
+/// from the board or an agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TasksChanged {
@@ -49,11 +39,10 @@ pub struct TaskSummary {
     pub parent: Option<String>,
     pub labels: Vec<String>,
     pub depends_on: Vec<String>,
-    /// `YYYY-MM-DD`; `None` only if the file is invalid.
-    pub created: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub created: String,
     pub lease: Option<Lease>,
     pub blocked: Option<String>,
-    pub problem: Option<TaskProblem>,
     /// Only filled in for tasks in `finished`.
     pub unmet: Vec<UnmetCriterion>,
 }
@@ -68,10 +57,9 @@ impl From<service::TaskSummary> for TaskSummary {
             parent: task.parent.map(|id| id.to_string()),
             labels: task.labels,
             depends_on: task.depends_on.iter().map(ToString::to_string).collect(),
-            created: task.created.map(|date| date.to_string()),
+            created: task.created.to_string(),
             lease: task.lease.map(Lease::from),
             blocked: task.blocked,
-            problem: task.problem.map(TaskProblem::from),
             unmet: task.unmet.into_iter().map(UnmetCriterion::from).collect(),
         }
     }
@@ -86,8 +74,8 @@ pub struct UnmetCriterion {
     pub reason: String,
 }
 
-impl From<store::UnmetCriterion> for UnmetCriterion {
-    fn from(unmet: store::UnmetCriterion) -> Self {
+impl From<model::UnmetCriterion> for UnmetCriterion {
+    fn from(unmet: model::UnmetCriterion) -> Self {
         Self {
             criterion: unmet.number,
             text: unmet.text,
@@ -161,8 +149,6 @@ pub struct DeleteCheck {
     pub dependents: Vec<String>,
     /// The live lease, while an agent is working on the task.
     pub lease: Option<Lease>,
-    /// Whether git history keeps a copy of the file.
-    pub committed: bool,
 }
 
 impl From<service::DeleteCheck> for DeleteCheck {
@@ -171,31 +157,27 @@ impl From<service::DeleteCheck> for DeleteCheck {
             children: check.children.iter().map(ToString::to_string).collect(),
             dependents: check.dependents.iter().map(ToString::to_string).collect(),
             lease: check.lease.map(Into::into),
-            committed: check.committed,
         }
     }
 }
 
-/// Why a task gets the invalid badge.
+/// A deleted task, which can still be restored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TaskProblem {
-    /// `invalid_file`, or `graph` for a loop or a missing parent.
-    pub kind: &'static str,
-    pub message: String,
+pub struct DeletedTask {
+    pub id: String,
+    pub title: String,
+    pub status: &'static str,
+    pub deleted_at: String,
 }
 
-impl From<Problem> for TaskProblem {
-    fn from(problem: Problem) -> Self {
-        match problem {
-            Problem::InvalidFile(message) => Self {
-                kind: "invalid_file",
-                message,
-            },
-            Problem::Graph(message) => Self {
-                kind: "graph",
-                message,
-            },
+impl From<service::DeletedTask> for DeletedTask {
+    fn from(task: service::DeletedTask) -> Self {
+        Self {
+            id: task.id.to_string(),
+            title: task.title,
+            status: task.status.as_str(),
+            deleted_at: task.deleted_at,
         }
     }
 }
@@ -209,8 +191,7 @@ pub struct TaskDetail {
     pub children: Vec<TaskSummary>,
     pub work_log: Vec<WorkLogEntry>,
     pub review_feedback: Option<String>,
-    /// `None` if the file is invalid.
-    pub content: Option<TaskContent>,
+    pub content: TaskContent,
 }
 
 impl From<service::TaskDetail> for TaskDetail {
@@ -222,7 +203,7 @@ impl From<service::TaskDetail> for TaskDetail {
             children: task.children.into_iter().map(TaskSummary::from).collect(),
             work_log: task.work_log.into_iter().map(WorkLogEntry::from).collect(),
             review_feedback: task.review_feedback,
-            content: task.content.map(TaskContent::from),
+            content: task.content.into(),
         }
     }
 }
@@ -255,9 +236,9 @@ impl From<service::TaskContent> for TaskContent {
                 .changelog
                 .into_iter()
                 .map(|entry| ChangelogEntry {
-                    date: entry.heading.date,
-                    who: entry.heading.who,
-                    event: entry.heading.event,
+                    date: entry.date.to_string(),
+                    who: entry.who,
+                    event: entry.event,
                     text: entry.text,
                 })
                 .collect(),
@@ -305,21 +286,19 @@ impl From<LogEntry> for WorkLogEntry {
     }
 }
 
-/// The file a write changed.
+/// The task a change saved, and its status after it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Written {
+pub struct Saved {
     pub id: String,
-    pub path: String,
     pub status: &'static str,
 }
 
-impl From<service::Written> for Written {
-    fn from(written: service::Written) -> Self {
+impl From<service::Saved> for Saved {
+    fn from(saved: service::Saved) -> Self {
         Self {
-            id: written.id.to_string(),
-            path: written.path,
-            status: written.status.as_str(),
+            id: saved.id.to_string(),
+            status: saved.status.as_str(),
         }
     }
 }
@@ -450,7 +429,7 @@ impl From<Finish> for service::Finish {
             unmet: finish
                 .unmet
                 .into_iter()
-                .map(|u| tandem_board_core::store::Unmet {
+                .map(|u| model::Unmet {
                     criterion: u.criterion,
                     reason: u.reason,
                 })
@@ -469,11 +448,10 @@ mod tests {
             children: vec!["k3f9x2m".parse().unwrap()],
             dependents: Vec::new(),
             lease: None,
-            committed: true,
         });
         assert_eq!(
             serde_json::to_string(&check).unwrap(),
-            r#"{"children":["k3f9x2m"],"dependents":[],"lease":null,"committed":true}"#
+            r#"{"children":["k3f9x2m"],"dependents":[],"lease":null}"#
         );
     }
 
@@ -488,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn inputs_use_camel_case_and_the_files_values() {
+    fn inputs_use_camel_case_and_the_stored_values() {
         let task: NewTask = serde_json::from_str(
             r#"{"title":"T","acceptanceCriteria":["a"],"priority":"high","dependsOn":["k3f9x2m"]}"#,
         )
