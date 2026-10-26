@@ -229,15 +229,19 @@ pub fn delete_all(dir: &Path) -> Result<(), DbError> {
     }
 }
 
-/// Whether the database at `db_path`, or its WAL, was written after `at`.
-/// A database that can't be read counts as changed.
+/// Whether the database at `db_path`, or its WAL, was written after the
+/// millisecond `at` falls in, as a backup's time is only kept to the
+/// millisecond: a write just before the backup could otherwise look newer
+/// than it. A database that can't be read counts as changed.
 pub fn changed_since(db_path: &Path, at: Timestamp) -> bool {
+    let at = Timestamp::from_millisecond(at.as_millisecond()).unwrap_or(at)
+        + SignedDuration::from_millis(1);
     let at = SystemTime::from(at);
     ["", "-wal"].iter().any(|suffix| {
         let mut path = db_path.as_os_str().to_owned();
         path.push(suffix);
         match fs::metadata(PathBuf::from(path)).and_then(|meta| meta.modified()) {
-            Ok(modified) => modified > at,
+            Ok(modified) => modified >= at,
             Err(e) => e.kind() != io::ErrorKind::NotFound,
         }
     })
