@@ -40,8 +40,16 @@ CREATE TABLE settings (
 ///   it has no CHECK; `data` holds JSON for what only some kinds carry, such
 ///   as the files and unmet criteria of `finished`.
 /// - `leases` change on every agent call, so they live apart from `tasks`.
+/// - `changes` names every task each call changed, in commit order, so a
+///   process sharing the database can tell what another one changed. It is
+///   only a feed: rows are pruned after a day, and `seq` never goes back,
+///   not even after a restore.
+/// - `restoring` has a row while a backup is being restored, by any
+///   process. Every call that could change something is refused until the
+///   restore ends, or until `expires_at` if it never does.
 /// - Times are milliseconds since the Unix epoch, in UTC.
-pub(super) const PROJECT_MIGRATIONS: &[&str] = &["
+pub(super) const PROJECT_MIGRATIONS: &[&str] = &[
+    "
 CREATE TABLE actors (
   id         INTEGER PRIMARY KEY,
   kind       TEXT NOT NULL CHECK (kind IN ('user','agent')),
@@ -115,7 +123,21 @@ CREATE TABLE leases (
   expires_at INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX leases_by_actor ON leases (actor);
-"];
+",
+    "
+CREATE TABLE changes (
+  seq  INTEGER PRIMARY KEY AUTOINCREMENT,
+  task TEXT NOT NULL,                 -- the task's id; it may have been cleaned up since
+  at   INTEGER NOT NULL
+) STRICT;
+",
+    "
+CREATE TABLE restoring (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),  -- one row at most
+  expires_at INTEGER NOT NULL
+) STRICT;
+",
+];
 
 /// Opens or creates the database at `path` in WAL mode, with foreign keys
 /// enforced, and brings its schema up to date. `migrations[n]` takes the
@@ -150,7 +172,26 @@ pub(super) fn migrate(
     migrations: &[&str],
 ) -> Result<bool, DbError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let version = check_version(&tx, path, migrations)?;
+    let supported = migrations.len() as i64;
+    for migration in &migrations[version as usize..] {
+        tx.execute_batch(migration)?;
+    }
+    tx.pragma_update(None, "user_version", supported)?;
+    tx.commit()?;
+    Ok(version == 0)
+}
+
+/// The schema version of the database on `conn`, refused with
+/// [`DbError::NewerSchema`] if a newer app has migrated it past
+/// `migrations`. Every transaction checks it, so an app that is already
+/// running stops using a database a newer one has taken over.
+pub(super) fn check_version(
+    conn: &Connection,
+    path: &Path,
+    migrations: &[&str],
+) -> Result<i64, DbError> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let supported = migrations.len() as i64;
     if !(0..=supported).contains(&version) {
         return Err(DbError::NewerSchema {
@@ -159,10 +200,5 @@ pub(super) fn migrate(
             supported,
         });
     }
-    for migration in &migrations[version as usize..] {
-        tx.execute_batch(migration)?;
-    }
-    tx.pragma_update(None, "user_version", supported)?;
-    tx.commit()?;
-    Ok(version == 0)
+    Ok(version)
 }

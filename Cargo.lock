@@ -4232,6 +4232,7 @@ dependencies = [
 name = "tandem-board-core"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "dirs",
  "getrandom 0.4.3",
  "jiff",
  "rusqlite",
@@ -4247,6 +4248,7 @@ name = "tandem-board-desktop"
 version = "0.1.0-alpha.1"
 dependencies = [
  "jiff",
+ "rusqlite",
  "serde",
  "serde_json",
  "tandem-board-core",
@@ -4266,6 +4268,7 @@ dependencies = [
  "axum",
  "reqwest",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "tandem-board-core",

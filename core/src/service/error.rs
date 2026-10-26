@@ -53,6 +53,8 @@ pub enum ServiceError {
         tasks_text(.0)
     )]
     AgentsWorking(Vec<TaskId>),
+    #[error("a backup of this project is being restored; try again in a moment")]
+    Restoring,
     #[error("{0}")]
     InvalidArgument(String),
     #[error(transparent)]
@@ -63,7 +65,9 @@ impl ServiceError {
     /// The error code: `not_found`, `claimed_by_other`, `deps_not_done`,
     /// `not_holder`, `invalid_transition`, `cycle_detected`,
     /// `parent_not_found`, `criteria_unmet`, `task_referenced`,
-    /// `agents_working`, `invalid_argument` or `internal`.
+    /// `agents_working`, `restoring`, while a backup is being restored,
+    /// `invalid_argument`, `newer_schema`, once a newer app has taken the
+    /// database over, or `internal`.
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotFound(_) => "not_found",
@@ -75,7 +79,9 @@ impl ServiceError {
             Self::CriteriaUnmet { .. } => "criteria_unmet",
             Self::Referenced { .. } => "task_referenced",
             Self::AgentsWorking(_) => "agents_working",
+            Self::Restoring => "restoring",
             Self::InvalidArgument(_) => "invalid_argument",
+            Self::Db(e) if matches!(**e, DbError::NewerSchema { .. }) => "newer_schema",
             Self::Db(_) => "internal",
         }
     }

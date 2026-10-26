@@ -8,6 +8,7 @@ use rmcp::model::{
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RoleClient, RunningService};
 use rmcp::transport::StreamableHttpClientTransport;
 use serde_json::{Value, json};
+use tandem_board_core::db::project_db_path;
 use tandem_board_core::model::{Status, TaskId};
 use tandem_board_core::service::{Actor, Config, NewTask, Service, TaskFilter};
 use tandem_board_mcp::{Endpoints, McpServer, ServeError, endpoint_path};
@@ -533,6 +534,26 @@ async fn errors_carry_the_specs_codes() {
     let edit = json!({ "id": dep.as_str(), "depends_on": [blocked.as_str()] });
     assert_eq!(code(&client, "update_task", edit).await, "cycle_detected");
     assert!(!env.markdown(dep).contains("depends_on"));
+}
+
+#[tokio::test]
+async fn a_database_a_newer_app_took_over_is_refused() {
+    let env = Env::new().await;
+    let id = env.todo("Task");
+    let client = env.client("claude-code", Protocol::Latest).await;
+    let db = rusqlite::Connection::open(project_db_path(env._data.path(), "demo")).unwrap();
+    db.pragma_update(None, "user_version", 99).unwrap();
+
+    let error = call(&client, "list_tasks", json!({})).await.unwrap_err();
+    assert_eq!(error["code"], json!("newer_schema"));
+    assert!(
+        error["message"].as_str().unwrap().contains("update Tandem"),
+        "{error}"
+    );
+    assert_eq!(
+        code(&client, "start_task", json!({ "id": id.as_str() })).await,
+        "newer_schema"
+    );
 }
 
 #[tokio::test]

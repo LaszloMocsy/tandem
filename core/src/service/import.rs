@@ -6,11 +6,11 @@ use std::io;
 use std::path::Path;
 
 use jiff::civil::Date;
-use rusqlite::{Transaction, params};
+use rusqlite::params;
 use serde_json::json;
 
 use super::rows;
-use super::{Actor, Service, ServiceError};
+use super::{Actor, Call, Service, ServiceError};
 use crate::db::millis;
 use crate::markdown::{TaskDoc, read_folder};
 use crate::model::{Priority, TaskId};
@@ -63,7 +63,7 @@ impl Service {
                 }
                 let created_at = start_of(doc.created);
                 let created_by = match doc.changelog.iter().find(|e| e.event == "created") {
-                    Some(entry) => actor(call.tx, self, &mut actors, &entry.who, created_at)?,
+                    Some(entry) => actor(call, &mut actors, &entry.who, created_at)?,
                     None => call.actor_id,
                 };
                 let seq: i64 = call.tx.query_row(
@@ -98,7 +98,7 @@ impl Service {
                         .map(start_of)
                         .unwrap_or(created_at);
                     updated_at = updated_at.max(at);
-                    let who = actor(call.tx, self, &mut actors, &entry.who, at)?;
+                    let who = actor(call, &mut actors, &entry.who, at)?;
                     let data = (!entry.files.is_empty()
                         || entry.follow_ups.is_some()
                         || !entry.unmet.is_empty())
@@ -169,22 +169,22 @@ impl Service {
 /// The actor a changelog names: you if it is your name, ignoring case, and
 /// otherwise an agent by that name, added if new.
 fn actor(
-    tx: &Transaction<'_>,
-    service: &Service,
+    call: &Call<'_>,
     cache: &mut HashMap<String, i64>,
     who: &str,
     at: i64,
 ) -> Result<i64, ServiceError> {
     if who
         .trim()
-        .eq_ignore_ascii_case(service.config.user_name.trim())
+        .eq_ignore_ascii_case(call.config.user_name.trim())
     {
-        return Ok(service.user.load(std::sync::atomic::Ordering::Relaxed));
+        // An import is your call, so the caller is you.
+        return Ok(call.actor_id);
     }
     if let Some(&id) = cache.get(who) {
         return Ok(id);
     }
-    let id: i64 = tx.query_row(
+    let id: i64 = call.tx.query_row(
         "INSERT INTO actors (kind, name, first_seen, last_seen) VALUES ('agent', ?1, ?2, ?2)
          ON CONFLICT (kind, name) DO UPDATE SET
            first_seen = min(first_seen, excluded.first_seen),

@@ -31,6 +31,7 @@ impl Env {
             user_name: "sam".into(),
             clock: Arc::new(move || *clock.lock().unwrap()),
             time_zone: TimeZone::UTC,
+            ..Config::default()
         };
         let service = Service::open(data.path(), "test", config).unwrap();
         Self { data, now, service }
@@ -233,6 +234,31 @@ fn changes_after_a_backup_are_noticed() {
         &env.data.path().join("missing.db"),
         saved.at
     ));
+}
+
+#[test]
+fn writes_within_a_backups_millisecond_do_not_count() {
+    let env = Env::new();
+    let db = project_db_path(env.data.path(), "test");
+    let saved = env.service.back_up(&env.dir()).unwrap();
+    let touch = |at: Timestamp| {
+        for suffix in ["", "-wal"] {
+            let mut path = db.as_os_str().to_owned();
+            path.push(suffix);
+            fs::File::options()
+                .write(true)
+                .open(PathBuf::from(path))
+                .unwrap()
+                .set_modified(at.into())
+                .unwrap();
+        }
+    };
+    // Backup times are kept to the millisecond, so the backup may have been
+    // made late in it.
+    touch(saved.at + SignedDuration::from_micros(999));
+    assert!(!changed_since(&db, saved.at));
+    touch(saved.at + SignedDuration::from_millis(1));
+    assert!(changed_since(&db, saved.at));
 }
 
 #[test]

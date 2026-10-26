@@ -18,13 +18,32 @@ use std::path::{Path, PathBuf};
 use jiff::Timestamp;
 
 pub use app::{
-    AppDb, AppSettings, MAX_NAME_LEN, NameError, Project, Theme, folder_name, is_valid_project_id,
-    normalize_project_name,
+    AppDb, AppSettings, MAX_NAME_LEN, NameError, Project, Theme, app_db_path, folder_name,
+    is_valid_project_id, normalize_project_name,
 };
 pub use project::{Changes, ProjectDb, delete_project_db, project_db_path};
 
 /// The folder in the app's data directory that holds the databases.
 const DB_DIR: &str = "db";
+
+/// The app's identifier, as in `desktop/tauri.conf.json`. The data
+/// directory is named after it.
+pub const APP_IDENTIFIER: &str = "com.laszlomocsy.tandem";
+
+/// The environment variable that overrides [`data_dir`], as tests do.
+pub const DATA_DIR_VAR: &str = "TANDEM_DATA_DIR";
+
+/// The app's data directory, which every process using Tandem shares: the
+/// value of [`DATA_DIR_VAR`] if it is set and not empty, or else
+/// [`APP_IDENTIFIER`] in the platform's data directory, where Tauri puts
+/// it too, such as `~/Library/Application Support/com.laszlomocsy.tandem`
+/// on macOS. `None` if the platform has no data directory.
+pub fn data_dir() -> Option<PathBuf> {
+    match std::env::var_os(DATA_DIR_VAR) {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => dirs::data_dir().map(|dir| dir.join(APP_IDENTIFIER)),
+    }
+}
 
 /// An error opening or updating a database.
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +59,8 @@ pub enum DbError {
     #[error("{} cannot use WAL mode (journal mode is `{mode}`)", path.display())]
     NoWal { path: PathBuf, mode: String },
     #[error(
-        "{} has schema version {version}, but this app supports only up to {supported}",
+        "{} was changed by a newer version of Tandem (schema {version}; this version \
+         supports up to {supported}); update Tandem to open it",
         path.display()
     )]
     NewerSchema {

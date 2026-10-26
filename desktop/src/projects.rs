@@ -21,10 +21,10 @@ use std::thread;
 
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tandem_board_core::db::backup::{self, Backup, backup_dir, set_backups_owner};
 use tandem_board_core::db::{
-    AppDb, Changes, Project, ProjectDb, Theme, delete_project_db, folder_name,
+    AppDb, Changes, Project, ProjectDb, Theme, app_db_path, delete_project_db, folder_name,
     normalize_project_name, project_db_path, timestamp_text,
 };
 use tandem_board_core::git;
@@ -53,6 +53,10 @@ pub struct ProjectInfo {
     pub error: Option<String>,
     /// The project's MCP endpoint, while it is open and the server runs.
     pub mcp_url: Option<String>,
+    /// The project's database file.
+    pub db_path: String,
+    /// The folder that holds its backups.
+    pub backups_path: String,
 }
 
 /// The app's settings, as the Settings page shows them.
@@ -69,6 +73,18 @@ pub struct AppSettingsInfo {
     pub mcp_error: Option<String>,
     /// `system`, `light` or `dark`.
     pub theme: &'static str,
+    /// The app's database file, with the project list and these settings.
+    pub app_db_path: String,
+}
+
+/// A file or folder of the app's data that Settings can show in the
+/// system's file manager.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Place {
+    AppDb,
+    ProjectDb { project: String },
+    Backups { project: String },
 }
 
 /// A backup of a project's database, as Settings lists it.
@@ -156,7 +172,27 @@ impl Projects {
             mcp_url: self.mcp.addr().map(|addr| format!("http://{addr}")),
             mcp_error: self.mcp.error(),
             theme: settings.theme.as_str(),
+            app_db_path: app_db_path(&self.data_dir).display().to_string(),
         })
+    }
+
+    /// Where `place` is, and whether it is a folder. Refused with
+    /// `project_not_found` for a project not in the list. The backups
+    /// folder is created if the project has none yet.
+    pub fn place(&self, place: &Place) -> Result<(PathBuf, bool), Error> {
+        match place {
+            Place::AppDb => Ok((app_db_path(&self.data_dir), false)),
+            Place::ProjectDb { project } => {
+                self.project(project)?;
+                Ok((project_db_path(&self.data_dir, project), false))
+            }
+            Place::Backups { project } => {
+                self.project(project)?;
+                let dir = backup_dir(&self.data_dir, project);
+                fs::create_dir_all(&dir).map_err(|e| Error::internal(&e))?;
+                Ok((dir, true))
+            }
+        }
     }
 
     pub fn theme(&self) -> Result<Theme, Error> {
@@ -430,11 +466,20 @@ impl Projects {
         let changes = service.subscribe();
         let on_change = Arc::clone(&self.on_change);
         let id = project.id.clone();
+        let weak = Arc::downgrade(&service);
         thread::Builder::new()
             .name(format!("tandem-events-{id}"))
             .spawn(move || {
                 for changes in changes {
                     on_change(&id, &changes);
+                }
+                // The channel also closes when a newer app takes the
+                // database over. An empty change makes the board refetch,
+                // which fails and closes the project with the reason.
+                if let Some(service) = weak.upgrade()
+                    && service.check_schema().is_err()
+                {
+                    on_change(&id, &Changes::default());
                 }
             })
             .map_err(|e| Error::internal(&e))?;
@@ -444,6 +489,16 @@ impl Projects {
             .insert(&project.id, Arc::clone(&service));
         open.insert(project.id.clone(), service);
         Ok(())
+    }
+
+    /// Closes a project whose database a newer version of Tandem has taken
+    /// over: its service and MCP endpoint go, and the list shows `message`
+    /// as the reason. Opening it again fails the same way until Tandem is
+    /// updated.
+    pub fn close_taken_over(&self, id: &str, message: &str) {
+        lock(&self.open).remove(id);
+        self.mcp.endpoints().remove(id);
+        lock(&self.failed).insert(id.to_owned(), message.to_owned());
     }
 
     fn info(&self, project: &Project) -> ProjectInfo {
@@ -460,6 +515,12 @@ impl Projects {
                 .addr()
                 .filter(|_| open)
                 .map(|addr| format!("http://{addr}{}", endpoint_path(&project.id))),
+            db_path: project_db_path(&self.data_dir, &project.id)
+                .display()
+                .to_string(),
+            backups_path: backup_dir(&self.data_dir, &project.id)
+                .display()
+                .to_string(),
         }
     }
 
@@ -817,6 +878,44 @@ mod tests {
     }
 
     #[test]
+    fn a_project_a_newer_app_takes_over_is_closed_with_the_reason() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
+        let service = env.projects.service(&id).unwrap();
+        create(&service, "Task");
+        env.events.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let db = rusqlite::Connection::open(project_db_path(env.data.path(), &id)).unwrap();
+        db.pragma_update(None, "user_version", 99).unwrap();
+        // The board is told to refetch, which fails.
+        let (project, changes) = env.events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(project, id);
+        assert!(changes.is_empty());
+        let e = Error::from(
+            service
+                .list_tasks(&Actor::User, &TaskFilter::default())
+                .unwrap_err(),
+        );
+        assert_eq!(e.code, "newer_schema");
+
+        env.projects.close_taken_over(&id, &e.message);
+        assert_eq!(
+            env.projects.service(&id).err().unwrap().code,
+            "project_not_found"
+        );
+        assert!(!env.endpoints.project_ids().contains(&id));
+        let info = env.projects.list().unwrap().remove(0);
+        assert!(!info.open);
+        assert!(info.error.unwrap().contains("update Tandem"));
+
+        // Opening it again fails the same way.
+        drop(service);
+        let e = env.projects.open(folder.path(), true).unwrap_err();
+        assert_eq!(e.code, "newer_schema");
+    }
+
+    #[test]
     fn removing_a_project_deletes_its_database_and_leaves_the_folder() {
         let env = Env::new(TempDir::new().unwrap());
         let folder = TempDir::new().unwrap();
@@ -910,6 +1009,43 @@ mod tests {
         let backups = env.projects.backups(&id).unwrap();
         assert_eq!(backups.len(), 1);
         assert_eq!(backups[0].tasks, Some(1));
+    }
+
+    #[test]
+    fn settings_show_where_the_databases_and_backups_are() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let project = env.open(folder.path());
+        let data = env.data.path();
+        assert_eq!(
+            env.projects.app_settings().unwrap().app_db_path,
+            app_db_path(data).display().to_string()
+        );
+        let db = project_db_path(data, &project.id);
+        let backups = backup_dir(data, &project.id);
+        assert_eq!(project.db_path, db.display().to_string());
+        assert_eq!(project.backups_path, backups.display().to_string());
+
+        let place = |place| env.projects.place(&place);
+        assert_eq!(place(Place::AppDb).unwrap(), (app_db_path(data), false));
+        let id = project.id.clone();
+        assert_eq!(
+            place(Place::ProjectDb {
+                project: id.clone()
+            })
+            .unwrap(),
+            (db, false)
+        );
+        fs::remove_dir_all(&backups).ok();
+        assert_eq!(
+            place(Place::Backups { project: id }).unwrap(),
+            (backups.clone(), true)
+        );
+        assert!(backups.is_dir());
+        let missing = place(Place::Backups {
+            project: "missing".into(),
+        });
+        assert_eq!(missing.unwrap_err().code, "project_not_found");
     }
 
     #[test]

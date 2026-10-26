@@ -64,6 +64,7 @@ impl Changes {
 /// A project's database, `projects/<project-id>.db`.
 pub struct ProjectDb {
     conn: Connection,
+    path: PathBuf,
     created: bool,
 }
 
@@ -79,7 +80,11 @@ impl ProjectDb {
     /// Opens or creates the database at `path`.
     pub fn open_at(path: &Path) -> Result<Self, DbError> {
         let (conn, created) = schema::open(path, schema::PROJECT_MIGRATIONS)?;
-        Ok(Self { conn, created })
+        Ok(Self {
+            conn,
+            path: path.to_owned(),
+            created,
+        })
     }
 
     /// Whether opening created the database.
@@ -91,25 +96,83 @@ impl ProjectDb {
         &self.conn
     }
 
-    /// Replaces the whole database with the backup at `path`, then brings
-    /// its schema up to date. The copy is one write, so a failure leaves
-    /// the database as it was.
-    pub(crate) fn restore_from(&mut self, path: &Path) -> Result<(), DbError> {
+    /// Replaces the whole database with the backup at `path`. The backup is
+    /// copied to a scratch file next to the database first, brought up to
+    /// date, and adjusted by `prepare` in a transaction; that file is then
+    /// copied over the database in one write, so a failure leaves the
+    /// database as it was, and other connections see either the old state
+    /// or the restored one with `prepare`'s changes.
+    pub(crate) fn restore_from<T, E: From<DbError>>(
+        &mut self,
+        path: &Path,
+        prepare: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut scratch = self.path.as_os_str().to_owned();
+        scratch.push("-restore");
+        let scratch = PathBuf::from(scratch);
+        let result = self.restore_through(path, &scratch, prepare);
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let mut file = scratch.as_os_str().to_owned();
+            file.push(suffix);
+            // Left over at worst, and replaced by the next restore.
+            let _ = fs::remove_file(PathBuf::from(file));
+        }
+        result
+    }
+
+    fn restore_through<T, E: From<DbError>>(
+        &mut self,
+        path: &Path,
+        scratch: &Path,
+        prepare: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
+        fs::copy(path, scratch).map_err(io_error(scratch))?;
+        let mut conn = Connection::open(scratch).map_err(DbError::from)?;
+        conn.pragma_update(None, "foreign_keys", true)
+            .map_err(DbError::from)?;
+        schema::migrate(&mut conn, scratch, schema::PROJECT_MIGRATIONS)?;
+        let tx = conn.transaction().map_err(DbError::from)?;
+        let out = prepare(&tx)?;
+        tx.commit().map_err(DbError::from)?;
+        drop(conn);
         self.conn
-            .restore(MAIN_DB, path, None::<fn(rusqlite::backup::Progress)>)?;
-        // A backup is not in WAL mode, and the copy brings its header along.
-        self.conn.pragma_update(None, "journal_mode", "WAL")?;
-        schema::migrate(&mut self.conn, path, schema::PROJECT_MIGRATIONS)?;
-        Ok(())
+            .restore(MAIN_DB, scratch, None::<fn(rusqlite::backup::Progress)>)
+            .map_err(DbError::from)?;
+        // The copy brings the scratch file's header along, which may not
+        // be in WAL mode.
+        self.conn
+            .pragma_update(None, "journal_mode", "WAL")
+            .map_err(DbError::from)?;
+        Ok(out)
     }
 
     /// Starts a `BEGIN IMMEDIATE` transaction, which takes the write lock
     /// at once, so checks and changes inside it can't interleave with
-    /// another writer's, even in another process.
+    /// another writer's, even in another process. Refused with
+    /// [`DbError::NewerSchema`] once a newer app has migrated the database.
     pub(crate) fn begin(&mut self) -> Result<Transaction<'_>, DbError> {
+        self.transaction(TransactionBehavior::Immediate)
+    }
+
+    /// Starts a read transaction, which sees one state of the database
+    /// throughout, whatever other processes commit meanwhile. Refused like
+    /// [`begin`](Self::begin).
+    pub(crate) fn read(&mut self) -> Result<Transaction<'_>, DbError> {
+        self.transaction(TransactionBehavior::Deferred)
+    }
+
+    fn transaction(&mut self, behavior: TransactionBehavior) -> Result<Transaction<'_>, DbError> {
+        let tx = self.conn.transaction_with_behavior(behavior)?;
+        schema::check_version(&tx, &self.path, schema::PROJECT_MIGRATIONS)?;
+        Ok(tx)
+    }
+
+    /// `PRAGMA data_version`, which changes whenever another connection,
+    /// in this process or another, commits to the database.
+    pub(crate) fn data_version(&self) -> Result<i64, DbError> {
         Ok(self
             .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?)
+            .pragma_query_value(None, "data_version", |row| row.get(0))?)
     }
 }
 

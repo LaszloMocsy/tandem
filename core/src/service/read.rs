@@ -38,8 +38,9 @@ impl Service {
     /// lease, the most recently seen first, each with the tasks it holds.
     /// Every `start_task` issues a new agent id, so older ones drop off.
     pub fn list_agents(&self, seen_within: SignedDuration) -> Result<Vec<AgentInfo>, ServiceError> {
-        let db = self.lock();
-        let conn = db.connection();
+        let mut state = self.lock();
+        let tx = state.db.read()?;
+        let conn: &Connection = &tx;
         let now = (self.config.clock)();
 
         let mut held: HashMap<i64, Vec<HeldTask>> = HashMap::new();

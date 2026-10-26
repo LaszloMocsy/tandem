@@ -11,14 +11,15 @@ use std::thread;
 use std::time::Duration;
 
 use jiff::SignedDuration;
-use tandem_board_core::db::{Changes, Theme};
+use tandem_board_core::db::{Changes, Theme, data_dir};
 use tandem_board_mcp::Endpoints;
 use tauri::{Emitter, Manager, RunEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio_util::sync::CancellationToken;
 
 use crate::build_env::BuildEnv;
 use crate::dto::{TASKS_CHANGED, TasksChanged};
-use crate::error::report;
+use crate::error::{NEWER_SCHEMA, report};
 use crate::mcp::Mcp;
 use crate::projects::{BACKUP_INTERVAL, Projects};
 
@@ -30,8 +31,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
-            open_main_window(app)?;
-            let data_dir = app.path().app_data_dir()?;
+            // From core, so every process using Tandem finds the same one.
+            let data_dir = data_dir().ok_or("the system has no data directory")?;
             let mcp = Mcp::new(Endpoints::new(&setup_cancel), setup_cancel.clone());
             let handle = app.handle().clone();
             let on_change = Arc::new(move |project: &str, changes: &Changes| {
@@ -39,7 +40,14 @@ pub fn run() {
                     report("cannot send tasks-changed", &e);
                 }
             });
-            let projects = Projects::new(&data_dir, mcp, on_change)?;
+            let projects = match Projects::new(&data_dir, mcp, on_change) {
+                Err(e) if e.code == NEWER_SCHEMA => {
+                    refuse_to_start(app.handle(), e.message);
+                    return Ok(());
+                }
+                projects => projects?,
+            };
+            open_main_window(app)?;
             apply_theme(app.handle(), projects.theme()?);
             projects.start_mcp()?;
             projects.open_all()?;
@@ -54,6 +62,7 @@ pub fn run() {
             commands::remove_project,
             commands::choose_folder,
             commands::open_link,
+            commands::show_in_folder,
             commands::get_app_settings,
             commands::set_mcp_port,
             commands::set_theme,
@@ -115,6 +124,17 @@ fn start_backups(projects: Arc<Projects>) {
     }
 }
 
+/// Tells you that a newer version of Tandem has taken the app's data over,
+/// then quits once you close the message. No window opens.
+fn refuse_to_start(app: &tauri::AppHandle, message: String) {
+    let handle = app.clone();
+    app.dialog()
+        .message(message)
+        .title("Tandem cannot start")
+        .kind(MessageDialogKind::Error)
+        .show(move |_| handle.exit(1));
+}
+
 /// Opens the main window from its config, titled with the build environment.
 /// It's built here rather than by Tauri, so the plain title never flashes.
 fn open_main_window(app: &tauri::App) -> tauri::Result<()> {
@@ -143,5 +163,19 @@ pub(crate) fn apply_theme(app: &tauri::AppHandle, theme: Theme) {
         if let Err(e) = window.set_theme(theme) {
             report("cannot set the window theme", &e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tandem_board_core::db::APP_IDENTIFIER;
+
+    #[test]
+    fn core_finds_the_data_directory_tauri_uses() {
+        // Tauri's app data directory is the identifier in the platform's
+        // data directory, as `data_dir` builds it.
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(config["identifier"], APP_IDENTIFIER);
     }
 }

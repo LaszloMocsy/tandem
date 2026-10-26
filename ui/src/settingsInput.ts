@@ -31,3 +31,10 @@ export function nameProblem(name: string): string | null {
   }
   return null
 }
+
+/** What the system's file manager is called, for buttons that open it. */
+export function fileManager(userAgent = globalThis.navigator?.userAgent ?? ''): string {
+  if (/Mac/.test(userAgent)) return 'Finder'
+  if (/Windows/.test(userAgent)) return 'Explorer'
+  return 'file manager'
+}

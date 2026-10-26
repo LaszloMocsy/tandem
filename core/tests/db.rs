@@ -1,10 +1,10 @@
 use std::fs;
-use std::path::Path;
 
 use jiff::Timestamp;
 use rusqlite::Connection;
 use tandem_board_core::db::{
-    AppDb, AppSettings, DbError, ProjectDb, Theme, delete_project_db, folder_name, project_db_path,
+    AppDb, AppSettings, DbError, ProjectDb, Theme, app_db_path, delete_project_db, folder_name,
+    project_db_path,
 };
 use tempfile::TempDir;
 
@@ -26,10 +26,6 @@ fn pragma(conn: &Connection, name: &str) -> i64 {
         .unwrap()
 }
 
-fn app_db_path(data: &Path) -> std::path::PathBuf {
-    data.join("db").join("app.db")
-}
-
 #[test]
 fn a_new_project_database_has_the_whole_schema() {
     let data = TempDir::new().unwrap();
@@ -40,10 +36,12 @@ fn a_new_project_database_has_the_whole_schema() {
         names(conn, "table"),
         [
             "actors",
+            "changes",
             "criteria",
             "events",
             "labels",
             "leases",
+            "restoring",
             "task_deps",
             "task_labels",
             "tasks"
@@ -64,7 +62,7 @@ fn a_new_project_database_has_the_whole_schema() {
         .unwrap();
     assert_eq!(mode, "wal");
     assert_eq!(pragma(conn, "foreign_keys"), 1);
-    assert_eq!(pragma(conn, "user_version"), 1);
+    assert_eq!(pragma(conn, "user_version"), 3);
     assert!(project_db_path(data.path(), "test").ends_with("db/projects/test.db"));
     drop(db);
 
@@ -137,7 +135,7 @@ fn refuses_bad_project_ids_and_newer_schemas() {
         ProjectDb::open(data.path(), "test"),
         Err(DbError::NewerSchema {
             version: 99,
-            supported: 1,
+            supported: 3,
             ..
         })
     ));
@@ -263,4 +261,19 @@ fn themes_parse() {
         assert_eq!(theme.as_str().parse::<Theme>(), Ok(theme));
     }
     assert!("Dark".parse::<Theme>().is_err());
+}
+
+#[test]
+fn databases_live_in_the_data_directorys_db_folder() {
+    let data = TempDir::new().unwrap();
+    let db = data.path().join("db");
+    assert_eq!(app_db_path(data.path()), db.join("app.db"));
+    assert_eq!(
+        project_db_path(data.path(), "test"),
+        db.join("projects").join("test.db")
+    );
+    drop(AppDb::open(data.path()).unwrap());
+    drop(ProjectDb::open(data.path(), "test").unwrap());
+    assert!(app_db_path(data.path()).is_file());
+    assert!(project_db_path(data.path(), "test").is_file());
 }
