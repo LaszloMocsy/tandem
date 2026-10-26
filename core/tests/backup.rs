@@ -31,6 +31,7 @@ impl Env {
             user_name: "sam".into(),
             clock: Arc::new(move || *clock.lock().unwrap()),
             time_zone: TimeZone::UTC,
+            ..Config::default()
         };
         let service = Service::open(data.path(), "test", config).unwrap();
         Self { data, now, service }

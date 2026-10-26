@@ -20,7 +20,7 @@ use crate::dto::{
     AgentInfo, DeleteCheck, DeletedTask, Finish, NewTask, Saved, TaskDetail, TaskEdit, TaskFilter,
     TaskSummary,
 };
-use crate::error::Error;
+use crate::error::{Error, NEWER_SCHEMA};
 use crate::links::Link;
 use crate::projects::{AppSettingsInfo, BackupInfo, Opened, ProjectInfo, Projects};
 
@@ -33,14 +33,26 @@ async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'sta
         .map_err(|e| Error::internal(&e))?
 }
 
-/// Runs `f` with an open project's service on a blocking thread.
+/// Runs `f` with an open project's service on a blocking thread. If a
+/// newer version of Tandem has taken the project's database over, the
+/// project is closed.
 async fn with_service<T: Send + 'static>(
     projects: State<'_, Arc<Projects>>,
     project: String,
     f: impl FnOnce(&Service) -> Result<T> + Send + 'static,
 ) -> Result<T> {
     let service = projects.service(&project)?;
-    blocking(move || f(&service)).await
+    let projects = Arc::clone(&projects);
+    blocking(move || {
+        let result = f(&service);
+        if let Err(e) = &result
+            && e.code == NEWER_SCHEMA
+        {
+            projects.close_taken_over(&project, &e.message);
+        }
+        result
+    })
+    .await
 }
 
 /// Every project, the most recently opened first.

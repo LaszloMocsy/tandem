@@ -100,8 +100,9 @@ impl Service {
 
     /// The deleted tasks, the most recently deleted first.
     pub fn deleted_tasks(&self) -> Result<Vec<DeletedTask>, ServiceError> {
-        let db = self.lock();
-        let mut stmt = db.connection().prepare(
+        let mut state = self.lock();
+        let tx = state.db.read()?;
+        let mut stmt = tx.prepare(
             "SELECT id, title, status, deleted_at FROM tasks
              WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id",
         )?;

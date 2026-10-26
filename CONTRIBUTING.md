@@ -11,7 +11,7 @@ bun install --cwd ui
 cargo tauri dev
 ```
 
-The app keeps its project list and every project's tasks in databases in its data folder, such as `~/Library/Application Support/com.laszlomocsy.tandem/db` on macOS. To try changes without touching your real boards, use a scratch git repo, and remove its project afterwards.
+The app keeps its project list and every project's tasks in databases in its data folder, such as `~/Library/Application Support/com.laszlomocsy.tandem/db` on macOS. To try changes without touching your real boards, point the app at another folder with `TANDEM_DATA_DIR`, as in `TANDEM_DATA_DIR=/tmp/tandem cargo tauri dev`, or use a scratch git repo and remove its project afterwards.
 
 ## Rules the code follows
 

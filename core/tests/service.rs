@@ -1,5 +1,6 @@
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
@@ -121,6 +122,7 @@ fn open(data: &TempDir, now: &Arc<Mutex<Timestamp>>, lease: SignedDuration) -> S
         user_name: "sam".into(),
         clock: Arc::new(move || *clock.lock().unwrap()),
         time_zone: TimeZone::UTC,
+        watch_interval: Duration::from_millis(10),
     };
     Service::open(data.path(), "test", config).unwrap()
 }

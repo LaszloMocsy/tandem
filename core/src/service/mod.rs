@@ -1,13 +1,15 @@
 //! The task service: the one entry point for every change, used by both the
-//! board and the MCP server. There is one instance per project, and every
-//! call holds the project's lock and runs in one `BEGIN IMMEDIATE`
-//! transaction, so checks and changes land together even if another
-//! process shares the database.
+//! board and the MCP server. Every call runs in one `BEGIN IMMEDIATE`
+//! transaction, so checks and changes land together, and SQLite keeps calls
+//! apart even when other processes, each with its own service, share the
+//! database. Subscribers hear of every change, whichever process made it;
+//! see `feed`.
 
 mod backup;
 mod delete;
 mod error;
 mod export;
+mod feed;
 mod import;
 mod read;
 mod rows;
@@ -15,9 +17,9 @@ mod transitions;
 
 use std::cell::RefCell;
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
+use std::time::Duration;
 
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
@@ -25,10 +27,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::db::{Changes, ProjectDb, from_millis, millis, timestamp_text};
 use crate::model::{Criterion, Date, Priority, Status, TaskId, Unmet, UnmetCriterion};
+use feed::{State, Subscribers};
 
+pub use backup::RESTORE_TIMEOUT;
 pub use delete::{DeleteCheck, DeletedTask};
 pub use error::ServiceError;
 pub use export::{EXPORT_FORMAT, EXPORT_VERSION};
+pub use feed::CHANGES_KEPT;
 pub use import::ImportReport;
 
 /// The default lease length.
@@ -48,6 +53,9 @@ pub struct Config {
     /// The time zone that decides the dates shown for events, `created`
     /// and `reviewed_at`.
     pub time_zone: TimeZone,
+    /// How often a subscribed service checks for changes from other
+    /// processes.
+    pub watch_interval: Duration,
 }
 
 impl Default for Config {
@@ -57,6 +65,7 @@ impl Default for Config {
             user_name: "user".to_owned(),
             clock: Arc::new(Timestamp::now),
             time_zone: TimeZone::system(),
+            watch_interval: Duration::from_millis(250),
         }
     }
 }
@@ -289,13 +298,15 @@ pub struct Saved {
     pub status: Status,
 }
 
-/// The task service for one project.
+/// The task service for one project. Its lock only keeps this process's
+/// calls from sharing the connection at once; transactions keep calls
+/// apart.
 pub struct Service {
-    db: Mutex<ProjectDb>,
+    state: Arc<Mutex<State>>,
     config: Config,
-    /// Your row in `actors`. Looked up again after a restore.
-    user: AtomicI64,
-    subscribers: Mutex<Vec<Sender<Changes>>>,
+    subscribers: Arc<Subscribers>,
+    /// Starts the watcher on the first subscription.
+    watching: Once,
 }
 
 impl Service {
@@ -306,42 +317,54 @@ impl Service {
 
     /// The service for an open database. Your row in `actors` takes the
     /// current [`Config::user_name`].
-    pub fn new(db: ProjectDb, config: Config) -> Result<Self, ServiceError> {
-        let user = user_row(db.connection(), &config)?;
+    pub fn new(mut db: ProjectDb, config: Config) -> Result<Self, ServiceError> {
+        let tx = db.begin()?;
+        user_row(&tx, &config)?;
+        let last_change = feed::latest(&tx)?;
+        let known = feed::task_ids(&tx)?;
+        tx.commit()?;
         Ok(Self {
-            db: Mutex::new(db),
+            state: Arc::new(Mutex::new(State::new(db, last_change, known)?)),
             config,
-            user: AtomicI64::new(user),
-            subscribers: Mutex::new(Vec::new()),
+            subscribers: Arc::default(),
+            watching: Once::new(),
         })
     }
 
     /// Whether opening created the project's database, so it has no tasks
     /// yet and an old `.tandem/` folder may be worth importing.
     pub fn is_new(&self) -> bool {
-        self.lock().created()
+        self.lock().db.created()
     }
 
-    /// A channel that receives the tasks every call changes from then on.
-    /// A working-log note or blocked flag counts as a change to its task.
-    /// Dropping the receiver unsubscribes.
+    /// A channel that receives the tasks that change from then on, in
+    /// commit order: at once for this service's calls, and within
+    /// [`Config::watch_interval`] for changes from other processes. A
+    /// working-log note or blocked flag counts as a change to its task.
+    /// Dropping the receiver unsubscribes. The channel closes when the
+    /// service is dropped, or when a newer app takes the database over.
     pub fn subscribe(&self) -> Receiver<Changes> {
+        self.watching.call_once(|| {
+            let watched = feed::watch(
+                Arc::downgrade(&self.state),
+                Arc::downgrade(&self.subscribers),
+                self.config.watch_interval,
+            );
+            if let Err(e) = watched {
+                // Changes from this process still arrive.
+                eprintln!("tandem: cannot watch for changes from other processes: {e}");
+            }
+        });
         let (tx, rx) = mpsc::channel();
-        self.subscribers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(tx);
+        self.subscribers.add(tx);
         rx
     }
 
-    fn emit(&self, changes: Changes) {
-        if changes.is_empty() {
-            return;
-        }
-        self.subscribers
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .retain(|tx| tx.send(changes.clone()).is_ok());
+    /// Checks that the database can still be used: refused with
+    /// `newer_schema` once a newer app has taken it over.
+    pub fn check_schema(&self) -> Result<(), ServiceError> {
+        self.lock().db.read()?;
+        Ok(())
     }
 
     /// Issues a new agent id for an MCP client that starts a task: the
@@ -350,7 +373,7 @@ impl Service {
     /// [`is_known_agent`](Self::is_known_agent) accepts it.
     pub fn register_agent(&self, client_name: Option<&str>) -> Result<String, ServiceError> {
         let base = client_agent_id(client_name.unwrap_or(""));
-        let db = self.lock();
+        let mut state = self.lock();
         let now = millis((self.config.clock)());
         loop {
             let mut suffix = [0u8; 2];
@@ -359,11 +382,14 @@ impl Service {
             if check_agent_id(&id, &self.config.user_name).is_err() {
                 continue;
             }
-            let inserted = db.connection().execute(
+            let tx = state.db.begin()?;
+            backup::check_not_restoring(&tx, now)?;
+            let inserted = tx.execute(
                 "INSERT OR IGNORE INTO actors (kind, name, client, first_seen, last_seen)
                  VALUES ('agent', ?1, ?2, ?3, ?3)",
                 params![id, client_name, now],
             )?;
+            tx.commit()?;
             if inserted == 1 {
                 return Ok(id);
             }
@@ -374,9 +400,10 @@ impl Service {
     /// [`register_agent`](Self::register_agent), or named in imported
     /// history.
     pub fn is_known_agent(&self, id: &str) -> Result<bool, ServiceError> {
-        let db = self.lock();
-        Ok(db
-            .connection()
+        let mut state = self.lock();
+        Ok(state
+            .db
+            .read()?
             .query_row(
                 "SELECT 1 FROM actors WHERE kind = 'agent' AND name = ?1",
                 [id],
@@ -390,25 +417,51 @@ impl Service {
         &self.config
     }
 
-    fn lock(&self) -> MutexGuard<'_, ProjectDb> {
+    fn lock(&self) -> MutexGuard<'_, State> {
         // A panic mid-call rolls its transaction back, so the database is
         // still consistent.
-        self.db.lock().unwrap_or_else(PoisonError::into_inner)
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs `f` under the project lock: records the call (which extends the
-    /// caller's leases), then runs `f` in a `BEGIN IMMEDIATE` transaction
-    /// that commits if `f` succeeds.
+    /// Runs `f` under the project lock: records an agent's call, which
+    /// extends its leases, then runs `f` in a `BEGIN IMMEDIATE` transaction
+    /// that commits if `f` succeeds, with a row in `changes` for every task
+    /// it changed. Refused with `restoring` while a backup is being
+    /// restored, whose copy would drop the call's changes.
     fn call<T>(
         &self,
         actor: &Actor,
         f: impl FnOnce(&Call<'_>) -> Result<T, ServiceError>,
     ) -> Result<T, ServiceError> {
-        let mut db = self.lock();
+        let mut state = self.lock();
+        let State {
+            db,
+            last_change,
+            known,
+            ..
+        } = &mut *state;
         let now = (self.config.clock)();
-        // Outside the transaction, so even a refused call extends leases.
-        let actor_id = self.touch(db.connection(), actor, now)?;
+        let agent_id = match actor {
+            Actor::User => None,
+            Actor::Agent(agent) => {
+                // A transaction of its own, so even a refused call extends
+                // leases.
+                let tx = db.begin()?;
+                backup::check_not_restoring(&tx, millis(now))?;
+                let id = self.touch(&tx, agent, now)?;
+                tx.commit()?;
+                Some(id)
+            }
+        };
         let tx = db.begin()?;
+        backup::check_not_restoring(&tx, millis(now))?;
+        let actor_id = match agent_id {
+            Some(id) => id,
+            None => user_id(&tx, &self.config, now)?,
+        };
+        // What other processes changed since this service last looked,
+        // sent before this call's changes.
+        let (earlier, seen) = feed::since(&tx, *last_change, known)?;
         let call = Call {
             tx: &tx,
             actor,
@@ -419,19 +472,21 @@ impl Service {
         };
         let out = f(&call)?;
         let changes = call.changes.take();
+        let recorded = feed::record(&tx, &changes, millis(now))?;
         tx.commit()?;
+        *last_change = recorded.unwrap_or(seen);
+        feed::note(db.connection(), known, &earlier);
+        feed::note(db.connection(), known, &changes);
         // Still under the lock, so subscribers see changes in commit order.
-        self.emit(changes);
+        self.subscribers.emit(earlier);
+        self.subscribers.emit(changes);
         Ok(out)
     }
 
-    /// Records a call and returns the caller's row in `actors`. For an
-    /// agent, updates its row and extends every lease it holds, as any tool
-    /// call by the lease holder does.
-    fn touch(&self, conn: &Connection, actor: &Actor, now: Timestamp) -> Result<i64, ServiceError> {
-        let Actor::Agent(agent) = actor else {
-            return Ok(self.user.load(Ordering::Relaxed));
-        };
+    /// Records an agent's call and returns its row in `actors`: updates the
+    /// row and extends every lease the agent holds, as any tool call by the
+    /// lease holder does.
+    fn touch(&self, conn: &Connection, agent: &Agent, now: Timestamp) -> Result<i64, ServiceError> {
         check_agent_id(&agent.id, &self.config.user_name)?;
         let id: i64 = conn.query_row(
             "INSERT INTO actors (kind, name, client, first_seen, last_seen)
@@ -453,6 +508,25 @@ impl Service {
     /// The date `ms` falls on in the configured time zone.
     fn date(&self, ms: i64) -> Date {
         date_in(&self.config.time_zone, ms)
+    }
+}
+
+/// Your row in `actors`, added if missing. Unlike [`user_row`] it leaves the
+/// name alone, so processes with different names don't take turns
+/// renaming you.
+fn user_id(conn: &Connection, config: &Config, now: Timestamp) -> Result<i64, ServiceError> {
+    let existing: Option<i64> = conn
+        .prepare_cached("SELECT id FROM actors WHERE kind = 'user'")?
+        .query_row([], |row| row.get(0))
+        .optional()?;
+    match existing {
+        Some(id) => Ok(id),
+        None => Ok(conn.query_row(
+            "INSERT INTO actors (kind, name, first_seen, last_seen)
+             VALUES ('user', ?1, ?2, ?2) RETURNING id",
+            params![config.user_name, millis(now)],
+            |row| row.get(0),
+        )?),
     }
 }
 

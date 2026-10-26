@@ -430,11 +430,20 @@ impl Projects {
         let changes = service.subscribe();
         let on_change = Arc::clone(&self.on_change);
         let id = project.id.clone();
+        let weak = Arc::downgrade(&service);
         thread::Builder::new()
             .name(format!("tandem-events-{id}"))
             .spawn(move || {
                 for changes in changes {
                     on_change(&id, &changes);
+                }
+                // The channel also closes when a newer app takes the
+                // database over. An empty change makes the board refetch,
+                // which fails and closes the project with the reason.
+                if let Some(service) = weak.upgrade()
+                    && service.check_schema().is_err()
+                {
+                    on_change(&id, &Changes::default());
                 }
             })
             .map_err(|e| Error::internal(&e))?;
@@ -444,6 +453,16 @@ impl Projects {
             .insert(&project.id, Arc::clone(&service));
         open.insert(project.id.clone(), service);
         Ok(())
+    }
+
+    /// Closes a project whose database a newer version of Tandem has taken
+    /// over: its service and MCP endpoint go, and the list shows `message`
+    /// as the reason. Opening it again fails the same way until Tandem is
+    /// updated.
+    pub fn close_taken_over(&self, id: &str, message: &str) {
+        lock(&self.open).remove(id);
+        self.mcp.endpoints().remove(id);
+        lock(&self.failed).insert(id.to_owned(), message.to_owned());
     }
 
     fn info(&self, project: &Project) -> ProjectInfo {
@@ -814,6 +833,44 @@ mod tests {
         let (project, changes) = env.events.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(project, id);
         assert!(changes.removed.contains(&task));
+    }
+
+    #[test]
+    fn a_project_a_newer_app_takes_over_is_closed_with_the_reason() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let id = env.open(folder.path()).id;
+        let service = env.projects.service(&id).unwrap();
+        create(&service, "Task");
+        env.events.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let db = rusqlite::Connection::open(project_db_path(env.data.path(), &id)).unwrap();
+        db.pragma_update(None, "user_version", 99).unwrap();
+        // The board is told to refetch, which fails.
+        let (project, changes) = env.events.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(project, id);
+        assert!(changes.is_empty());
+        let e = Error::from(
+            service
+                .list_tasks(&Actor::User, &TaskFilter::default())
+                .unwrap_err(),
+        );
+        assert_eq!(e.code, "newer_schema");
+
+        env.projects.close_taken_over(&id, &e.message);
+        assert_eq!(
+            env.projects.service(&id).err().unwrap().code,
+            "project_not_found"
+        );
+        assert!(!env.endpoints.project_ids().contains(&id));
+        let info = env.projects.list().unwrap().remove(0);
+        assert!(!info.open);
+        assert!(info.error.unwrap().contains("update Tandem"));
+
+        // Opening it again fails the same way.
+        drop(service);
+        let e = env.projects.open(folder.path(), true).unwrap_err();
+        assert_eq!(e.code, "newer_schema");
     }
 
     #[test]

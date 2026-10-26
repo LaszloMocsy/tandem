@@ -20,8 +20,9 @@ impl Service {
     /// to people by id and name, not by internal keys, so the file stands
     /// on its own. Leases are left out.
     pub fn export_json(&self) -> Result<Value, ServiceError> {
-        let db = self.lock();
-        let conn = db.connection();
+        let mut state = self.lock();
+        let tx = state.db.read()?;
+        let conn: &Connection = &tx;
         let now = (self.config.clock)();
         let mut stmt = conn.prepare(
             "SELECT t.seq, t.id, t.title, t.status, t.priority, p.id, t.blocked_reason,

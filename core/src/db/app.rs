@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 
 use super::backup::{backup_dir, backups_owner};
 use super::{DB_DIR, DbError, from_millis, io_error, millis, schema, timestamp_text};
@@ -33,6 +33,7 @@ pub struct Project {
 /// settings.
 pub struct AppDb {
     conn: Connection,
+    path: PathBuf,
     data_dir: PathBuf,
 }
 
@@ -44,8 +45,25 @@ impl AppDb {
         let (conn, _) = schema::open(&path, schema::APP_MIGRATIONS)?;
         Ok(Self {
             conn,
+            path,
             data_dir: data_dir.to_owned(),
         })
+    }
+
+    /// Starts a transaction, refused with [`DbError::NewerSchema`] once a
+    /// newer app has migrated `app.db`.
+    fn begin(&self, behavior: TransactionBehavior) -> Result<Transaction<'_>, DbError> {
+        let tx = Transaction::new_unchecked(&self.conn, behavior)?;
+        schema::check_version(&tx, &self.path, schema::APP_MIGRATIONS)?;
+        Ok(tx)
+    }
+
+    /// Runs one statement in a write transaction. Returns the rows changed.
+    fn execute(&self, sql: &str, params: impl rusqlite::Params) -> Result<usize, DbError> {
+        let tx = self.begin(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(sql, params)?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// Adds the project identified by `git_dir`, opened at `path`, to the
@@ -63,9 +81,7 @@ impl AppDb {
         let git_dir = canonical_text(git_dir)?;
         let path = canonical_text(path)?;
 
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = self.begin(TransactionBehavior::Immediate)?;
         let existing: Option<String> = tx
             .query_row(
                 "UPDATE projects SET last_path = ?2 WHERE git_dir = ?1 RETURNING id",
@@ -109,7 +125,8 @@ impl AppDb {
 
     /// Every project, the most recently opened first.
     pub fn projects(&self) -> Result<Vec<Project>, DbError> {
-        let mut stmt = self.conn.prepare(&format!(
+        let tx = self.begin(TransactionBehavior::Deferred)?;
+        let mut stmt = tx.prepare(&format!(
             "SELECT {PROJECT_COLUMNS} FROM projects
                  ORDER BY last_opened_at IS NULL, last_opened_at DESC, name, id"
         ))?;
@@ -121,7 +138,7 @@ impl AppDb {
 
     pub fn project(&self, id: &str) -> Result<Option<Project>, DbError> {
         Ok(self
-            .conn
+            .begin(TransactionBehavior::Deferred)?
             .query_row(
                 &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?1"),
                 [id],
@@ -133,7 +150,7 @@ impl AppDb {
     /// Records that the project was opened at `at`. Returns `false` if there
     /// is no such project.
     pub fn mark_opened(&self, id: &str, at: Timestamp) -> Result<bool, DbError> {
-        let updated = self.conn.execute(
+        let updated = self.execute(
             "UPDATE projects SET last_opened_at = ?2 WHERE id = ?1",
             params![id, millis(at)],
         )?;
@@ -142,7 +159,7 @@ impl AppDb {
 
     /// Renames the project. Returns `false` if there is no such project.
     pub fn set_name(&self, id: &str, name: &str) -> Result<bool, DbError> {
-        let updated = self.conn.execute(
+        let updated = self.execute(
             "UPDATE projects SET name = ?2 WHERE id = ?1",
             params![id, name],
         )?;
@@ -152,7 +169,8 @@ impl AppDb {
     /// The app's settings. A missing or unreadable value gets its default.
     pub fn settings(&self) -> Result<AppSettings, DbError> {
         let mut settings = AppSettings::default();
-        let mut stmt = self.conn.prepare("SELECT key, value FROM settings")?;
+        let tx = self.begin(TransactionBehavior::Deferred)?;
+        let mut stmt = tx.prepare("SELECT key, value FROM settings")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
@@ -180,14 +198,12 @@ impl AppDb {
     /// Stores a setting, or deletes it when `value` is `None`.
     fn set_setting(&self, key: &str, value: Option<&str>) -> Result<(), DbError> {
         match value {
-            Some(value) => self.conn.execute(
+            Some(value) => self.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
                  ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                 params![key, value],
             )?,
-            None => self
-                .conn
-                .execute("DELETE FROM settings WHERE key = ?1", [key])?,
+            None => self.execute("DELETE FROM settings WHERE key = ?1", [key])?,
         };
         Ok(())
     }
@@ -195,10 +211,7 @@ impl AppDb {
     /// Removes the project from the list. Its database is left alone.
     /// Returns `false` if there is no such project.
     pub fn remove_project(&self, id: &str) -> Result<bool, DbError> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM projects WHERE id = ?1", [id])?
-            > 0)
+        Ok(self.execute("DELETE FROM projects WHERE id = ?1", [id])? > 0)
     }
 }
 

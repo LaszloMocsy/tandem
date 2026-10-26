@@ -46,9 +46,16 @@ impl From<ServiceError> for Error {
 
 impl From<DbError> for Error {
     fn from(e: DbError) -> Self {
-        Self::internal(&e)
+        match e {
+            DbError::NewerSchema { .. } => Self::new(NEWER_SCHEMA, describe(&e)),
+            e => Self::internal(&e),
+        }
     }
 }
+
+/// The code of a database a newer version of Tandem has taken over, from
+/// the service or `app.db`.
+pub const NEWER_SCHEMA: &str = "newer_schema";
 
 /// An error and its causes on one line.
 pub fn describe(error: &dyn StdError) -> String {

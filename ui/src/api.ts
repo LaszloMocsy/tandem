@@ -234,8 +234,9 @@ export const TASKS_CHANGED = 'tasks-changed'
 /**
  * A refused command. `code` is one of the service's error codes, such as
  * `invalid_transition` or `cycle_detected`, or `project_not_found`,
- * `invalid_argument`, `agents_working`, `task_referenced`, `port_in_use`,
- * `mcp_failed` or `internal`.
+ * `invalid_argument`, `agents_working`, `restoring` while a backup is being
+ * restored, `task_referenced`, `port_in_use`, `mcp_failed`, `newer_schema` once a newer version of Tandem has taken the
+ * project's database over, or `internal`.
  */
 export class CommandError extends Error {
   readonly code: string

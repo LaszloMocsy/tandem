@@ -49,7 +49,8 @@ const INSTRUCTIONS: &str = concat!(
      the user approves them, and only tasks in todo can be started. Call \
      finish_task with a short summary before the final commit, ticking each \
      acceptance criterion you met and explaining each one you didn't. Never \
-     mark tasks reviewed.",
+     mark tasks reviewed. A call refused with restoring can be retried after \
+     a few seconds, once the user's restore of a backup ends.",
     task_rules!()
 );
 

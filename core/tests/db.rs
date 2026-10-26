@@ -40,10 +40,12 @@ fn a_new_project_database_has_the_whole_schema() {
         names(conn, "table"),
         [
             "actors",
+            "changes",
             "criteria",
             "events",
             "labels",
             "leases",
+            "restoring",
             "task_deps",
             "task_labels",
             "tasks"
@@ -64,7 +66,7 @@ fn a_new_project_database_has_the_whole_schema() {
         .unwrap();
     assert_eq!(mode, "wal");
     assert_eq!(pragma(conn, "foreign_keys"), 1);
-    assert_eq!(pragma(conn, "user_version"), 1);
+    assert_eq!(pragma(conn, "user_version"), 3);
     assert!(project_db_path(data.path(), "test").ends_with("db/projects/test.db"));
     drop(db);
 
@@ -137,7 +139,7 @@ fn refuses_bad_project_ids_and_newer_schemas() {
         ProjectDb::open(data.path(), "test"),
         Err(DbError::NewerSchema {
             version: 99,
-            supported: 1,
+            supported: 3,
             ..
         })
     ));

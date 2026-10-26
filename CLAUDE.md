@@ -58,7 +58,7 @@ CI runs the fmt, clippy, test, lint, typecheck and frontend test commands above 
 - `core` and `mcp` never depend on Tauri, directly or through another crate. Tauri code lives only in `desktop`.
 - Every change to `core` comes with tests.
 - The database schema is the migrations in `core/src/db/schema.rs`: each list, read in order, builds the current schema from nothing. Change the schema only by appending a migration; never edit one that has shipped.
-- Every service call runs in one `BEGIN IMMEDIATE` transaction, so checks and changes land together. Restoring a backup is the one exception: it replaces the whole database in one SQLite write, after backing up the current state.
+- Every service call runs in one `BEGIN IMMEDIATE` transaction, so checks and changes land together. Restoring a backup is the one exception: it marks the database as restoring, which refuses every other call in any process, backs up the current state, then replaces the whole database in one SQLite write that clears the mark.
 - A task's events are append-only. Deleting a task sets `deleted_at`; only cleaning up deleted tasks removes rows, after the user confirms. Restoring a backup, which the user also confirms, brings back the backup's rows as they were.
 - `core/src/markdown/` is the Markdown task format: how `get_task` shows a task, and how an old `.tandem/` folder is imported. The app never writes it into a repo.
 
