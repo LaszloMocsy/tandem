@@ -11,6 +11,8 @@ function projectInfo(id: string, open = true): ProjectInfo {
     open,
     error: open ? null : 'the folder is missing',
     mcpUrl: open ? `http://127.0.0.1:4317/p/${id}/mcp` : null,
+    dbPath: `/data/db/projects/${id}.db`,
+    backupsPath: `/data/backups/${id}`,
   }
 }
 

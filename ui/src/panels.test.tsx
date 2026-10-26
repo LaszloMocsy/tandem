@@ -49,6 +49,8 @@ const project: ProjectInfo = {
   open: true,
   error: null,
   mcpUrl: 'http://127.0.0.1:4317/p/tandem/mcp',
+  dbPath: '/data/db/projects/tandem.db',
+  backupsPath: '/data/backups/tandem',
 }
 
 test('Setup offers the URL, the Claude Code command, .mcp.json and the snippet', () => {

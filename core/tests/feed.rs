@@ -10,7 +10,7 @@ use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 use rusqlite::Connection;
 use tandem_board_core::db::backup::backup_dir;
-use tandem_board_core::db::{AppDb, Changes, DbError, project_db_path};
+use tandem_board_core::db::{AppDb, Changes, DbError, app_db_path, project_db_path};
 use tandem_board_core::model::TaskId;
 use tandem_board_core::service::{Actor, Config, NewTask, Service, TaskFilter};
 use tempfile::TempDir;
@@ -253,7 +253,7 @@ fn app_db_refuses_a_newer_schema_while_open() {
     let data = TempDir::new().unwrap();
     let app = AppDb::open(data.path()).unwrap();
     app.projects().unwrap();
-    let conn = Connection::open(data.path().join("db").join("app.db")).unwrap();
+    let conn = Connection::open(app_db_path(data.path())).unwrap();
     conn.pragma_update(None, "user_version", 99).unwrap();
 
     assert!(matches!(

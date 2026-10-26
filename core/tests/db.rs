@@ -1,10 +1,10 @@
 use std::fs;
-use std::path::Path;
 
 use jiff::Timestamp;
 use rusqlite::Connection;
 use tandem_board_core::db::{
-    AppDb, AppSettings, DbError, ProjectDb, Theme, delete_project_db, folder_name, project_db_path,
+    AppDb, AppSettings, DbError, ProjectDb, Theme, app_db_path, delete_project_db, folder_name,
+    project_db_path,
 };
 use tempfile::TempDir;
 
@@ -24,10 +24,6 @@ fn names(conn: &Connection, kind: &str) -> Vec<String> {
 fn pragma(conn: &Connection, name: &str) -> i64 {
     conn.pragma_query_value(None, name, |row| row.get(0))
         .unwrap()
-}
-
-fn app_db_path(data: &Path) -> std::path::PathBuf {
-    data.join("db").join("app.db")
 }
 
 #[test]
@@ -265,4 +261,19 @@ fn themes_parse() {
         assert_eq!(theme.as_str().parse::<Theme>(), Ok(theme));
     }
     assert!("Dark".parse::<Theme>().is_err());
+}
+
+#[test]
+fn databases_live_in_the_data_directorys_db_folder() {
+    let data = TempDir::new().unwrap();
+    let db = data.path().join("db");
+    assert_eq!(app_db_path(data.path()), db.join("app.db"));
+    assert_eq!(
+        project_db_path(data.path(), "test"),
+        db.join("projects").join("test.db")
+    );
+    drop(AppDb::open(data.path()).unwrap());
+    drop(ProjectDb::open(data.path(), "test").unwrap());
+    assert!(app_db_path(data.path()).is_file());
+    assert!(project_db_path(data.path(), "test").is_file());
 }

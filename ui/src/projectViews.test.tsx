@@ -15,6 +15,8 @@ const tandem: ProjectInfo = {
   open: true,
   error: null,
   mcpUrl: null,
+  dbPath: '/data/db/projects/tandem.db',
+  backupsPath: '/data/backups/tandem',
 }
 const gone: ProjectInfo = {
   ...tandem,

@@ -62,6 +62,7 @@ pub fn run() {
             commands::remove_project,
             commands::choose_folder,
             commands::open_link,
+            commands::show_in_folder,
             commands::get_app_settings,
             commands::set_mcp_port,
             commands::set_theme,

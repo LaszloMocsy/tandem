@@ -12,6 +12,8 @@ const project: ProjectInfo = {
   open: true,
   error: null,
   mcpUrl: null,
+  dbPath: '/data/db/projects/tandem.db',
+  backupsPath: '/data/backups/tandem',
 }
 
 function task(id: string, status: TaskSummary['status']): TaskSummary {

@@ -19,12 +19,22 @@ export interface ProjectInfo {
   error: string | null
   /** The project's MCP endpoint, while it is open and the server runs. */
   mcpUrl: string | null
+  /** The project's database file. */
+  dbPath: string
+  /** The folder that holds its backups. */
+  backupsPath: string
 }
 
 export type Theme = 'system' | 'light' | 'dark'
 
 /** A page the app opens in the browser; the desktop app builds its URL. */
 export type Link = 'repository' | 'releaseNotes'
+
+/** A file or folder of the app's data that can be shown in the file manager. */
+export type Place =
+  | { kind: 'appDb' }
+  | { kind: 'projectDb'; project: string }
+  | { kind: 'backups'; project: string }
 
 /** The app's settings, for every project on this machine. */
 export interface AppSettings {
@@ -36,6 +46,8 @@ export interface AppSettings {
   /** Why the server isn't running, when it isn't. */
   mcpError: string | null
   theme: Theme
+  /** The app's database file, with the project list and these settings. */
+  appDbPath: string
 }
 
 /** What opening a folder did. */
@@ -292,6 +304,11 @@ export const api = {
   chooseFolder: () => call<string | null>('choose_folder'),
   /** Opens the repository or the running version's release notes in the browser. */
   openLink: (link: Link) => call<null>('open_link', { link }),
+  /**
+   * Shows a database file selected in the system's file manager, such as
+   * Finder, or opens the backups folder in it.
+   */
+  showInFolder: (place: Place) => call<null>('show_in_folder', { place }),
   /**
    * Renames the project on this machine; a blank name goes back to the
    * folder name.

@@ -37,11 +37,15 @@ pub struct AppDb {
     data_dir: PathBuf,
 }
 
+/// Where the app's database lives: `<data_dir>/db/app.db`.
+pub fn app_db_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(DB_DIR).join("app.db")
+}
+
 impl AppDb {
-    /// Opens `<data_dir>/db/app.db`, creating the folder and database if
-    /// needed.
+    /// Opens [`app_db_path`], creating the folder and database if needed.
     pub fn open(data_dir: &Path) -> Result<Self, DbError> {
-        let path = data_dir.join(DB_DIR).join("app.db");
+        let path = app_db_path(data_dir);
         let (conn, _) = schema::open(&path, schema::APP_MIGRATIONS)?;
         Ok(Self {
             conn,

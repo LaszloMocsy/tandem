@@ -21,6 +21,7 @@ const running: AppSettings = {
   mcpUrl: 'http://127.0.0.1:4317',
   mcpError: null,
   theme: 'system',
+  appDbPath: '/data/db/app.db',
 }
 
 const project: ProjectInfo = {
@@ -31,6 +32,8 @@ const project: ProjectInfo = {
   open: true,
   error: null,
   mcpUrl: 'http://127.0.0.1:4317/p/tandem-2/mcp',
+  dbPath: '/data/db/projects/tandem-2.db',
+  backupsPath: '/data/backups/tandem-2',
 }
 
 const never = () => new Promise<never>(() => {})
@@ -47,6 +50,7 @@ const api: SettingsApi = {
   restoreBackup: never,
   exportTasks: never,
   openLink: never,
+  showInFolder: never,
 }
 
 function appView(settings: AppSettings, portText = String(settings.mcpPort), portError = null) {
@@ -62,6 +66,8 @@ function appView(settings: AppSettings, portText = String(settings.mcpPort), por
       onTheme={noop}
       linkError={null}
       onOpenLink={noop}
+      showError={null}
+      onShow={noop}
     />,
   )
 }
@@ -77,6 +83,8 @@ function projectView(info: ProjectInfo, name = info.name) {
       onName={noop}
       onSaveName={noop}
       onRemove={noop}
+      showError={null}
+      onShow={noop}
     />,
   )
 }
@@ -127,6 +135,8 @@ test('the App tab shows the running version, with the build for non-production b
         onTheme={noop}
         linkError={null}
         onOpenLink={noop}
+        showError={null}
+        onShow={noop}
         env={env}
         version={version}
       />,
@@ -160,6 +170,58 @@ test('the Project tab shows the name, the local values and the actions', () => {
   expect(html).not.toContain('Reset local state')
   expect(html).toContain('Deletes this board and its tasks from this machine, keeping one last backup')
   expect(html).toContain('Remove…')
+})
+
+test('the App tab shows where the app database is, to open in the file manager', () => {
+  const html = renderToStaticMarkup(
+    <AppSettingsView
+      settings={running}
+      portText="4317"
+      portError={null}
+      themeError={null}
+      busy={false}
+      onPortText={noop}
+      onApplyPort={noop}
+      onTheme={noop}
+      linkError={null}
+      onOpenLink={noop}
+      showError="the file is missing"
+      onShow={noop}
+      manager="Finder"
+    />,
+  )
+  expect(html).toContain(
+    '<dt>App database</dt><dd><code>/data/db/app.db</code><button type="button" class="link" aria-label="Copy the app database path">Copy</button><button type="button" class="link">Show in Finder</button></dd>',
+  )
+  expect(html).toContain('the file is missing')
+  // Data comes before About.
+  expect(html.indexOf('aria-label="Data"')).toBeLessThan(html.indexOf('aria-label="About"'))
+})
+
+test('the Project tab shows where its database and backups are', () => {
+  const html = renderToStaticMarkup(
+    <ProjectSettingsView
+      project={project}
+      name={project.name}
+      nameError={null}
+      saved={false}
+      busy={false}
+      onName={noop}
+      onSaveName={noop}
+      onRemove={noop}
+      showError={null}
+      onShow={noop}
+      manager="Explorer"
+    />,
+  )
+  expect(html).toContain(
+    '<dt>Database</dt><dd><code>/data/db/projects/tandem-2.db</code><button type="button" class="link" aria-label="Copy the database path">Copy</button><button type="button" class="link">Show in Explorer</button></dd>',
+  )
+  // The backups folder itself opens.
+  expect(html).toContain(
+    '<dt>Backups</dt><dd><code>/data/backups/tandem-2</code><button type="button" class="link" aria-label="Copy the backups path">Copy</button><button type="button" class="link">Open in Explorer</button></dd>',
+  )
+  expect(html).toContain('never in the repo')
 })
 
 test('a new name can be saved, and an empty one goes back to the folder name', () => {
@@ -313,6 +375,8 @@ test('the Project tab places Backups and Deleted tasks before Remove', () => {
       onName={noop}
       onSaveName={noop}
       onRemove={noop}
+      showError={null}
+      onShow={noop}
       backups={<section aria-label="Backups" />}
       deletedTasks={<section aria-label="Deleted tasks" />}
     />,

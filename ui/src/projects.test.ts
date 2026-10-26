@@ -18,6 +18,8 @@ function projectInfo(name: string): ProjectInfo {
     open: true,
     error: null,
     mcpUrl: null,
+    dbPath: `/data/db/projects/${name}.db`,
+    backupsPath: `/data/backups/${name}`,
   }
 }
 

@@ -22,7 +22,7 @@ use crate::dto::{
 };
 use crate::error::{Error, NEWER_SCHEMA};
 use crate::links::Link;
-use crate::projects::{AppSettingsInfo, BackupInfo, Opened, ProjectInfo, Projects};
+use crate::projects::{AppSettingsInfo, BackupInfo, Opened, Place, ProjectInfo, Projects};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -148,6 +148,28 @@ pub async fn open_link(app: AppHandle, link: Link) -> Result<()> {
         app.opener()
             .open_url(url, None::<&str>)
             .map_err(|e| Error::internal(&e))
+    })
+    .await
+}
+
+/// Shows a database file selected in the system's file manager, such as
+/// Finder, or opens the backups folder in it.
+#[tauri::command]
+pub async fn show_in_folder(
+    app: AppHandle,
+    projects: State<'_, Arc<Projects>>,
+    place: Place,
+) -> Result<()> {
+    let projects = Arc::clone(&projects);
+    blocking(move || {
+        let (path, folder) = projects.place(&place)?;
+        let shown = if folder {
+            app.opener()
+                .open_path(path.display().to_string(), None::<&str>)
+        } else {
+            app.opener().reveal_item_in_dir(&path)
+        };
+        shown.map_err(|e| Error::internal(&e))
     })
     .await
 }

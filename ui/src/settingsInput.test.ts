@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import { folderName, MAX_NAME_LENGTH, nameProblem, parsePort } from './settingsInput.ts'
+import { fileManager, folderName, MAX_NAME_LENGTH, nameProblem, parsePort } from './settingsInput.ts'
 
 test('ports are whole numbers from 1 to 65535', () => {
   expect(parsePort(' 4400 ')).toEqual({ port: 4400 })
@@ -23,4 +23,12 @@ test('names are checked as the app checks them', () => {
   expect(nameProblem('é'.repeat(MAX_NAME_LENGTH))).toBeNull()
   expect(nameProblem('a'.repeat(MAX_NAME_LENGTH + 1))).toMatch(/longer than 100/)
   expect(nameProblem('two\nlines')).toMatch(/line breaks/)
+})
+
+test('the file manager is named for the system', () => {
+  expect(fileManager('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15')).toBe(
+    'Finder',
+  )
+  expect(fileManager('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')).toBe('Explorer')
+  expect(fileManager('Mozilla/5.0 (X11; Linux x86_64)')).toBe('file manager')
 })

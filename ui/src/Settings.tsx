@@ -6,6 +6,7 @@ import type {
   DeletedTask,
   ExportFormat,
   Link,
+  Place,
   ProjectInfo,
   Theme,
 } from './api.ts'
@@ -15,7 +16,7 @@ import { useDeletedTasks } from './deletedTasks.ts'
 import { CleanUpDeletedForm, Dialog, RestoreBackupForm } from './dialogs.tsx'
 import { errorMessage, formatTime } from './edit.ts'
 import { CopyButton } from './panels.tsx'
-import { folderName, nameProblem, parsePort } from './settingsInput.ts'
+import { fileManager, folderName, nameProblem, parsePort } from './settingsInput.ts'
 import { applyTheme } from './theme.ts'
 
 export type SettingsTab = 'app' | 'project'
@@ -35,6 +36,7 @@ export type SettingsApi = Pick<
   | 'restoreBackup'
   | 'exportTasks'
   | 'openLink'
+  | 'showInFolder'
 >
 
 const THEMES: { theme: Theme; label: string }[] = [
@@ -143,6 +145,7 @@ function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () =>
   const [themeError, setThemeError] = useState<string | null>(null)
   const [linkError, setLinkError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const show = useShowInFolder(api)
 
   useEffect(() => {
     let current = true
@@ -217,11 +220,58 @@ function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () =>
       onTheme={(theme) => void chooseTheme(theme)}
       linkError={linkError}
       onOpenLink={(link) => void openLink(link)}
+      showError={show.error}
+      onShow={show.show}
     />
   )
 }
 
-/** The App tab: the MCP server's port, the theme, and the running version. */
+/** Shows a place in the file manager, keeping why it couldn't. */
+function useShowInFolder(api: SettingsApi) {
+  const [error, setError] = useState<string | null>(null)
+  function show(place: Place) {
+    setError(null)
+    api.showInFolder(place).catch((error: unknown) => setError(errorMessage(error)))
+  }
+  return { error, show }
+}
+
+/**
+ * A file or folder of the app's data, for a `settings-values` list: its
+ * path, Copy, and a button that shows it in the file manager.
+ */
+function PlaceValue({
+  label,
+  path,
+  folder = false,
+  manager,
+  onShow,
+}: {
+  label: string
+  path: string
+  /** Opened in the file manager, rather than shown selected. */
+  folder?: boolean
+  manager: string
+  onShow: () => void
+}) {
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd>
+        <code>{path}</code>
+        <CopyButton text={path} label={`Copy the ${label.toLowerCase()} path`} />
+        <button type="button" className="link" onClick={onShow}>
+          {folder ? `Open in ${manager}` : `Show in ${manager}`}
+        </button>
+      </dd>
+    </>
+  )
+}
+
+/**
+ * The App tab: the MCP server's port, the theme, where the app keeps its
+ * data, and the running version.
+ */
 export function AppSettingsView({
   settings,
   portText,
@@ -233,8 +283,11 @@ export function AppSettingsView({
   onTheme,
   linkError,
   onOpenLink,
+  showError,
+  onShow,
   env = BUILD_ENV,
   version = APP_VERSION,
+  manager = fileManager(),
 }: {
   settings: AppSettings
   portText: string
@@ -246,9 +299,13 @@ export function AppSettingsView({
   onTheme: (theme: Theme) => void
   linkError: string | null
   onOpenLink: (link: Link) => void
+  showError: string | null
+  onShow: (place: Place) => void
   /** The build to describe in About; the running one unless a test says otherwise. */
   env?: BuildEnv
   version?: string
+  /** What the file manager is called; this system's unless a test says otherwise. */
+  manager?: string
 }) {
   const parsed = parsePort(portText)
   const about = versionText(env, version)
@@ -339,6 +396,26 @@ export function AppSettingsView({
         )}
         <p className="hint">System follows your computer's light or dark appearance.</p>
       </section>
+      <section className="settings-section" aria-label="Data">
+        <h3>Data</h3>
+        <dl className="settings-values">
+          <PlaceValue
+            label="App database"
+            path={settings.appDbPath}
+            manager={manager}
+            onShow={() => onShow({ kind: 'appDb' })}
+          />
+        </dl>
+        {showError && (
+          <p className="field-error" role="alert">
+            {showError}
+          </p>
+        )}
+        <p className="hint">
+          The list of boards and these settings. Each board's database and backups are on its
+          Project tab.
+        </p>
+      </section>
       <section className="settings-section" aria-label="About">
         <h3>About</h3>
         <dl className="settings-values">
@@ -393,6 +470,7 @@ function ProjectTab({
   const [busy, setBusy] = useState(false)
   const deleted = useDeletedTasks(api, project.id, tasks)
   const backups = useBackups(api, project.id, tasks)
+  const show = useShowInFolder(api)
 
   useEffect(() => {
     if (!saved) return
@@ -430,6 +508,8 @@ function ProjectTab({
         }}
         onSaveName={(name) => void saveName(name)}
         onRemove={() => onRemove(project)}
+        showError={show.error}
+        onShow={show.show}
         backups={
           <BackupsView
             backups={backups.backups}
@@ -487,8 +567,9 @@ function ProjectTab({
 }
 
 /**
- * The Project tab: the name, the MCP endpoint, the backups, the deleted
- * tasks and Remove. Everything is stored on this machine.
+ * The Project tab: the name, the MCP endpoint, where its data is, the
+ * backups, the deleted tasks and Remove. Everything is stored on this
+ * machine.
  */
 export function ProjectSettingsView({
   project,
@@ -499,8 +580,11 @@ export function ProjectSettingsView({
   onName,
   onSaveName,
   onRemove,
+  showError,
+  onShow,
   backups,
   deletedTasks,
+  manager = fileManager(),
 }: {
   project: ProjectInfo
   name: string
@@ -510,10 +594,14 @@ export function ProjectSettingsView({
   onName: (name: string) => void
   onSaveName: (name: string) => void
   onRemove: () => void
-  /** The Backups section, after the MCP endpoint. */
+  showError: string | null
+  onShow: (place: Place) => void
+  /** The Backups section, after the data. */
   backups?: ReactNode
   /** The Deleted tasks section, before Remove. */
   deletedTasks?: ReactNode
+  /** What the file manager is called; this system's unless a test says otherwise. */
+  manager?: string
 }) {
   const folder = folderName(project.repoPath)
   const problem = nameProblem(name)
@@ -588,6 +676,32 @@ export function ProjectSettingsView({
         <p className="hint">
           The id names this board's MCP endpoint and stays the same when you rename it. Every
           worktree of the repo shares it.
+        </p>
+      </section>
+      <section className="settings-section" aria-label="Data">
+        <h3>Data</h3>
+        <dl className="settings-values">
+          <PlaceValue
+            label="Database"
+            path={project.dbPath}
+            manager={manager}
+            onShow={() => onShow({ kind: 'projectDb', project: project.id })}
+          />
+          <PlaceValue
+            label="Backups"
+            path={project.backupsPath}
+            folder
+            manager={manager}
+            onShow={() => onShow({ kind: 'backups', project: project.id })}
+          />
+        </dl>
+        {showError && (
+          <p className="field-error" role="alert">
+            {showError}
+          </p>
+        )}
+        <p className="hint">
+          The board's tasks and their history, kept on this machine and never in the repo.
         </p>
       </section>
       {backups}

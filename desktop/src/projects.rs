@@ -21,10 +21,10 @@ use std::thread;
 
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tandem_board_core::db::backup::{self, Backup, backup_dir, set_backups_owner};
 use tandem_board_core::db::{
-    AppDb, Changes, Project, ProjectDb, Theme, delete_project_db, folder_name,
+    AppDb, Changes, Project, ProjectDb, Theme, app_db_path, delete_project_db, folder_name,
     normalize_project_name, project_db_path, timestamp_text,
 };
 use tandem_board_core::git;
@@ -53,6 +53,10 @@ pub struct ProjectInfo {
     pub error: Option<String>,
     /// The project's MCP endpoint, while it is open and the server runs.
     pub mcp_url: Option<String>,
+    /// The project's database file.
+    pub db_path: String,
+    /// The folder that holds its backups.
+    pub backups_path: String,
 }
 
 /// The app's settings, as the Settings page shows them.
@@ -69,6 +73,18 @@ pub struct AppSettingsInfo {
     pub mcp_error: Option<String>,
     /// `system`, `light` or `dark`.
     pub theme: &'static str,
+    /// The app's database file, with the project list and these settings.
+    pub app_db_path: String,
+}
+
+/// A file or folder of the app's data that Settings can show in the
+/// system's file manager.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum Place {
+    AppDb,
+    ProjectDb { project: String },
+    Backups { project: String },
 }
 
 /// A backup of a project's database, as Settings lists it.
@@ -156,7 +172,27 @@ impl Projects {
             mcp_url: self.mcp.addr().map(|addr| format!("http://{addr}")),
             mcp_error: self.mcp.error(),
             theme: settings.theme.as_str(),
+            app_db_path: app_db_path(&self.data_dir).display().to_string(),
         })
+    }
+
+    /// Where `place` is, and whether it is a folder. Refused with
+    /// `project_not_found` for a project not in the list. The backups
+    /// folder is created if the project has none yet.
+    pub fn place(&self, place: &Place) -> Result<(PathBuf, bool), Error> {
+        match place {
+            Place::AppDb => Ok((app_db_path(&self.data_dir), false)),
+            Place::ProjectDb { project } => {
+                self.project(project)?;
+                Ok((project_db_path(&self.data_dir, project), false))
+            }
+            Place::Backups { project } => {
+                self.project(project)?;
+                let dir = backup_dir(&self.data_dir, project);
+                fs::create_dir_all(&dir).map_err(|e| Error::internal(&e))?;
+                Ok((dir, true))
+            }
+        }
     }
 
     pub fn theme(&self) -> Result<Theme, Error> {
@@ -479,6 +515,12 @@ impl Projects {
                 .addr()
                 .filter(|_| open)
                 .map(|addr| format!("http://{addr}{}", endpoint_path(&project.id))),
+            db_path: project_db_path(&self.data_dir, &project.id)
+                .display()
+                .to_string(),
+            backups_path: backup_dir(&self.data_dir, &project.id)
+                .display()
+                .to_string(),
         }
     }
 
@@ -967,6 +1009,43 @@ mod tests {
         let backups = env.projects.backups(&id).unwrap();
         assert_eq!(backups.len(), 1);
         assert_eq!(backups[0].tasks, Some(1));
+    }
+
+    #[test]
+    fn settings_show_where_the_databases_and_backups_are() {
+        let env = Env::new(TempDir::new().unwrap());
+        let folder = TempDir::new().unwrap();
+        let project = env.open(folder.path());
+        let data = env.data.path();
+        assert_eq!(
+            env.projects.app_settings().unwrap().app_db_path,
+            app_db_path(data).display().to_string()
+        );
+        let db = project_db_path(data, &project.id);
+        let backups = backup_dir(data, &project.id);
+        assert_eq!(project.db_path, db.display().to_string());
+        assert_eq!(project.backups_path, backups.display().to_string());
+
+        let place = |place| env.projects.place(&place);
+        assert_eq!(place(Place::AppDb).unwrap(), (app_db_path(data), false));
+        let id = project.id.clone();
+        assert_eq!(
+            place(Place::ProjectDb {
+                project: id.clone()
+            })
+            .unwrap(),
+            (db, false)
+        );
+        fs::remove_dir_all(&backups).ok();
+        assert_eq!(
+            place(Place::Backups { project: id }).unwrap(),
+            (backups.clone(), true)
+        );
+        assert!(backups.is_dir());
+        let missing = place(Place::Backups {
+            project: "missing".into(),
+        });
+        assert_eq!(missing.unwrap_err().code, "project_not_found");
     }
 
     #[test]
