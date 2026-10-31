@@ -10,6 +10,7 @@ import {
   OutsideGitForm,
   RemoveProjectForm,
   ReopenForm,
+  UpdateForm,
 } from './dialogs.tsx'
 import { errorMessage } from './edit.ts'
 import { moveFor } from './moves.ts'
@@ -21,6 +22,7 @@ import { isSettingsShortcut, shortcutFor } from './shortcuts.ts'
 import { board, useBoard, type BoardStore } from './store.ts'
 import { applyTheme } from './theme.ts'
 import { Toolbar } from './Toolbar.tsx'
+import { useUpdates } from './updates.ts'
 import { useNow } from './useNow.ts'
 import { useSearch } from './useSearch.ts'
 import { Welcome } from './Welcome.tsx'
@@ -41,6 +43,7 @@ export type AppApi = PaneApi &
     | 'release'
     | 'chooseFolder'
     | 'getAppSettings'
+    | 'installUpdate'
   >
 
 const columnName = (status: Status) => COLUMNS.find((c) => c.status === status)?.title ?? status
@@ -108,6 +111,7 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
   const [reopening, setReopening] = useState<TaskSummary | null>(null)
   const [busy, setBusy] = useState(false)
   const [dialogError, setDialogError] = useState<string | null>(null)
+  const updates = useUpdates(api)
 
   useEffect(() => {
     store.start().catch((error: unknown) => console.error('could not start the board', error))
@@ -309,6 +313,7 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
           onClose={closeSettings}
           onProjectsChanged={() => void store.refreshProjects()}
           onRemove={projectActions.askRemove}
+          onUpdate={updates.show}
         />
       ) : project === null ? (
         <Welcome
@@ -354,6 +359,18 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
         </div>
       )}
 
+      <Dialog open={updates.update !== null} label="Update Tandem" onClose={updates.close}>
+        {updates.update && (
+          <UpdateForm
+            update={updates.update}
+            busy={updates.busy}
+            error={updates.error}
+            onInstall={() => void updates.install()}
+            onDownload={() => void updates.download()}
+            onCancel={updates.close}
+          />
+        )}
+      </Dialog>
       <Dialog
         open={projectActions.outsideGit !== null}
         label="Open a folder outside git"

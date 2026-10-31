@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use jiff::Timestamp;
 
 pub use app::{
-    AppDb, AppSettings, MAX_NAME_LEN, NameError, Project, Theme, app_db_path, folder_name,
-    is_valid_project_id, normalize_project_name,
+    AppDb, AppSettings, MAX_NAME_LEN, NameError, Project, Theme, UpdateChannel, app_db_path,
+    folder_name, is_valid_project_id, normalize_project_name,
 };
 pub use project::{Changes, ProjectDb, delete_project_db, project_db_path};
 
