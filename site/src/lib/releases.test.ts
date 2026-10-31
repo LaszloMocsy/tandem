@@ -5,8 +5,12 @@ import {
   compareVersions,
   fetchDownloads,
   matchAssets,
+  NO_UPDATE,
   parseTag,
   pickReleases,
+  pickUpdate,
+  releaseChanges,
+  updateFeed,
 } from './releases';
 
 const ALL_ASSETS = [
@@ -226,5 +230,85 @@ describe('fetchDownloads', () => {
     const broken = (async () => new Response('not json')) as unknown as typeof fetch;
     expectFallback(await fetchDownloads({ fetch: broken, token: '' }));
     expectFallback(await fetchDownloads({ fetch: ok([{ tag_name: 'v1.0.0' }]), token: '' }));
+  });
+});
+
+const WITH_MANIFEST = [...ALL_ASSETS, 'latest.json'];
+
+function updatable(tag: string, opts: { draft?: boolean; body?: string } = {}): GitHubRelease {
+  return { ...release(tag, { draft: opts.draft, assets: WITH_MANIFEST }), body: opts.body };
+}
+
+describe('pickUpdate', () => {
+  const releases = [
+    updatable('v0.1.0'),
+    updatable('v0.2.0-beta.1'),
+    updatable('v0.3.0-alpha.1'),
+    updatable('v0.3.0-beta.1', { draft: true }),
+    release('v0.2.0-beta.2'),
+  ];
+
+  test('stable offers production releases only', () => {
+    expect(pickUpdate(releases, 'stable')?.tag_name).toBe('v0.1.0');
+  });
+
+  test('beta offers the newest beta or production release, never alpha or drafts', () => {
+    expect(pickUpdate(releases, 'beta')?.tag_name).toBe('v0.2.0-beta.1');
+    expect(pickUpdate([...releases, updatable('v0.2.0')], 'beta')?.tag_name).toBe('v0.2.0');
+  });
+
+  test('releases without an updater manifest are skipped', () => {
+    expect(pickUpdate([release('v0.4.0')], 'stable')).toBeNull();
+    expect(pickUpdate([], 'beta')).toBeNull();
+  });
+});
+
+describe('releaseChanges', () => {
+  test('keeps the notes after the marker', () => {
+    expect(releaseChanges('Download below.\n\n<!-- changes -->\n## What changed\n')).toBe(
+      '## What changed',
+    );
+  });
+
+  test('keeps all the notes without a marker', () => {
+    expect(releaseChanges(' ## Notes ')).toBe('## Notes');
+    expect(releaseChanges(null)).toBe('');
+  });
+});
+
+describe('updateFeed', () => {
+  const manifest = {
+    version: '0.1.0',
+    notes: 'Download below. These builds are not signed.',
+    platforms: { 'darwin-aarch64': { url: 'https://example.test/a', signature: 'sig' } },
+  };
+
+  test("serves the release's manifest with its changes as the notes", async () => {
+    let fetched = '';
+    const fetch = (async (url: string) => {
+      fetched = url;
+      return new Response(JSON.stringify(manifest));
+    }) as unknown as typeof globalThis.fetch;
+    const releases = [updatable('v0.1.0', { body: 'Download below.\n<!-- changes -->\n* Fixed' })];
+    expect(await updateFeed(releases, 'stable', { fetch })).toEqual({
+      ...manifest,
+      notes: '* Fixed',
+    });
+    expect(fetched).toBe('https://example.test/v0.1.0/latest.json');
+  });
+
+  test('offers nothing when no release fits', async () => {
+    const fetch = (() => {
+      throw new Error('not called');
+    }) as unknown as typeof globalThis.fetch;
+    expect(await updateFeed([updatable('v0.2.0-beta.1')], 'stable', { fetch })).toEqual(NO_UPDATE);
+  });
+
+  test('throws when the manifest cannot be fetched', async () => {
+    const fetch = (async () =>
+      new Response('gone', { status: 404 })) as unknown as typeof globalThis.fetch;
+    await expect(updateFeed([updatable('v0.1.0')], 'stable', { fetch })).rejects.toThrow(
+      'responded 404',
+    );
   });
 });

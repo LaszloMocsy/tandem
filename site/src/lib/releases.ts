@@ -59,6 +59,8 @@ export interface GitHubRelease {
   draft: boolean;
   html_url: string;
   published_at: string | null;
+  /** The release notes, in Markdown. */
+  body?: string | null;
   assets: { name: string; browser_download_url: string }[];
 }
 
@@ -186,8 +188,8 @@ export interface FetchOptions {
   token?: string;
 }
 
-/** Fetches releases and builds download data. Never throws: any failure falls back to the releases page. */
-export async function fetchDownloads(options: FetchOptions = {}): Promise<Downloads> {
+/** Fetches the repo's releases. Throws on any failure. */
+export async function fetchReleases(options: FetchOptions = {}): Promise<GitHubRelease[]> {
   const doFetch = options.fetch ?? fetch;
   const token = options.token ?? process.env.GITHUB_TOKEN;
   const headers: Record<string, string> = {
@@ -196,22 +198,101 @@ export async function fetchDownloads(options: FetchOptions = {}): Promise<Downlo
   };
   if (token) headers.Authorization = `Bearer ${token}`;
 
+  const res = await doFetch(RELEASES_API, { headers });
+  if (!res.ok) throw new Error(`GitHub responded ${res.status}`);
+  const body: unknown = await res.json();
+  if (!Array.isArray(body)) throw new Error('GitHub returned something other than a list');
+  return body as GitHubRelease[];
+}
+
+/** Fetches releases and builds download data. Never throws: any failure falls back to the releases page. */
+export async function fetchDownloads(options: FetchOptions = {}): Promise<Downloads> {
   try {
-    const res = await doFetch(RELEASES_API, { headers });
-    if (!res.ok) throw new Error(`GitHub responded ${res.status}`);
-    const body: unknown = await res.json();
-    if (!Array.isArray(body)) throw new Error('GitHub returned something other than a list');
-    return pickReleases(body as GitHubRelease[]);
+    return pickReleases(await fetchReleases(options));
   } catch (err) {
     console.warn(`[releases] Falling back to the releases page: ${String(err)}`);
     return fallbackDownloads();
   }
 }
 
+let cachedReleases: Promise<GitHubRelease[]> | undefined;
+
+/** fetchReleases, fetched once per build so the page and the update feeds see the same releases. */
+export function getReleases(): Promise<GitHubRelease[]> {
+  cachedReleases ??= fetchReleases();
+  return cachedReleases;
+}
+
 let cached: Promise<Downloads> | undefined;
 
-/** fetchDownloads, fetched once per build so every component sees the same data. */
+/** Download data, built once per build so every component sees the same data. */
 export function getDownloads(): Promise<Downloads> {
-  cached ??= fetchDownloads();
+  cached ??= getReleases().then(pickReleases, (err: unknown) => {
+    console.warn(`[releases] Falling back to the releases page: ${String(err)}`);
+    return fallbackDownloads();
+  });
   return cached;
+}
+
+// Update feeds. The app checks one of these on start: stable for production
+// builds, beta for beta builds, unless Settings picks the other.
+
+export type UpdateChannel = 'stable' | 'beta';
+
+export const UPDATE_CHANNELS: UpdateChannel[] = ['stable', 'beta'];
+
+/** The release channels each update channel offers. */
+const OFFERS: Record<UpdateChannel, Channel[]> = {
+  stable: ['production'],
+  beta: ['production', 'beta'],
+};
+
+/** The updater manifest tauri-action uploads to each release. */
+export const MANIFEST = 'latest.json';
+
+/** Where release.yml's notes switch from the download note to the changes. */
+export const CHANGES_MARKER = '<!-- changes -->';
+
+/** A feed that offers nothing: no app is older than 0.0.0. */
+export const NO_UPDATE = { version: '0.0.0', platforms: {} };
+
+/** The newest published release `channel` offers that has an updater manifest, or null. */
+export function pickUpdate(releases: GitHubRelease[], channel: UpdateChannel): GitHubRelease | null {
+  let newest: { version: Version; release: GitHubRelease } | null = null;
+  for (const release of releases) {
+    if (release.draft || !release.assets.some((a) => a.name === MANIFEST)) continue;
+    const version = parseTag(release.tag_name);
+    if (!version || !OFFERS[channel].includes(version.channel)) continue;
+    if (!newest || compareVersions(version, newest.version) > 0) newest = { version, release };
+  }
+  return newest?.release ?? null;
+}
+
+/** A release's changes: its notes after the download note, or all of them without the marker. */
+export function releaseChanges(body: string | null | undefined): string {
+  const text = body ?? '';
+  const at = text.indexOf(CHANGES_MARKER);
+  return (at === -1 ? text : text.slice(at + CHANGES_MARKER.length)).trim();
+}
+
+/**
+ * The feed for `channel`: the manifest of the newest release it offers,
+ * with the release's changes as its notes, or NO_UPDATE when no release
+ * fits. Throws when the manifest can't be fetched.
+ */
+export async function updateFeed(
+  releases: GitHubRelease[],
+  channel: UpdateChannel,
+  options: Pick<FetchOptions, 'fetch'> = {},
+): Promise<Record<string, unknown>> {
+  const release = pickUpdate(releases, channel);
+  if (!release) return NO_UPDATE;
+  const asset = release.assets.find((a) => a.name === MANIFEST)!;
+  const res = await (options.fetch ?? fetch)(asset.browser_download_url);
+  if (!res.ok) throw new Error(`${release.tag_name}'s ${MANIFEST} responded ${res.status}`);
+  const manifest: unknown = await res.json();
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) {
+    throw new Error(`${release.tag_name}'s ${MANIFEST} is not an object`);
+  }
+  return { ...manifest, notes: releaseChanges(release.body) };
 }

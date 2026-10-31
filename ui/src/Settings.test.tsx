@@ -10,6 +10,8 @@ import {
   ProjectSettingsView,
   Settings,
   type SettingsApi,
+  type UpdateStatus,
+  UpdatesView,
 } from './Settings.tsx'
 import { isSettingsShortcut } from './shortcuts.ts'
 
@@ -22,6 +24,8 @@ const running: AppSettings = {
   mcpError: null,
   theme: 'system',
   appDbPath: '/data/db/app.db',
+  updateChannel: 'stable',
+  checkUpdates: true,
 }
 
 const project: ProjectInfo = {
@@ -41,6 +45,9 @@ const api: SettingsApi = {
   getAppSettings: never,
   setMcpPort: never,
   setTheme: never,
+  setUpdateChannel: never,
+  setCheckUpdates: never,
+  checkForUpdate: never,
   setProjectName: never,
   listDeletedTasks: never,
   restoreTask: never,
@@ -249,6 +256,7 @@ test('without an open board, only the App tab can be chosen', () => {
       onClose={noop}
       onProjectsChanged={noop}
       onRemove={noop}
+      onUpdate={noop}
     />,
   )
   expect(html).toMatch(/role="tab" class="tab" aria-selected="true"[^>]*>App</)
@@ -417,4 +425,40 @@ test('Cmd or Ctrl+comma opens Settings', () => {
   expect(isSettingsShortcut(key(',', { ctrlKey: true }))).toBe(true)
   expect(isSettingsShortcut(key(',', {}))).toBe(false)
   expect(isSettingsShortcut(key(',', { metaKey: true, altKey: true }))).toBe(false)
+})
+
+function updatesView(settings: AppSettings, status: UpdateStatus = { kind: 'idle' }) {
+  return renderToStaticMarkup(
+    <UpdatesView
+      settings={settings}
+      status={status}
+      onChannel={noop}
+      onCheckOnStart={noop}
+      onCheckNow={noop}
+      onOpenLink={noop}
+    />,
+  )
+}
+
+test('Updates shows the channel, the check on start and Check now', () => {
+  const html = updatesView({ ...running, updateChannel: 'beta', checkUpdates: false })
+  expect(html).toContain('<input type="radio" name="update-channel" checked="" value="beta"/>')
+  expect(html).toContain('<input type="radio" name="update-channel" value="stable"/>')
+  expect(html).toContain('<input type="checkbox"/>Check for updates when Tandem starts')
+  expect(html).toContain('>Check now</button>')
+})
+
+test('Check now says how the check went', () => {
+  expect(updatesView(running, { kind: 'checking' })).toContain('disabled="">Checking…</button>')
+  expect(updatesView(running, { kind: 'upToDate' })).toContain('Tandem is up to date.')
+  expect(updatesView(running, { kind: 'error', message: 'offline' })).toContain(
+    '<p class="field-error" role="alert">offline</p>',
+  )
+})
+
+test('dev and alpha builds have no update settings', () => {
+  const html = updatesView({ ...running, updateChannel: null })
+  expect(html).toContain('don&#x27;t update themselves')
+  expect(html).not.toContain('update-channel')
+  expect(html).not.toContain('Check now')
 })

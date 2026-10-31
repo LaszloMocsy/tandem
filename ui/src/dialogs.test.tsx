@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import type { TaskSummary } from './api.ts'
-import { FinishForm, NewTaskForm, ReopenForm } from './dialogs.tsx'
+import type { TaskSummary, UpdateInfo } from './api.ts'
+import { FinishForm, NewTaskForm, ReopenForm, UpdateForm } from './dialogs.tsx'
 
 const noop = () => {}
 
@@ -71,4 +71,46 @@ test('New task offers every field and takes defaults from the filters', () => {
   expect(html).toContain('aria-label="Add dependency"')
   // A title is required.
   expect(html).toContain('disabled="">Create task</button>')
+})
+
+const update: UpdateInfo = {
+  version: '0.2.0',
+  date: '2026-10-30T12:00:00Z',
+  notes: "## What's Changed\n* Add updates by @someone in https://example.com/pull/1",
+  canInstall: true,
+}
+
+test('an update shows its notes and warns that installing restarts the MCP server', () => {
+  const html = renderToStaticMarkup(
+    <UpdateForm
+      update={update}
+      busy={false}
+      error={null}
+      onInstall={noop}
+      onDownload={noop}
+      onCancel={noop}
+    />,
+  )
+  expect(html).toContain('Tandem v0.2.0 is available')
+  expect(html).toContain('<h4>What&#x27;s Changed</h4>')
+  expect(html).toContain('<li>Add updates by @someone in https://example.com/pull/1</li>')
+  expect(html).toContain('The MCP server stops')
+  expect(html).toContain('>Install and restart</button>')
+  expect(html).toContain('>Later</button>')
+})
+
+test('an install that cannot replace itself offers the download instead', () => {
+  const html = renderToStaticMarkup(
+    <UpdateForm
+      update={{ ...update, notes: null, canInstall: false }}
+      busy={false}
+      error={null}
+      onInstall={noop}
+      onDownload={noop}
+      onCancel={noop}
+    />,
+  )
+  expect(html).toContain('can&#x27;t update itself')
+  expect(html).toContain('>Download</button>')
+  expect(html).not.toContain('Install and restart')
 })

@@ -5,6 +5,7 @@ mod error;
 mod links;
 mod mcp;
 mod projects;
+mod updates;
 
 use std::sync::Arc;
 use std::thread;
@@ -22,6 +23,7 @@ use crate::dto::{TASKS_CHANGED, TasksChanged};
 use crate::error::{NEWER_SCHEMA, report};
 use crate::mcp::Mcp;
 use crate::projects::{BACKUP_INTERVAL, Projects};
+use crate::updates::Updates;
 
 pub fn run() {
     // Cancelled when the app exits, which stops the MCP server.
@@ -30,6 +32,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(Updates::default())
         .setup(move |app| {
             // From core, so every process using Tandem finds the same one.
             let data_dir = data_dir().ok_or("the system has no data directory")?;
@@ -66,6 +70,10 @@ pub fn run() {
             commands::get_app_settings,
             commands::set_mcp_port,
             commands::set_theme,
+            commands::set_update_channel,
+            commands::set_check_updates,
+            commands::check_for_update,
+            commands::install_update,
             commands::set_project_name,
             commands::list_tasks,
             commands::get_task,

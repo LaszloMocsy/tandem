@@ -3,8 +3,8 @@ use std::fs;
 use jiff::Timestamp;
 use rusqlite::Connection;
 use tandem_board_core::db::{
-    AppDb, AppSettings, DbError, ProjectDb, Theme, app_db_path, delete_project_db, folder_name,
-    project_db_path,
+    AppDb, AppSettings, DbError, ProjectDb, Theme, UpdateChannel, app_db_path, delete_project_db,
+    folder_name, project_db_path,
 };
 use tempfile::TempDir;
 
@@ -214,11 +214,15 @@ fn app_settings_default_and_persist() {
         app.settings().unwrap(),
         AppSettings {
             mcp_port: None,
-            theme: Theme::System
+            theme: Theme::System,
+            update_channel: None,
+            check_updates: true,
         }
     );
     app.set_mcp_port(Some(4400)).unwrap();
     app.set_theme(Theme::Dark).unwrap();
+    app.set_update_channel(Some(UpdateChannel::Beta)).unwrap();
+    app.set_check_updates(false).unwrap();
     drop(app);
 
     let app = AppDb::open(data.path()).unwrap();
@@ -226,11 +230,15 @@ fn app_settings_default_and_persist() {
         app.settings().unwrap(),
         AppSettings {
             mcp_port: Some(4400),
-            theme: Theme::Dark
+            theme: Theme::Dark,
+            update_channel: Some(UpdateChannel::Beta),
+            check_updates: false,
         }
     );
     app.set_mcp_port(None).unwrap();
     app.set_theme(Theme::System).unwrap();
+    app.set_update_channel(None).unwrap();
+    app.set_check_updates(true).unwrap();
     assert_eq!(app.settings().unwrap(), AppSettings::default());
     // Defaults are stored as no row at all.
     let conn = Connection::open(app_db_path(data.path())).unwrap();
@@ -246,13 +254,22 @@ fn unreadable_app_settings_fall_back_to_defaults() {
     let app = AppDb::open(data.path()).unwrap();
     let conn = Connection::open(app_db_path(data.path())).unwrap();
     conn.execute_batch(
-        "INSERT INTO settings VALUES ('mcp_port', '70000'), ('theme', 'sepia'), ('later', 'x');",
+        "INSERT INTO settings VALUES ('mcp_port', '70000'), ('theme', 'sepia'),
+           ('update_channel', 'nightly'), ('check_updates', 'maybe'), ('later', 'x');",
     )
     .unwrap();
     assert_eq!(app.settings().unwrap(), AppSettings::default());
     conn.execute("UPDATE settings SET value = '0' WHERE key = 'mcp_port'", [])
         .unwrap();
     assert_eq!(app.settings().unwrap().mcp_port, None);
+}
+
+#[test]
+fn update_channels_parse() {
+    for channel in [UpdateChannel::Stable, UpdateChannel::Beta] {
+        assert_eq!(channel.as_str().parse::<UpdateChannel>(), Ok(channel));
+    }
+    assert!("alpha".parse::<UpdateChannel>().is_err());
 }
 
 #[test]

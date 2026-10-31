@@ -24,16 +24,18 @@ use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 use tandem_board_core::db::backup::{self, Backup, backup_dir, set_backups_owner};
 use tandem_board_core::db::{
-    AppDb, Changes, Project, ProjectDb, Theme, app_db_path, delete_project_db, folder_name,
-    normalize_project_name, project_db_path, timestamp_text,
+    AppDb, AppSettings, Changes, Project, ProjectDb, Theme, UpdateChannel, app_db_path,
+    delete_project_db, folder_name, normalize_project_name, project_db_path, timestamp_text,
 };
 use tandem_board_core::git;
 use tandem_board_core::markdown::TASK_DIR;
 use tandem_board_core::service::{Config, Service};
 use tandem_board_mcp::{DEFAULT_ADDR, endpoint_path};
 
+use crate::build_env::BuildEnv;
 use crate::error::{Error, describe, report};
 use crate::mcp::Mcp;
+use crate::updates;
 
 /// Called with a project id and what changed in it.
 pub type OnChange = Arc<dyn Fn(&str, &Changes) + Send + Sync>;
@@ -75,6 +77,10 @@ pub struct AppSettingsInfo {
     pub theme: &'static str,
     /// The app's database file, with the project list and these settings.
     pub app_db_path: String,
+    /// `stable` or `beta`, or `None` for builds that never update.
+    pub update_channel: Option<&'static str>,
+    /// Whether the app looks for an update when it starts.
+    pub check_updates: bool,
 }
 
 /// A file or folder of the app's data that Settings can show in the
@@ -173,7 +179,15 @@ impl Projects {
             mcp_error: self.mcp.error(),
             theme: settings.theme.as_str(),
             app_db_path: app_db_path(&self.data_dir).display().to_string(),
+            update_channel: updates::channel(BuildEnv::current(), settings.update_channel)
+                .map(UpdateChannel::as_str),
+            check_updates: settings.check_updates,
         })
+    }
+
+    /// The app's settings as stored.
+    pub fn settings(&self) -> Result<AppSettings, Error> {
+        Ok(lock(&self.app_db).settings()?)
     }
 
     /// Where `place` is, and whether it is a folder. Refused with
@@ -201,6 +215,19 @@ impl Projects {
 
     pub fn set_theme(&self, theme: Theme) -> Result<AppSettingsInfo, Error> {
         lock(&self.app_db).set_theme(theme)?;
+        self.app_settings()
+    }
+
+    /// Picks the channel updates come from. Picking the build's own channel
+    /// stores nothing, so the build decides again.
+    pub fn set_update_channel(&self, channel: UpdateChannel) -> Result<AppSettingsInfo, Error> {
+        let picked = (BuildEnv::current().update_channel() != Some(channel)).then_some(channel);
+        lock(&self.app_db).set_update_channel(picked)?;
+        self.app_settings()
+    }
+
+    pub fn set_check_updates(&self, check: bool) -> Result<AppSettingsInfo, Error> {
+        lock(&self.app_db).set_check_updates(check)?;
         self.app_settings()
     }
 

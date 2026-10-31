@@ -81,6 +81,16 @@ xattr -dr com.apple.quarantine /Applications/Tandem.app
 
 Only download Tandem from this repo's [releases](https://github.com/LaszloMocsy/tandem/releases).
 
+## Updates
+
+Tandem checks for a new version when it starts, shows what changed, and asks before it installs. Installing restarts the app, which stops the MCP server until it's back, so connected agents need to reconnect.
+
+- **Channels.** Production builds follow **Stable**, which gets production releases only. Beta builds follow **Beta**, which gets whichever is newer, the latest beta or production release. You can switch channels, turn off the check on start, or check now in **Settings → App → Updates**. Alpha and dev builds never update themselves.
+- **Linux.** Only the `.AppImage` can update itself. A `.deb` or `.rpm` install says when a new version is out and links to the download.
+- **Earlier builds.** Builds released before updates existed don't check, so update those once by hand.
+
+Updates are signed, and Tandem refuses any update not signed by this project's key.
+
 ## Building from source
 
 You need [Rust](https://rustup.rs), [Bun](https://bun.sh), the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform and the Tauri CLI (`cargo install tauri-cli --version "^2"`).
