@@ -953,10 +953,6 @@ button {
   --env-strip: #b95500;
 }
 
-:root[data-env='alpha'] {
-  --env-strip: #7a45c9;
-}
-
 :root[data-env='beta'] {
   --env-strip: #2566d6;
 }

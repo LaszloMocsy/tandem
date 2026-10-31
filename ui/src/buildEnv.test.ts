@@ -7,12 +7,8 @@ function marked(env: BuildEnv, version: string): DOMStringMap {
   return root.dataset
 }
 
-test('dev, alpha and beta builds mark the page with the strip and its label', () => {
+test('dev and beta builds mark the page with the strip and its label', () => {
   expect(marked('dev', '0.1.0')).toEqual({ env: 'dev', envLabel: 'DEV build' })
-  expect(marked('alpha', '0.2.0-alpha.1')).toEqual({
-    env: 'alpha',
-    envLabel: 'ALPHA build (v0.2.0-alpha.1)',
-  })
   expect(marked('beta', '0.2.0-beta.3')).toEqual({
     env: 'beta',
     envLabel: 'BETA build (v0.2.0-beta.3)',
@@ -33,7 +29,6 @@ test('tests run on the dev server, so the build is dev', () => {
 
 test('the version text names non-production builds', () => {
   expect(versionText('production', '0.2.0')).toBe('Tandem v0.2.0')
-  expect(versionText('alpha', '0.2.0-alpha.1')).toBe('Tandem v0.2.0-alpha.1 (ALPHA build)')
   expect(versionText('beta', '0.2.0-beta.3')).toBe('Tandem v0.2.0-beta.3 (BETA build)')
   expect(versionText('dev', '0.1.0')).toBe('Tandem v0.1.0 (DEV build)')
 })

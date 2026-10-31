@@ -150,9 +150,6 @@ test('the App tab shows the running version, with the build for non-production b
     )
   expect(view('production', '0.2.0')).toContain('<code>Tandem v0.2.0</code>')
   expect(view('beta', '0.2.0-beta.1')).toContain('<code>Tandem v0.2.0-beta.1 (BETA build)</code>')
-  expect(view('alpha', '0.2.0-alpha.3')).toContain(
-    '<code>Tandem v0.2.0-alpha.3 (ALPHA build)</code>',
-  )
   expect(view('dev', '0.1.0')).toContain('<code>Tandem v0.1.0 (DEV build)</code>')
   expect(view('production', '0.2.0')).toContain('aria-label="Copy version"')
   // Release notes link to this version's release; a dev build's version may not be out yet.
@@ -456,7 +453,7 @@ test('Check now says how the check went', () => {
   )
 })
 
-test('dev and alpha builds have no update settings', () => {
+test('dev builds have no update settings', () => {
   const html = updatesView({ ...running, updateChannel: null })
   expect(html).toContain('don&#x27;t update themselves')
   expect(html).not.toContain('update-channel')

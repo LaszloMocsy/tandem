@@ -1,10 +1,18 @@
 name: Release
 
-# Pushing a tag such as v0.1.0 builds macOS, Windows and Linux bundles into a
-# draft GitHub release, which you then review and publish by hand. Tags
-# vX.Y.Z-alpha.N and vX.Y.Z-beta.N build labelled ALPHA and BETA pre-releases;
-# any other tag fails. The Tag workflow starts it through workflow_dispatch
-# on the tag it creates; a dispatch on a branch fails.
+# Builds a release tag's macOS, Windows and Linux bundles into a draft GitHub
+# release, which you then review and publish by hand. A tag vX.Y.Z builds a
+# stable release with every bundle; a tag vX.Y.Z-beta.N builds a pre-release
+# labelled BETA; any other tag fails. The Tag workflow starts it for a stable
+# release, and the Beta workflow for a beta, through workflow_dispatch on the
+# tag each creates. A dispatch on a branch fails; run Beta for that.
+#
+# The version files on a tag hold X.Y.Z, even for a beta, so each build first
+# sets them to the tag's version. Bundlers that refuse or misorder the
+# -beta.N suffix are left out of betas: the MSI and RPM refuse it, and dpkg
+# would sort a beta's .deb above its stable release. Betas ship the macOS
+# app and .dmg, the Windows NSIS installer and the Linux AppImage, which are
+# also what the updater installs.
 on:
   push:
     tags: ['v*']
@@ -35,7 +43,7 @@ jobs:
         env:
           REF: ${{ github.ref_name }}
         run: |
-          echo "::error::Release runs for a tag, not the branch $REF"
+          echo "::error::Release runs for a tag, not the branch $REF. To build a beta from a release branch, run the Beta workflow on it."
           exit 1
 
       # Every tag, so the release notes can start from the previous release.
@@ -48,7 +56,7 @@ jobs:
         with:
           toolchain: stable
 
-      # alpha, beta, or empty for a production release. Fails on any other tag.
+      # beta, or production for a stable release. Fails on any other tag.
       - name: Read the build environment from the tag
         id: env
         env:
@@ -57,7 +65,8 @@ jobs:
           env=$(cargo --locked xtask version env "$TAG")
           echo "env=$env" >> "$GITHUB_OUTPUT"
 
-      # Cargo.toml, tauri.conf.json and Cargo.lock must agree with the tag.
+      # Cargo.toml, tauri.conf.json and Cargo.lock must hold X.Y.Z for the tag
+      # vX.Y.Z or vX.Y.Z-beta.N.
       - name: Check the tag matches the app version
         env:
           TAG: ${{ github.ref_name }}
@@ -67,14 +76,14 @@ jobs:
       # the <!-- changes --> marker in the app's update dialog.
       # GitHub generates the notes from the pull requests merged since the
       # previous release, grouped by .github/release.yml: since the last
-      # production tag for a production release, so it covers the
-      # pre-releases too, or since the last tag for a pre-release.
+      # stable tag for a stable release, so it covers the betas too, or since
+      # the last tag of any kind for a beta.
       - name: Create the draft release
         id: create
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-          PRERELEASE: ${{ steps.env.outputs.env != '' }}
+          PRERELEASE: ${{ steps.env.outputs.env == 'beta' }}
         run: |
           previous=$(cargo --locked xtask version previous-tag "$TAG")
           args=(-f tag_name="$TAG")
@@ -101,21 +110,27 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
+      # beta-bundles: what a beta builds, or empty for every bundle. A stable
+      # release always builds every bundle.
       matrix:
         include:
           - name: macOS, Apple silicon
             platform: macos-latest
             target: aarch64-apple-darwin
+            beta-bundles: ''
           - name: macOS, Intel
             platform: macos-latest
             target: x86_64-apple-darwin
+            beta-bundles: ''
           # An older Ubuntu than CI's, so the bundles run on older glibc too.
           - name: Linux
             platform: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            beta-bundles: appimage
           - name: Windows
             platform: windows-latest
             target: x86_64-pc-windows-msvc
+            beta-bundles: nsis
     runs-on: ${{ matrix.platform }}
     steps:
       # Updates are signed with this key, and the app refuses any other.
@@ -145,6 +160,15 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      # A beta tag's X.Y.Z-beta.N, so the app, its bundles and latest.json
+      # carry the beta's version. Leaves a stable tag's files as they are.
+      # Only this checkout changes; nothing is committed.
+      - name: Set the version for this build
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: cargo --locked xtask version stamp "$TAG"
+
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
 
       # tauri.conf.json's beforeBuildCommand runs `bun run build` in ui/.
@@ -155,7 +179,8 @@ jobs:
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Compiled into the app and its frontend; empty for production.
+          # Compiled into the app and its frontend: beta or production. Left
+          # unset, as in a local build, it would be a dev build.
           TANDEM_ENV: ${{ needs.create-release.outputs.build-env }}
           # Signs the update bundles that tauri.conf.json's
           # createUpdaterArtifacts asks for.
@@ -166,16 +191,14 @@ jobs:
           projectPath: desktop
           releaseId: ${{ needs.create-release.outputs.release-id }}
           releaseDraft: true
-          # The MSI bundler refuses versions like 0.2.0-alpha.1, so Windows
-          # pre-releases ship the NSIS installer only.
           args: >-
             --target ${{ matrix.target }}
-            ${{ runner.os == 'Windows' && needs.create-release.outputs.build-env != '' && '--bundles nsis' || '' }}
+            ${{ needs.create-release.outputs.build-env == 'beta' && matrix.beta-bundles != '' && format('--bundles {0}', matrix.beta-bundles) || '' }}
           # latest.json, which the site's update feeds serve. Each build adds
           # its platform to the one manifest on the release.
           uploadUpdaterJson: true
           # Windows updates use the NSIS installer, like the downloads and
-          # every pre-release, so an MSI never installs over an NSIS install.
+          # every beta, so an MSI never installs over an NSIS install.
           updaterJsonPreferNsis: true
 
   # The builds each add their platform to latest.json at the same time, so

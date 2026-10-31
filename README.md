@@ -85,7 +85,7 @@ Only download Tandem from this repo's [releases](https://github.com/LaszloMocsy/
 
 Tandem checks for a new version when it starts, shows what changed, and asks before it installs. Installing restarts the app, which stops the MCP server until it's back, so connected agents need to reconnect.
 
-- **Channels.** Production builds follow **Stable**, which gets production releases only. Beta builds follow **Beta**, which gets whichever is newer, the latest beta or production release. You can switch channels, turn off the check on start, or check now in **Settings → App → Updates**. Alpha and dev builds never update themselves.
+- **Channels.** Stable builds follow **Stable**, which gets stable releases only. Beta builds follow **Beta**, which gets whichever is newer, the latest beta or stable release. You can switch channels, turn off the check on start, or check now in **Settings → App → Updates**. Dev builds, including any you build yourself, never update themselves.
 - **Linux.** Only the `.AppImage` can update itself. A `.deb` or `.rpm` install says when a new version is out and links to the download.
 - **Earlier builds.** Builds released before updates existed don't check, so update those once by hand.
 
@@ -98,7 +98,7 @@ You need [Rust](https://rustup.rs), [Bun](https://bun.sh), the [Tauri prerequisi
 ```sh
 bun install --cwd ui   # frontend dependencies
 cargo tauri dev        # run the app with hot reload
-cargo tauri build      # build a release bundle
+cargo tauri build      # build the bundles, as a DEV build that never updates itself
 ```
 
 Checks, which CI runs on every pull request and every push to `main`:
