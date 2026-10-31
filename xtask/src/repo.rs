@@ -1,10 +1,10 @@
 //! The repo: reading and writing the version files, and running git and gh.
 
+use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Output};
-use std::{env, fs};
 
 use crate::files;
 use crate::version::Version;
@@ -115,25 +115,16 @@ impl Repo {
             })
     }
 
-    /// Rewrites the workspace crates' entries in Cargo.lock; dependencies stay
-    /// as they are.
-    pub fn update_lock(&self) -> Result<(), String> {
-        let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-        let status = Command::new(cargo)
-            .args([
-                "update",
-                "--workspace",
-                "--offline",
-                "--quiet",
-                "--manifest-path",
-            ])
-            .arg(self.root.join(CARGO_TOML))
-            .status()
-            .map_err(|e| format!("can't run cargo: {e}"))?;
-        if !status.success() {
-            return Err("cargo update --workspace failed".to_owned());
-        }
-        Ok(())
+    /// The tags on origin matching `pattern`, such as `v0.2.0-beta.*`, so a
+    /// stale or shallow local clone can't miss one.
+    pub fn remote_tags(&self, pattern: &str) -> Result<Vec<String>, String> {
+        let refs = format!("refs/tags/{pattern}");
+        let out = self.git_stdout(&["ls-remote", "--tags", "--refs", "origin", &refs])?;
+        Ok(out
+            .lines()
+            .filter_map(|line| line.split('\t').nth(1)?.strip_prefix("refs/tags/"))
+            .map(str::to_owned)
+            .collect())
     }
 
     pub fn git(&self, args: &[&str]) -> Result<Output, String> {

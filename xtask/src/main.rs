@@ -26,9 +26,12 @@ fn main() -> ExitCode {
         None => print_version_help(),
         Some(VersionCommand::Current) => repo.version(None).map(|v| println!("{v}")),
         Some(VersionCommand::Check(check)) => run_check(&repo, check),
-        Some(VersionCommand::Env { tag }) => Version::parse_tag(&tag)
-            .map(|tag| println!("{}", tag.channel().map_or("", |c| c.name()))),
+        Some(VersionCommand::Env { tag }) => {
+            Version::parse_tag(&tag).map(|tag| println!("{}", tag.build_env()))
+        }
         Some(VersionCommand::PreviousTag { tag }) => previous_tag(&repo, &tag),
+        Some(VersionCommand::NextBeta) => next_beta(&repo),
+        Some(VersionCommand::Stamp { tag }) => stamp(&repo, &tag),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -68,8 +71,7 @@ fn run_check(repo: &Repo, args: CheckArgs) -> Result<(), String> {
                     check::release_tag_on_head(current, tags.lines())?.to_owned()
                 }
             };
-            check::release(current, &tag)?;
-            current
+            check::release(current, &tag)?
         }
     };
     println!("{current}");
@@ -153,13 +155,49 @@ fn gh_pull_request(repo: &Repo, number: Option<u64>) -> Result<PullRequest, Stri
 
 /// The tag GitHub Actions runs for, if it runs for one.
 fn actions_tag() -> Option<String> {
+    actions_ref("tag")
+}
+
+/// The name of the ref GitHub Actions runs for, if it's of `kind`: `tag` or
+/// `branch`.
+fn actions_ref(kind: &str) -> Option<String> {
     let actions = env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
-    let tag = env::var("GITHUB_REF_TYPE").as_deref() == Ok("tag");
-    if actions && tag {
+    let matches = env::var("GITHUB_REF_TYPE").as_deref() == Ok(kind);
+    if actions && matches {
         env::var("GITHUB_REF_NAME").ok()
     } else {
         None
     }
+}
+
+/// Prints the tag of the next beta from this release branch.
+fn next_beta(repo: &Repo) -> Result<(), String> {
+    let branch = match actions_ref("branch") {
+        Some(branch) => branch,
+        None => repo.git_stdout(&["branch", "--show-current"])?,
+    };
+    let current = repo.version(None)?;
+    let main = repo.fetch("refs/heads/main")?;
+    let release = check::beta_branch(&branch, current, repo.cargo_version_at(&main)?)?;
+    let tags = repo.remote_tags(&format!("v{release}*"))?;
+    let beta = version::next_beta(release, tags.iter().map(String::as_str))?;
+    eprintln!("{branch}: the next beta of {release} is {beta}");
+    println!("v{beta}");
+    Ok(())
+}
+
+/// Sets the version files to `tag`'s version for a release build.
+fn stamp(repo: &Repo, tag: &str) -> Result<(), String> {
+    let current = repo.version(None)?;
+    let version = check::release(current, tag)?;
+    if version == current {
+        eprintln!("The version files already hold {current}.");
+        return Ok(());
+    }
+    repo.version_files_clean()?;
+    change::write(repo, current, version)?;
+    eprintln!("Set {current} -> {version} for this build; don't commit it.");
+    Ok(())
 }
 
 fn previous_tag(repo: &Repo, tag: &str) -> Result<(), String> {

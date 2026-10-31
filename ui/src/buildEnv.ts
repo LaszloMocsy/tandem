@@ -1,9 +1,9 @@
-// Which build is running: dev, alpha, beta or production. Vite fixes it at
+// Which build is running: dev, beta or production. Vite fixes it at
 // build time (see vite.config.ts). Every build but production gets a coloured
 // strip across the top of the window, drawn by CSS from `data-env` on <html>,
 // with the label from `data-env-label` in its middle.
 
-export type BuildEnv = 'dev' | 'alpha' | 'beta' | 'production'
+export type BuildEnv = 'dev' | 'beta' | 'production'
 
 declare const __TANDEM_ENV__: BuildEnv
 declare const __TANDEM_VERSION__: string
@@ -11,7 +11,7 @@ declare const __TANDEM_VERSION__: string
 export const BUILD_ENV: BuildEnv = __TANDEM_ENV__
 export const APP_VERSION: string = __TANDEM_VERSION__
 
-/** The strip's text, such as `ALPHA build (v0.2.0-alpha.1)`. Dev builds
+/** The strip's text, such as `BETA build (v0.2.0-beta.1)`. Dev builds
  * leave out the version, which only names the last release. */
 export function buildEnvLabel(env: BuildEnv, version: string): string {
   const label = `${env.toUpperCase()} build`

@@ -73,9 +73,12 @@ impl PullRequest {
     }
 }
 
-/// The version a `release/vX.Y.Z` branch names, if it is one.
+/// The version a `release/vX.Y.Z` branch names, if it is one. Betas get no
+/// branch of their own, so `release/vX.Y.Z-beta.N` isn't one.
 fn release_branch(branch: &str) -> Option<Version> {
-    Version::parse_tag(branch.strip_prefix(RELEASE_BRANCH)?).ok()
+    Version::parse_tag(branch.strip_prefix(RELEASE_BRANCH)?)
+        .ok()
+        .filter(|v| !v.is_beta())
 }
 
 /// A pull request into main must come from `release/v<version>`.
@@ -95,36 +98,70 @@ fn branch(current: Version, branch: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A release tag must name the app version.
-pub fn release(current: Version, tag: &str) -> Result<(), String> {
-    if Version::parse_tag(tag)? != current {
-        return Err(format!("tag {tag} doesn't match the app version {current}"));
-    }
-    Ok(())
+/// Whether release tag `tag` fits the app version `current`: a stable tag
+/// names it, and a beta tag is a beta of it, since the version files hold
+/// the release a beta leads to. A beta in the files (from before betas were
+/// built from release branches) still fits its own tag.
+fn fits(current: Version, tag: Version) -> bool {
+    tag == current || tag.release() == current
 }
 
-/// The release tag among `tags` (those on HEAD): the one naming `current`, or
-/// else the only release tag there.
+/// A release tag must name the app version, or be a beta of it.
+pub fn release(current: Version, tag: &str) -> Result<Version, String> {
+    let version = Version::parse_tag(tag)?;
+    if !fits(current, version) {
+        return Err(format!(
+            "tag {tag} doesn't match the app version {current}: it should be v{current} or \
+             v{current}-beta.N"
+        ));
+    }
+    Ok(version)
+}
+
+/// The release tag among `tags` (those on HEAD): the one that fits
+/// `current`, or else the only release tag there.
 pub fn release_tag_on_head<'a>(
     current: Version,
     tags: impl IntoIterator<Item = &'a str>,
 ) -> Result<&'a str, String> {
-    let tags: Vec<&str> = tags
+    let tags: Vec<(&str, Version)> = tags
         .into_iter()
-        .filter(|t| Version::parse_tag(t).is_ok())
+        .filter_map(|t| Some((t, Version::parse_tag(t).ok()?)))
         .collect();
-    let matching = tags
+    let matching: Vec<&str> = tags
         .iter()
-        .find(|t| Version::parse_tag(t).ok() == Some(current));
-    match (matching, tags.as_slice()) {
-        (Some(tag), _) => Ok(tag),
-        (None, [tag]) => Ok(tag),
-        (None, []) => Err("HEAD has no vX.Y.Z tag; pass the tag to check".to_owned()),
-        (None, _) => Err(format!(
+        .filter(|(_, v)| fits(current, *v))
+        .map(|(t, _)| *t)
+        .collect();
+    let all: Vec<&str> = tags.iter().map(|(t, _)| *t).collect();
+    match (matching.as_slice(), all.as_slice()) {
+        ([tag], _) | ([], [tag]) => Ok(tag),
+        ([], []) => Err("HEAD has no release tag; pass the tag to check".to_owned()),
+        (_, _) => Err(format!(
             "HEAD has several release tags ({}); pass the one to check",
-            tags.join(", ")
+            all.join(", ")
         )),
     }
+}
+
+/// A beta is built from a `release/vX.Y.Z` branch whose version files hold
+/// `X.Y.Z`, higher than `main`'s version. Returns `X.Y.Z`, the release the
+/// beta leads to.
+pub fn beta_branch(branch: &str, current: Version, main: Version) -> Result<Version, String> {
+    let named = release_branch(branch).ok_or_else(|| {
+        format!(
+            "betas are built from a release/vX.Y.Z branch, not {branch:?}; run the Beta \
+             workflow on the release branch"
+        )
+    })?;
+    if named != current {
+        return Err(format!(
+            "branch {branch} names version {named}, but the app version is {current}; \
+             run `cargo xtask version --exact {named}` on it"
+        ));
+    }
+    higher(current, main, "main")?;
+    Ok(named)
 }
 
 /// The version must be higher than `base`, the version on `rev`.
@@ -173,6 +210,7 @@ mod tests {
             "feat/x",
             "release/0.2.0",
             "release/v0.2",
+            "release/v0.2.0-beta.1",
             "versions/v0.2.0",
             "main",
         ] {
@@ -217,18 +255,28 @@ mod tests {
     }
 
     #[test]
-    fn release_tags_must_name_the_version() {
-        assert!(release(v("0.2.0"), "v0.2.0").is_ok());
-        assert!(release(v("0.2.0"), "v0.2.0-beta.1").is_err());
-        assert!(release(v("0.2.0"), "0.2.0").is_err());
+    fn release_tags_must_name_the_version_or_a_beta_of_it() {
+        assert_eq!(release(v("0.2.0"), "v0.2.0"), Ok(v("0.2.0")));
+        assert_eq!(release(v("0.2.0"), "v0.2.0-beta.3"), Ok(v("0.2.0-beta.3")));
+        // A beta still in the files, as on main before this flow, fits its tag.
+        assert!(release(v("0.1.0-beta.1"), "v0.1.0-beta.1").is_ok());
+        for tag in ["v0.2.1", "v0.2.1-beta.1", "v0.1.0", "0.2.0"] {
+            assert!(release(v("0.2.0"), tag).is_err(), "accepted {tag}");
+        }
+        let err = release(v("0.2.0"), "v0.3.0").unwrap_err();
+        assert!(err.contains("v0.2.0 or v0.2.0-beta.N"), "{err}");
     }
 
     #[test]
     fn finds_the_release_tag_on_head() {
         assert_eq!(release_tag_on_head(v("0.2.0"), ["v0.2.0"]), Ok("v0.2.0"));
         assert_eq!(
-            release_tag_on_head(v("0.2.0"), ["latest", "v0.2.0-beta.1", "v0.2.0"]),
+            release_tag_on_head(v("0.2.0"), ["latest", "v0.1.0-beta.1", "v0.2.0"]),
             Ok("v0.2.0")
+        );
+        assert_eq!(
+            release_tag_on_head(v("0.2.0"), ["v0.2.0-beta.2", "latest"]),
+            Ok("v0.2.0-beta.2")
         );
         // The only release tag is returned, so the check can say it's wrong.
         assert_eq!(
@@ -238,19 +286,46 @@ mod tests {
         assert!(
             release_tag_on_head(v("0.2.0"), ["latest"])
                 .unwrap_err()
-                .contains("no vX.Y.Z tag")
+                .contains("no release tag")
         );
-        assert!(
-            release_tag_on_head(v("0.2.0"), ["v0.3.0", "v0.4.0"])
-                .unwrap_err()
-                .contains("several release tags")
+        for tags in [
+            &["v0.3.0", "v0.4.0"][..],
+            &["v0.2.0-beta.1", "v0.2.0-beta.2"],
+        ] {
+            assert!(
+                release_tag_on_head(v("0.2.0"), tags.iter().copied())
+                    .unwrap_err()
+                    .contains("several release tags"),
+                "{tags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn betas_come_from_a_release_branch_above_main() {
+        assert_eq!(
+            beta_branch("release/v0.2.0", v("0.2.0"), v("0.1.0")),
+            Ok(v("0.2.0"))
         );
+        // Today's main holds a beta, which the release it led to is above.
+        assert_eq!(
+            beta_branch("release/v0.1.0", v("0.1.0"), v("0.1.0-beta.1")),
+            Ok(v("0.1.0"))
+        );
+        for branch in ["main", "feat/x", "release/v0.2.0-beta.1", "release/0.2.0"] {
+            let err = beta_branch(branch, v("0.2.0"), v("0.1.0")).unwrap_err();
+            assert!(err.contains("release/vX.Y.Z branch"), "{branch}: {err}");
+        }
+        let err = beta_branch("release/v0.2.0", v("0.3.0"), v("0.1.0")).unwrap_err();
+        assert!(err.contains("names version 0.2.0"), "{err}");
+        let err = beta_branch("release/v0.2.0", v("0.2.0"), v("0.2.0")).unwrap_err();
+        assert!(err.contains("isn't higher than 0.2.0 on main"), "{err}");
     }
 
     #[test]
     fn against_needs_a_higher_version() {
         assert!(higher(v("0.2.0"), v("0.1.0"), "v0.1.0").is_ok());
-        assert!(higher(v("0.2.0-alpha.1"), v("0.1.0"), "main").is_ok());
+        assert!(higher(v("0.1.0"), v("0.1.0-beta.1"), "main").is_ok());
         let err = higher(v("0.1.0"), v("0.1.0"), "origin/main").unwrap_err();
         assert!(
             err.contains("0.1.0 isn't higher than 0.1.0 on origin/main"),

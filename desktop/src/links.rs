@@ -19,7 +19,7 @@ pub(crate) enum Link {
     /// The release notes for the running version. A dev build's version may
     /// not be released yet, so it gets the list of releases instead.
     ReleaseNotes,
-    /// Every release, where alpha builds find newer ones.
+    /// Every release, where dev builds find newer ones.
     Releases,
     /// The landing page's downloads, for installs that can't update
     /// themselves.
@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn releases_lists_every_release() {
         assert_eq!(
-            Link::Releases.url(BuildEnv::Alpha, "0.2.0-alpha.1"),
+            Link::Releases.url(BuildEnv::Dev, "0.2.0"),
             "https://github.com/LaszloMocsy/tandem/releases"
         );
     }

@@ -50,7 +50,7 @@ Changes to the board should also be tried in the running app with `cargo tauri d
 
 ## Branches
 
-Feature branches merge into a `release/vX.Y.Z` branch, and only release branches merge into `main`. Branch your feature from the release branch it will go into, and open its pull request against that branch. Every release, pre-releases included, gets its own release branch named after its exact version, such as `release/v0.2.0-alpha.1`. The Version workflow checks every pull request into `main`: it must come from a `release/vX.Y.Z` branch whose name matches the version in `Cargo.toml`, `desktop/tauri.conf.json` and `Cargo.lock`, and that version must be higher than `main`'s. A feature pull request into a release branch must keep that branch's version. Run the same check locally for your branch's pull request, or any other by number (it uses `gh`):
+Feature branches merge into a `release/vX.Y.Z` branch, and only release branches merge into `main`. Branch your feature from the release branch it will go into, and open its pull request against that branch. A release branch is named after the stable version it becomes, such as `release/v0.2.0`, and its `Cargo.toml`, `desktop/tauri.conf.json` and `Cargo.lock` hold that version. Its betas are built from the same branch and don't change the version files (see Releasing). The Version workflow checks every pull request into `main`: it must come from a `release/vX.Y.Z` branch whose name matches the version in those files, and that version must be higher than `main`'s. A feature pull request into a release branch must keep that branch's version. Run the same check locally for your branch's pull request, or any other by number (it uses `gh`):
 
 ```sh
 cargo xtask version check pr
@@ -64,36 +64,53 @@ For maintainers, once per repository:
 
 ## Releasing
 
+Tandem has three builds:
+
+- **Dev**: `cargo tauri dev`, and any `cargo tauri build` on your machine. Labelled DEV, and never updates itself.
+- **Beta** `vX.Y.Z-beta.N`: built when you run the Beta workflow on a release branch. Labelled BETA, published as a GitHub pre-release, and offered on the beta update channel.
+- **Stable** `vX.Y.Z`: built when a release branch merges into `main`. Offered on both channels.
+
+The version files only ever hold `X.Y.Z`. A beta's version exists only in its tag and its build, because some bundlers refuse a `-` in the version.
+
 For maintainers:
 
-1. Create the release branch and set the version in one step, then commit the result:
+1. Create the release branch and set the version in one step, then commit the result and push it:
 
    ```sh
-   cargo xtask version --next minor --create-branch             # 0.1.0 -> 0.2.0 on release/v0.2.0
-   cargo xtask version --next minor --pre alpha --create-branch # 0.1.0 -> 0.2.0-alpha.1
-   cargo xtask version --next beta --create-branch              # 0.2.0-alpha.2 -> 0.2.0-beta.1
-   cargo xtask version --next release --create-branch           # 0.2.0-beta.1 -> 0.2.0
+   cargo xtask version --next minor --create-branch   # 0.1.0 -> 0.2.0 on release/v0.2.0
+   cargo xtask version --next patch --create-branch   # 0.2.0 -> 0.2.1 on release/v0.2.1
    ```
 
    It updates `Cargo.toml` (`[workspace.package]`), `desktop/tauri.conf.json` and `Cargo.lock`. Add `--dry-run` to see the change first, or use `--exact X.Y.Z` to set a version directly; lowering one asks first. `cargo xtask version` lists every option.
-2. Merge the release's feature branches into the release branch, then open a pull request from it into `main`.
-3. Merging that pull request runs the Tag workflow: it tags the merge commit `vX.Y.Z` and starts the Release workflow for the tag. It refuses a tag that already exists.
-4. The Release workflow checks that the tag matches the version (`cargo xtask version check release`), then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
-5. Check the assets, edit the notes, and publish the draft. Publishing also ships the update: it redeploys the landing page, whose update feeds (`/updates/stable.json` and `/updates/beta.json`) then offer the release to every app on its channel.
+2. Merge the release's feature branches into the release branch.
+3. For a beta, run the Beta workflow on the release branch, from Actions → Beta → Run workflow, or:
 
-The draft's notes list the pull requests merged since the previous release: since the last production release for a production version, so they cover its alpha and beta releases too, or since the last release of any kind for a pre-release. `.github/release.yml` groups them by label: `enhancement` under New features, `bug` under Fixes, `documentation` under Documentation, and the rest under Other changes. So that the feature pull requests show up:
+   ```sh
+   gh workflow run beta.yml --ref release/v0.2.0
+   ```
+
+   It tags the branch's head `v0.2.0-beta.N`, one past the highest beta of `0.2.0` tagged so far (drafts included), and starts the Release workflow for that tag. `cargo xtask version next-beta` prints the tag it would pick for your branch. Run it again after more changes for the next beta; the version files stay `0.2.0` throughout. Once `v0.2.0` is out, its betas are over, and the next ones need a new release branch.
+4. When the release is ready, open a pull request from the release branch into `main`. Merging it runs the Tag workflow: it tags the merge commit `vX.Y.Z` and starts the Release workflow for the tag. It refuses a tag that already exists.
+5. The Release workflow checks that the version files hold `X.Y.Z` for the tag `vX.Y.Z` or `vX.Y.Z-beta.N` (`cargo xtask version check release`). Each build then sets the files in its own checkout to the tag's version (`cargo xtask version stamp`), so a beta carries `X.Y.Z-beta.N`, and builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
+   - A stable release gets every bundle: `.dmg`, the Windows NSIS installer and `.msi`, and the Linux `.AppImage`, `.deb` and `.rpm`.
+   - A beta gets the `.dmg`, the NSIS installer and the `.AppImage`. The MSI and RPM bundlers refuse `-beta.N`, and dpkg would sort a beta's `.deb` above its stable release, so those are left out. The three a beta keeps are the ones the updater installs, so betas update on every platform.
+6. Check the assets, edit the notes, and publish the draft. Publishing also ships the update: it redeploys the landing page, whose update feeds (`/updates/stable.json` and `/updates/beta.json`) then offer the release to every app on its channel.
+
+The draft's notes list the pull requests merged since the previous release: since the last stable release for a stable version, so they cover its betas too, or since the last release of any kind for a beta. `.github/release.yml` groups them by label: `enhancement` under New features, `bug` under Fixes, `documentation` under Documentation, and the rest under Other changes. So that the feature pull requests show up:
 
 - Label feature pull requests as you merge them into the release branch.
-- Merge the release pull request into `main` with a merge commit, not a squash, which would hide the feature pull requests' commits.
+- Merge the release pull request into `main` with a merge commit, not a squash, which would hide the feature pull requests' commits and leave the betas' tags off `main`.
 - Label the release pull request `skip-release-notes`, since its feature pull requests are already listed.
 
-To retry a failed release, delete its draft and run the Release workflow on the tag again: `gh workflow run release.yml --ref vX.Y.Z`. Pushing a new `v*` tag by hand also starts a release.
+To retry a failed release, delete its draft and run the Release workflow on the tag again: `gh workflow run release.yml --ref vX.Y.Z`, or `--ref vX.Y.Z-beta.N` for a beta. Pushing a new `v*` tag by hand also starts a release.
 
 Edit the notes below the `<!-- changes -->` line, and keep the line: the app's update dialog shows only what follows it.
 
 Updates are signed with the updater key in the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets, and the app only installs updates signed by it; its public key is in `desktop/tauri.conf.json`. Keep a copy of the key and its password outside GitHub: if they're lost, installed apps can never update again. The key is separate from OS code signing.
 
 Release bundles need the key, so `cargo tauri build` on your machine fails at signing without it. Build with `cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'` to skip the update bundles.
+
+A build on your machine is a dev build: labelled DEV, and it never updates itself. The Release workflow sets `TANDEM_ENV` to `beta` or `production` for its builds; set it yourself, as in `TANDEM_ENV=production cargo tauri build`, to try a build labelled like a release. Any other value fails the build.
 
 The builds are not signed yet; [Installing an unsigned build](README.md#installing-an-unsigned-build) explains what users see.
 
