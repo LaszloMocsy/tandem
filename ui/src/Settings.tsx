@@ -9,6 +9,8 @@ import type {
   Place,
   ProjectInfo,
   Theme,
+  UpdateChannel,
+  UpdateInfo,
 } from './api.ts'
 import { formatSize, taskCount, useBackups } from './backups.ts'
 import { APP_VERSION, BUILD_ENV, type BuildEnv, versionText } from './buildEnv.ts'
@@ -27,6 +29,9 @@ export type SettingsApi = Pick<
   | 'getAppSettings'
   | 'setMcpPort'
   | 'setTheme'
+  | 'setUpdateChannel'
+  | 'setCheckUpdates'
+  | 'checkForUpdate'
   | 'setProjectName'
   | 'listDeletedTasks'
   | 'restoreTask'
@@ -38,6 +43,11 @@ export type SettingsApi = Pick<
   | 'openLink'
   | 'showInFolder'
 >
+
+const CHANNELS: { channel: UpdateChannel; label: string }[] = [
+  { channel: 'stable', label: 'Stable' },
+  { channel: 'beta', label: 'Beta' },
+]
 
 const THEMES: { theme: Theme; label: string }[] = [
   { theme: 'system', label: 'System' },
@@ -59,6 +69,7 @@ export function Settings({
   onClose,
   onProjectsChanged,
   onRemove,
+  onUpdate,
 }: {
   tab: SettingsTab
   project: ProjectInfo | undefined
@@ -70,6 +81,8 @@ export function Settings({
   /** A project's name or MCP URL changed, so the list needs reloading. */
   onProjectsChanged: () => void
   onRemove: (project: ProjectInfo) => void
+  /** Check now found an update, for the update dialog. */
+  onUpdate: (update: UpdateInfo) => void
 }) {
   const id = useId()
   const projectTab = project?.open ? project : undefined
@@ -118,7 +131,7 @@ export function Settings({
         </div>
         <section id={`${id}-panel`} role="tabpanel" aria-labelledby={`${id}-${shown}`}>
           {shown === 'app' || !projectTab ? (
-            <AppTab api={api} onPortChanged={onProjectsChanged} />
+            <AppTab api={api} onPortChanged={onProjectsChanged} onUpdate={onUpdate} />
           ) : (
             <ProjectTab
               key={projectTab.id}
@@ -136,7 +149,15 @@ export function Settings({
 }
 
 /** Loads the app settings and saves your changes. */
-function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () => void }) {
+function AppTab({
+  api,
+  onPortChanged,
+  onUpdate,
+}: {
+  api: SettingsApi
+  onPortChanged: () => void
+  onUpdate: (update: UpdateInfo) => void
+}) {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   // `null` until you type, so the field follows the saved port.
@@ -145,6 +166,7 @@ function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () =>
   const [themeError, setThemeError] = useState<string | null>(null)
   const [linkError, setLinkError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ kind: 'idle' })
   const show = useShowInFolder(api)
 
   useEffect(() => {
@@ -187,6 +209,26 @@ function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () =>
     }
   }
 
+  async function saveUpdates(save: () => Promise<AppSettings>) {
+    setUpdateStatus({ kind: 'idle' })
+    try {
+      setSettings(await save())
+    } catch (error) {
+      setUpdateStatus({ kind: 'error', message: errorMessage(error) })
+    }
+  }
+
+  async function checkNow() {
+    setUpdateStatus({ kind: 'checking' })
+    try {
+      const found = await api.checkForUpdate(false)
+      setUpdateStatus(found ? { kind: 'idle' } : { kind: 'upToDate' })
+      if (found) onUpdate(found)
+    } catch (error) {
+      setUpdateStatus({ kind: 'error', message: errorMessage(error) })
+    }
+  }
+
   async function openLink(link: Link) {
     setLinkError(null)
     try {
@@ -222,7 +264,102 @@ function AppTab({ api, onPortChanged }: { api: SettingsApi; onPortChanged: () =>
       onOpenLink={(link) => void openLink(link)}
       showError={show.error}
       onShow={show.show}
+      updates={
+        <UpdatesView
+          settings={settings}
+          status={updateStatus}
+          onChannel={(channel) => void saveUpdates(() => api.setUpdateChannel(channel))}
+          onCheckOnStart={(check) => void saveUpdates(() => api.setCheckUpdates(check))}
+          onCheckNow={() => void checkNow()}
+          onOpenLink={(link) => void openLink(link)}
+        />
+      }
     />
+  )
+}
+
+/** Where Check now is. */
+export type UpdateStatus =
+  | { kind: 'idle' }
+  | { kind: 'checking' }
+  | { kind: 'upToDate' }
+  | { kind: 'error'; message: string }
+
+/**
+ * The Updates section: the channel, the check on start, and Check now. Dev
+ * and alpha builds never update, so they only say where new builds are.
+ */
+export function UpdatesView({
+  settings,
+  status,
+  onChannel,
+  onCheckOnStart,
+  onCheckNow,
+  onOpenLink,
+}: {
+  settings: AppSettings
+  status: UpdateStatus
+  onChannel: (channel: UpdateChannel) => void
+  onCheckOnStart: (check: boolean) => void
+  onCheckNow: () => void
+  onOpenLink: (link: Link) => void
+}) {
+  const channel = settings.updateChannel
+  if (channel === null) {
+    return (
+      <section className="settings-section" aria-label="Updates">
+        <h3>Updates</h3>
+        <p className="hint">
+          Dev and alpha builds don't update themselves. New builds are on the{' '}
+          <button type="button" className="link" onClick={() => onOpenLink('releases')}>
+            releases page
+          </button>
+          .
+        </p>
+      </section>
+    )
+  }
+  return (
+    <section className="settings-section" aria-label="Updates">
+      <h3>Updates</h3>
+      <div className="segmented" role="radiogroup" aria-label="Update channel">
+        {CHANNELS.map(({ channel: value, label }) => (
+          <label key={value} className={channel === value ? 'segment selected' : 'segment'}>
+            <input
+              type="radio"
+              name="update-channel"
+              value={value}
+              checked={channel === value}
+              onChange={() => onChannel(value)}
+            />
+            {label}
+          </label>
+        ))}
+      </div>
+      <label className="settings-check">
+        <input
+          type="checkbox"
+          checked={settings.checkUpdates}
+          onChange={(event) => onCheckOnStart(event.target.checked)}
+        />
+        Check for updates when Tandem starts
+      </label>
+      <div className="settings-row">
+        <button type="button" disabled={status.kind === 'checking'} onClick={onCheckNow}>
+          {status.kind === 'checking' ? 'Checking…' : 'Check now'}
+        </button>
+        {status.kind === 'upToDate' && <span className="muted">Tandem is up to date.</span>}
+      </div>
+      {status.kind === 'error' && (
+        <p className="field-error" role="alert">
+          {status.message}
+        </p>
+      )}
+      <p className="hint">
+        Stable gets production releases only. Beta also gets beta releases, whichever is newer.
+        Switching to Stable from a newer beta waits for a production release newer than it.
+      </p>
+    </section>
   )
 }
 
@@ -285,6 +422,7 @@ export function AppSettingsView({
   onOpenLink,
   showError,
   onShow,
+  updates,
   env = BUILD_ENV,
   version = APP_VERSION,
   manager = fileManager(),
@@ -301,6 +439,8 @@ export function AppSettingsView({
   onOpenLink: (link: Link) => void
   showError: string | null
   onShow: (place: Place) => void
+  /** The Updates section, before About. */
+  updates?: ReactNode
   /** The build to describe in About; the running one unless a test says otherwise. */
   env?: BuildEnv
   version?: string
@@ -416,6 +556,7 @@ export function AppSettingsView({
           Project tab.
         </p>
       </section>
+      {updates}
       <section className="settings-section" aria-label="About">
         <h3>About</h3>
         <dl className="settings-values">

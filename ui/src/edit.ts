@@ -43,6 +43,13 @@ export function formatTime(iso: string): string {
   })
 }
 
+/** A date without the time, such as `Oct 31, 2026`. */
+export function formatDate(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }

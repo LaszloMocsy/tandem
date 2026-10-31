@@ -7,9 +7,11 @@ import type {
   Priority,
   ProjectInfo,
   TaskSummary,
+  UpdateInfo,
 } from './api.ts'
 import { DependencyPicker } from './DependencyPicker.tsx'
-import { parseLines, taskName, taskOptions } from './edit.ts'
+import { formatDate, parseLines, taskName, taskOptions } from './edit.ts'
+import { parseNotes } from './updates.ts'
 import type { WorkingTask } from './projects.ts'
 
 /**
@@ -611,6 +613,78 @@ export function RestoreBackupForm({
         cancel="Keep current tasks"
         danger
         onCancel={onCancel}
+      />
+    </form>
+  )
+}
+
+/** Release notes from Markdown: headings, lists and paragraphs. */
+function ReleaseNotes({ markdown }: { markdown: string }) {
+  return (
+    <div className="release-notes">
+      {parseNotes(markdown).map((block, index) => {
+        switch (block.kind) {
+          case 'heading':
+            return <h4 key={index}>{block.text}</h4>
+          case 'list':
+            return (
+              <ul key={index}>
+                {block.items.map((item, i) => (
+                  <li key={i}>{item}</li>
+                ))}
+              </ul>
+            )
+          case 'paragraph':
+            return <p key={index}>{block.text}</p>
+        }
+      })}
+    </div>
+  )
+}
+
+/**
+ * A newer version is out: its release notes, and Install and restart. An
+ * install that can't replace itself, such as a `.deb`, gets Download
+ * instead.
+ */
+export function UpdateForm({
+  update,
+  busy,
+  error,
+  onInstall,
+  onDownload,
+  onCancel,
+}: {
+  update: UpdateInfo
+  busy: boolean
+  error: string | null
+  onInstall: () => void
+  onDownload: () => void
+  onCancel: () => void
+}) {
+  return (
+    <form onSubmit={onSubmitted(update.canInstall ? onInstall : onDownload)}>
+      <h3>Tandem v{update.version} is available</h3>
+      {update.date && <p className="hint">Released {formatDate(update.date)}</p>}
+      {update.notes && <ReleaseNotes markdown={update.notes} />}
+      {update.canInstall ? (
+        <p className="hint">
+          Installing restarts Tandem. The MCP server stops, so connected agents lose their
+          sessions until they reconnect.
+        </p>
+      ) : (
+        <p className="hint">
+          This install can't update itself. Download the new version and install it the way you
+          installed this one.
+        </p>
+      )}
+      <FormError error={error} />
+      <Actions
+        submit={update.canInstall ? (busy ? 'Installing…' : 'Install and restart') : 'Download'}
+        ready
+        busy={busy}
+        onCancel={onCancel}
+        cancel="Later"
       />
     </form>
   )

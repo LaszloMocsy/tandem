@@ -79,7 +79,7 @@ For maintainers:
 2. Merge the release's feature branches into the version branch, then open a pull request from it into `main`.
 3. Merging that pull request runs the Tag workflow: it tags the merge commit `vX.Y.Z` and starts the Release workflow for the tag. It refuses a tag that already exists.
 4. The Release workflow checks that the tag matches the version (`cargo xtask version check release`), then builds macOS (Apple silicon and Intel), Windows and Linux bundles into a draft GitHub release.
-5. Check the assets, edit the notes, and publish the draft.
+5. Check the assets, edit the notes, and publish the draft. Publishing also ships the update: it redeploys the landing page, whose update feeds (`/updates/stable.json` and `/updates/beta.json`) then offer the release to every app on its channel.
 
 The draft's notes list the pull requests merged since the previous release: since the last production release for a production version, so they cover its alpha and beta releases too, or since the last release of any kind for a pre-release. `.github/release.yml` groups them by label: `enhancement` under New features, `bug` under Fixes, `documentation` under Documentation, and the rest under Other changes. So that the feature pull requests show up:
 
@@ -88,6 +88,12 @@ The draft's notes list the pull requests merged since the previous release: sinc
 - Label the version pull request `skip-release-notes`, since its feature pull requests are already listed.
 
 To retry a failed release, delete its draft and run the Release workflow on the tag again: `gh workflow run release.yml --ref vX.Y.Z`. Pushing a new `v*` tag by hand also starts a release.
+
+Edit the notes below the `<!-- changes -->` line, and keep the line: the app's update dialog shows only what follows it.
+
+Updates are signed with the updater key in the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets, and the app only installs updates signed by it; its public key is in `desktop/tauri.conf.json`. Keep a copy of the key and its password outside GitHub: if they're lost, installed apps can never update again. The key is separate from OS code signing.
+
+Release bundles need the key, so `cargo tauri build` on your machine fails at signing without it. Build with `cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'` to skip the update bundles.
 
 The builds are not signed yet; [Installing an unsigned build](README.md#installing-an-unsigned-build) explains what users see.
 

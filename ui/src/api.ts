@@ -28,7 +28,22 @@ export interface ProjectInfo {
 export type Theme = 'system' | 'light' | 'dark'
 
 /** A page the app opens in the browser; the desktop app builds its URL. */
-export type Link = 'repository' | 'releaseNotes'
+export type Link = 'repository' | 'releaseNotes' | 'releases' | 'download'
+
+/** Where updates come from: production releases only, or the newest beta or production release. */
+export type UpdateChannel = 'stable' | 'beta'
+
+/** A newer version found by a check. */
+export interface UpdateInfo {
+  /** Such as `0.2.0`. */
+  version: string
+  /** When it was released, in RFC 3339 form. */
+  date: string | null
+  /** What changed, in Markdown. */
+  notes: string | null
+  /** False when this install can't replace itself, as a `.deb` or `.rpm` install can't. */
+  canInstall: boolean
+}
 
 /** A file or folder of the app's data that can be shown in the file manager. */
 export type Place =
@@ -48,6 +63,10 @@ export interface AppSettings {
   theme: Theme
   /** The app's database file, with the project list and these settings. */
   appDbPath: string
+  /** The channel updates come from, or `null` for dev and alpha builds, which never update. */
+  updateChannel: UpdateChannel | null
+  /** Whether the app looks for an update when it starts. */
+  checkUpdates: boolean
 }
 
 /** What opening a folder did. */
@@ -324,6 +343,18 @@ export const api = {
    */
   setMcpPort: (port: number) => call<AppSettings>('set_mcp_port', { port }),
   setTheme: (theme: Theme) => call<AppSettings>('set_theme', { theme }),
+  setUpdateChannel: (channel: UpdateChannel) =>
+    call<AppSettings>('set_update_channel', { channel }),
+  setCheckUpdates: (check: boolean) => call<AppSettings>('set_check_updates', { check }),
+  /**
+   * Looks for a newer version on the update channel; `null` when there is
+   * none or the build never updates. `onStart`, it also gives `null` when
+   * the check on start is turned off.
+   */
+  checkForUpdate: (onStart: boolean) =>
+    call<UpdateInfo | null>('check_for_update', { onStart }),
+  /** Installs the update the last check found, then restarts into it. */
+  installUpdate: () => call<null>('install_update'),
 
   listTasks: (project: string, filter?: TaskFilter) =>
     call<TaskSummary[]>('list_tasks', { project, filter }),

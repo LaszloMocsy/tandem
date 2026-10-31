@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use jiff::SignedDuration;
-use tandem_board_core::db::Theme;
+use tandem_board_core::db::{Theme, UpdateChannel};
 use tandem_board_core::model::TaskId;
 use tandem_board_core::service::{Actor, Service};
 use tauri::{AppHandle, State};
@@ -23,6 +23,7 @@ use crate::dto::{
 use crate::error::{Error, NEWER_SCHEMA};
 use crate::links::Link;
 use crate::projects::{AppSettingsInfo, BackupInfo, Opened, Place, ProjectInfo, Projects};
+use crate::updates::{self, UpdateInfo, Updates};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -123,6 +124,59 @@ pub async fn set_theme(
     let settings = blocking(move || projects.set_theme(theme)).await?;
     crate::apply_theme(&app, theme);
     Ok(settings)
+}
+
+/// Picks the channel updates come from, `stable` or `beta`.
+#[tauri::command]
+pub async fn set_update_channel(
+    projects: State<'_, Arc<Projects>>,
+    channel: String,
+) -> Result<AppSettingsInfo> {
+    let channel: UpdateChannel = channel
+        .parse()
+        .map_err(|e: String| Error::new("invalid_argument", e))?;
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.set_update_channel(channel)).await
+}
+
+/// Turns the update check on start on or off.
+#[tauri::command]
+pub async fn set_check_updates(
+    projects: State<'_, Arc<Projects>>,
+    check: bool,
+) -> Result<AppSettingsInfo> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.set_check_updates(check)).await
+}
+
+/// Looks for a newer version on the build's update channel. `None` when
+/// there is none, when the build never updates, and, `on_start`, when the
+/// check on start is turned off.
+#[tauri::command]
+pub async fn check_for_update(
+    app: AppHandle,
+    projects: State<'_, Arc<Projects>>,
+    updates: State<'_, Updates>,
+    on_start: bool,
+) -> Result<Option<UpdateInfo>> {
+    let projects = Arc::clone(&projects);
+    let settings = {
+        let projects = Arc::clone(&projects);
+        blocking(move || projects.settings()).await?
+    };
+    let Some(channel) = updates::channel(BuildEnv::current(), settings.update_channel) else {
+        return Ok(None);
+    };
+    if on_start && !settings.check_updates {
+        return Ok(None);
+    }
+    updates.check(&app, projects, channel).await
+}
+
+/// Installs the update the last check found and restarts into it.
+#[tauri::command]
+pub async fn install_update(app: AppHandle, updates: State<'_, Updates>) -> Result<()> {
+    updates.install(&app).await
 }
 
 /// Asks for a folder with the system dialog. `None` if you cancel.

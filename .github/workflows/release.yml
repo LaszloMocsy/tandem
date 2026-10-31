@@ -63,6 +63,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: cargo --locked xtask version check release "$TAG"
 
+      # The update feeds (site/src/pages/updates/) show only what follows
+      # the <!-- changes --> marker in the app's update dialog.
       # GitHub generates the notes from the pull requests merged since the
       # previous release, grouped by .github/release.yml: since the last
       # production tag for a production release, so it covers the
@@ -84,6 +86,7 @@ jobs:
 
           These builds are not signed, so macOS and Windows warn before the first launch. See [Installing an unsigned build](https://github.com/$GITHUB_REPOSITORY#installing-an-unsigned-build) in the README.
 
+          <!-- changes -->
           EOF
           printf '%s\n' "$changes" >> notes.md
 
@@ -115,6 +118,17 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.platform }}
     steps:
+      # Updates are signed with this key, and the app refuses any other.
+      - name: Check the updater signing key
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error title=Missing updater key::Set the TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secrets; see CONTRIBUTING.md."
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
 
       # System libraries Tauri needs on Linux: https://v2.tauri.app/start/prerequisites/
@@ -143,6 +157,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Compiled into the app and its frontend; empty for production.
           TANDEM_ENV: ${{ needs.create-release.outputs.build-env }}
+          # Signs the update bundles that tauri.conf.json's
+          # createUpdaterArtifacts asks for.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           # The Tauri project lives in desktop/, not the template's src-tauri/.
           projectPath: desktop
@@ -153,5 +171,41 @@ jobs:
           args: >-
             --target ${{ matrix.target }}
             ${{ runner.os == 'Windows' && needs.create-release.outputs.build-env != '' && '--bundles nsis' || '' }}
-          # The app has no updater.
-          uploadUpdaterJson: false
+          # latest.json, which the site's update feeds serve. Each build adds
+          # its platform to the one manifest on the release.
+          uploadUpdaterJson: true
+          # Windows updates use the NSIS installer, like the downloads and
+          # every pre-release, so an MSI never installs over an NSIS install.
+          updaterJsonPreferNsis: true
+
+  # The builds each add their platform to latest.json at the same time, so
+  # check none was lost before the release can be published.
+  check-manifest:
+    name: Check the updater manifest
+    needs: [create-release, build]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check latest.json lists every platform
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+        run: |
+          asset=$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" \
+            --jq '.[] | select(.name == "latest.json") | .id')
+          if [ -z "$asset" ]; then
+            echo "::error::The release has no latest.json"
+            exit 1
+          fi
+          gh api -H 'Accept: application/octet-stream' \
+            "repos/$GITHUB_REPOSITORY/releases/assets/$asset" > latest.json
+          missing=""
+          for platform in darwin-aarch64 darwin-x86_64 linux-x86_64 windows-x86_64; do
+            jq -e --arg p "$platform" '.platforms[$p].url and .platforms[$p].signature' latest.json \
+              > /dev/null || missing="$missing $platform"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::latest.json is missing:$missing. Re-run the failed builds before publishing."
+            exit 1
+          fi
