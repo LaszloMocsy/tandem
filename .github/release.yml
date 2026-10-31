@@ -2,7 +2,7 @@
 # workflow generates them when it creates the draft release.
 changelog:
   exclude:
-    # For pull requests that don't belong in the notes, such as version/vX.Y.Z
+    # For pull requests that don't belong in the notes, such as release/vX.Y.Z
     # pull requests, whose feature pull requests are listed already.
     labels: [skip-release-notes]
   categories:

@@ -17,7 +17,7 @@ pub fn run(repo: &Repo, change: &Change) -> Result<(), String> {
     };
     let current = repo.version(main.as_deref())?;
     let new = target(current, change)?;
-    let branch = format!("version/v{new}");
+    let branch = format!("release/v{new}");
 
     if change.create_branch {
         let exists = repo

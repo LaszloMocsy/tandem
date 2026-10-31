@@ -1,7 +1,7 @@
 name: Version
 
-# Only version/vX.Y.Z branches merge into main, each with a version higher
-# than main's. Feature branches merge into a version branch, which this
+# Only release/vX.Y.Z branches merge into main, each with a version higher
+# than main's. Feature branches merge into a release branch, which this
 # workflow doesn't run for. Make the Version check required for main in the
 # branch protection settings.
 on:

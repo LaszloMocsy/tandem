@@ -23,7 +23,7 @@ pub enum Command {
 #[derive(Debug, Args)]
 #[command(after_help = "\
 Examples:
-  cargo xtask version --next minor --create-branch   0.1.0 -> 0.2.0 on a new version/v0.2.0
+  cargo xtask version --next minor --create-branch   0.1.0 -> 0.2.0 on a new release/v0.2.0
   cargo xtask version --next minor --pre alpha       0.1.0 -> 0.2.0-alpha.1
   cargo xtask version --next beta                    0.2.0-alpha.2 -> 0.2.0-beta.1
   cargo xtask version --next release                 0.2.0-beta.1 -> 0.2.0
@@ -67,7 +67,7 @@ pub struct Change {
     #[arg(long, requires = "target")]
     pub dry_run: bool,
 
-    /// Cut version/v<new> from origin/main and change the version there
+    /// Cut release/v<new> from origin/main and change the version there
     #[arg(long, requires = "target")]
     pub create_branch: bool,
 }
@@ -165,9 +165,9 @@ pub struct CheckArgs {
 pub enum CheckCommand {
     /// Check a pull request's version, as CI does
     ///
-    /// Into main, it must come from version/v<version>, with a version higher
+    /// Into main, it must come from release/v<version>, with a version higher
     /// than main's; once merged, only the branch name counts. Into a
-    /// version/vX.Y.Z branch, it must keep that branch's version. Without
+    /// release/vX.Y.Z branch, it must keep that branch's version. Without
     /// NUMBER, checks the pull request GitHub Actions runs for, or else this
     /// branch's, found with gh.
     Pr {
@@ -269,7 +269,7 @@ mod tests {
             &["version", "check", "pr", "twelve"],
             &["version", "bump", "0.2.0"],
             &["version", "check", "--base", "main"],
-            &["version", "check", "--branch", "version/v0.2.0"],
+            &["version", "check", "--branch", "release/v0.2.0"],
             &["version", "check", "--tag", "v0.2.0"],
         ] {
             assert!(parse(args).is_err(), "accepted {args:?}");

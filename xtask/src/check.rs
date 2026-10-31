@@ -4,7 +4,7 @@
 use crate::version::Version;
 
 /// The prefix of the branches that may merge into main.
-const VERSION_BRANCH: &str = "version/";
+const RELEASE_BRANCH: &str = "release/";
 
 /// A pull request, as far as the version rules care.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub struct PullRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
     Main,
-    VersionBranch,
+    ReleaseBranch,
     Other,
 }
 
@@ -26,8 +26,8 @@ impl PullRequest {
     fn target(&self) -> Target {
         if self.base == "main" {
             Target::Main
-        } else if version_branch(&self.base).is_some() {
-            Target::VersionBranch
+        } else if release_branch(&self.base).is_some() {
+            Target::ReleaseBranch
         } else {
             Target::Other
         }
@@ -42,9 +42,9 @@ impl PullRequest {
     /// Checks the rules for this pull request, given the version on its head
     /// and, when [`needs_base_version`](Self::needs_base_version), on its base:
     ///
-    /// - into `main`: the head is `version/v<version>`, and the version is
+    /// - into `main`: the head is `release/v<version>`, and the version is
     ///   higher than main's;
-    /// - into a `version/vX.Y.Z` branch: the version is the same as the
+    /// - into a `release/vX.Y.Z` branch: the version is the same as the
     ///   branch's, since feature branches don't change it;
     /// - into anything else: nothing beyond the files agreeing.
     pub fn check(&self, head: Version, base: Option<Version>) -> Result<(), String> {
@@ -55,7 +55,7 @@ impl PullRequest {
                     higher(head, base, &self.base)?;
                 }
             }
-            Target::VersionBranch => {
+            Target::ReleaseBranch => {
                 if let Some(base) = base.filter(|_| !self.merged)
                     && head != base
                 {
@@ -73,17 +73,17 @@ impl PullRequest {
     }
 }
 
-/// The version a `version/vX.Y.Z` branch names, if it is one.
-fn version_branch(branch: &str) -> Option<Version> {
-    Version::parse_tag(branch.strip_prefix(VERSION_BRANCH)?).ok()
+/// The version a `release/vX.Y.Z` branch names, if it is one.
+fn release_branch(branch: &str) -> Option<Version> {
+    Version::parse_tag(branch.strip_prefix(RELEASE_BRANCH)?).ok()
 }
 
-/// A pull request into main must come from `version/v<version>`.
+/// A pull request into main must come from `release/v<version>`.
 fn branch(current: Version, branch: &str) -> Result<(), String> {
-    let named = version_branch(branch).ok_or_else(|| {
+    let named = release_branch(branch).ok_or_else(|| {
         format!(
-            "pull requests into main come from a version/vX.Y.Z branch, not {branch:?}; \
-             merge feature branches into a version branch instead"
+            "pull requests into main come from a release/vX.Y.Z branch, not {branch:?}; \
+             merge feature branches into a release branch instead"
         )
     })?;
     if named != current {
@@ -156,11 +156,11 @@ mod tests {
 
     #[test]
     fn into_main_needs_a_matching_version_branch_and_a_higher_version() {
-        let into_main = pr("version/v0.2.0", "main", false);
+        let into_main = pr("release/v0.2.0", "main", false);
         assert!(into_main.needs_base_version());
         assert!(into_main.check(v("0.2.0"), Some(v("0.1.0"))).is_ok());
 
-        let not_higher = pr("version/v0.1.0", "main", false);
+        let not_higher = pr("release/v0.1.0", "main", false);
         let err = not_higher.check(v("0.1.0"), Some(v("0.1.0"))).unwrap_err();
         assert!(err.contains("isn't higher than 0.1.0 on main"), "{err}");
         let err = into_main.check(v("0.3.0"), Some(v("0.1.0"))).unwrap_err();
@@ -171,21 +171,21 @@ mod tests {
 
         for head in [
             "feat/x",
-            "version/0.2.0",
-            "version/v0.2",
+            "release/0.2.0",
+            "release/v0.2",
             "versions/v0.2.0",
             "main",
         ] {
             let err = pr(head, "main", false)
                 .check(v("0.2.0"), Some(v("0.1.0")))
                 .unwrap_err();
-            assert!(err.contains("version/vX.Y.Z branch"), "{head}: {err}");
+            assert!(err.contains("release/vX.Y.Z branch"), "{head}: {err}");
         }
     }
 
     #[test]
     fn a_merged_pull_request_into_main_only_checks_the_name() {
-        let merged = pr("version/v0.2.0", "main", true);
+        let merged = pr("release/v0.2.0", "main", true);
         assert!(!merged.needs_base_version());
         assert!(merged.check(v("0.2.0"), None).is_ok());
         assert!(merged.check(v("0.2.0"), Some(v("0.2.0"))).is_ok());
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn into_a_version_branch_keeps_its_version() {
-        let feature = pr("feat/x", "version/v0.2.0", false);
+        let feature = pr("feat/x", "release/v0.2.0", false);
         assert!(feature.needs_base_version());
         assert!(feature.check(v("0.2.0"), Some(v("0.2.0"))).is_ok());
         let err = feature.check(v("0.3.0"), Some(v("0.2.0"))).unwrap_err();
@@ -204,12 +204,12 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("--exact 0.2.0 --yes"), "{err}");
-        assert!(!pr("feat/x", "version/v0.2.0", true).needs_base_version());
+        assert!(!pr("feat/x", "release/v0.2.0", true).needs_base_version());
     }
 
     #[test]
     fn into_anything_else_only_needs_the_files_to_agree() {
-        for base in ["feat/parent", "version/next", "release"] {
+        for base in ["feat/parent", "release/next", "release"] {
             let other = pr("feat/x", base, false);
             assert!(!other.needs_base_version(), "{base}");
             assert!(other.check(v("9.9.9"), None).is_ok(), "{base}");

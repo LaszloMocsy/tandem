@@ -1,6 +1,6 @@
 name: Tag
 
-# Merging a version/vX.Y.Z pull request into main tags the merge commit
+# Merging a release/vX.Y.Z pull request into main tags the merge commit
 # vX.Y.Z and starts the Release workflow for that tag.
 #
 # A tag pushed with GITHUB_TOKEN doesn't trigger other workflows, so this
@@ -23,7 +23,7 @@ concurrency:
 jobs:
   tag:
     name: Tag and start the release
-    if: github.event.pull_request.merged && startsWith(github.head_ref, 'version/')
+    if: github.event.pull_request.merged && startsWith(github.head_ref, 'release/')
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -39,7 +39,7 @@ jobs:
           toolchain: stable
 
       # On the merge commit, the version files must agree with each other and
-      # with the version/vX.Y.Z branch name. The pull request is read from the
+      # with the release/vX.Y.Z branch name. The pull request is read from the
       # Actions environment; since it's merged, main isn't compared.
       - name: Read the version
         id: version
