@@ -183,6 +183,8 @@ impl AppDb {
             match key.as_str() {
                 MCP_PORT => settings.mcp_port = value.parse().ok().filter(|&port| port != 0),
                 THEME => settings.theme = value.parse().unwrap_or_default(),
+                UPDATE_CHANNEL => settings.update_channel = value.parse().ok(),
+                CHECK_UPDATES => settings.check_updates = value != "false",
                 _ => {}
             }
         }
@@ -197,6 +199,17 @@ impl AppDb {
     pub fn set_theme(&self, theme: Theme) -> Result<(), DbError> {
         let value = (theme != Theme::System).then(|| theme.as_str());
         self.set_setting(THEME, value)
+    }
+
+    /// Sets the channel updates come from; `None` goes back to the build's
+    /// own channel.
+    pub fn set_update_channel(&self, channel: Option<UpdateChannel>) -> Result<(), DbError> {
+        self.set_setting(UPDATE_CHANNEL, channel.map(UpdateChannel::as_str))
+    }
+
+    /// Turns the update check on start on or off.
+    pub fn set_check_updates(&self, check: bool) -> Result<(), DbError> {
+        self.set_setting(CHECK_UPDATES, (!check).then_some("false"))
     }
 
     /// Stores a setting, or deletes it when `value` is `None`.
@@ -277,13 +290,63 @@ fn canonical_text(path: &Path) -> Result<String, DbError> {
 
 const MCP_PORT: &str = "mcp_port";
 const THEME: &str = "theme";
+const UPDATE_CHANNEL: &str = "update_channel";
+const CHECK_UPDATES: &str = "check_updates";
 
 /// The settings for the whole app, kept in `app.db`, never in a repo.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppSettings {
     /// The MCP server's port. `None` means the default.
     pub mcp_port: Option<u16>,
     pub theme: Theme,
+    /// Where updates come from. `None` means the build's own channel, which
+    /// only the app knows.
+    pub update_channel: Option<UpdateChannel>,
+    /// Whether the app looks for an update when it starts.
+    pub check_updates: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            mcp_port: None,
+            theme: Theme::default(),
+            update_channel: None,
+            check_updates: true,
+        }
+    }
+}
+
+/// Which releases the app updates to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateChannel {
+    /// Production releases only.
+    Stable,
+    /// The newest beta or production release.
+    Beta,
+}
+
+impl UpdateChannel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Beta => "beta",
+        }
+    }
+}
+
+impl std::str::FromStr for UpdateChannel {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "stable" => Ok(Self::Stable),
+            "beta" => Ok(Self::Beta),
+            _ => Err(format!(
+                "`{s}` is not an update channel; use stable or beta"
+            )),
+        }
+    }
 }
 
 /// The app's colour theme.

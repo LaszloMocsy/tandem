@@ -2,6 +2,8 @@
 //! environment is fixed at build time: `cargo tauri dev` is always dev, and
 //! release builds read `TANDEM_ENV` (`alpha`, `beta`, or unset for production).
 
+use tandem_board_core::db::UpdateChannel;
+
 /// The build environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuildEnv {
@@ -32,6 +34,16 @@ impl BuildEnv {
         }
     }
 
+    /// The channel this build updates from unless Settings picks another,
+    /// or `None` for dev and alpha builds, which never update themselves.
+    pub(crate) fn update_channel(self) -> Option<UpdateChannel> {
+        match self {
+            Self::Dev | Self::Alpha => None,
+            Self::Beta => Some(UpdateChannel::Beta),
+            Self::Production => Some(UpdateChannel::Stable),
+        }
+    }
+
     /// The native window title, which also shows in the Dock and Cmd-Tab.
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -45,6 +57,8 @@ impl BuildEnv {
 
 #[cfg(test)]
 mod tests {
+    use tandem_board_core::db::UpdateChannel;
+
     use super::BuildEnv;
 
     #[test]
@@ -72,6 +86,17 @@ mod tests {
         assert_eq!(BuildEnv::detect(false, Some("rc")), None);
         assert_eq!(BuildEnv::detect(false, Some("Alpha")), None);
         assert_eq!(BuildEnv::detect(false, Some("production")), None);
+    }
+
+    #[test]
+    fn only_beta_and_production_builds_update() {
+        assert_eq!(BuildEnv::Dev.update_channel(), None);
+        assert_eq!(BuildEnv::Alpha.update_channel(), None);
+        assert_eq!(BuildEnv::Beta.update_channel(), Some(UpdateChannel::Beta));
+        assert_eq!(
+            BuildEnv::Production.update_channel(),
+            Some(UpdateChannel::Stable)
+        );
     }
 
     #[test]
