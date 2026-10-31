@@ -4285,7 +4285,7 @@ dependencies = [
 
 [[package]]
 name = "tandem-board-core"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 dependencies = [
  "dirs",
  "getrandom 0.4.3",
@@ -4300,7 +4300,7 @@ dependencies = [
 
 [[package]]
 name = "tandem-board-desktop"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 dependencies = [
  "jiff",
  "rusqlite",
@@ -4319,7 +4319,7 @@ dependencies = [
 
 [[package]]
 name = "tandem-board-mcp"
-version = "0.1.0-beta.1"
+version = "0.1.0"
 dependencies = [
  "axum",
  "reqwest",
