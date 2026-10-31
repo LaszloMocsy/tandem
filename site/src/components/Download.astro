@@ -14,9 +14,7 @@ interface Props {
 const { id } = Astro.props;
 const downloads = Astro.props.downloads ?? (await getDownloads());
 const prod = downloads.production;
-const prereleases = [downloads.beta, downloads.alpha].filter(
-  (r): r is ChannelRelease => r !== null,
-);
+const prereleases = [downloads.beta].filter((r): r is ChannelRelease => r !== null);
 
 const OS_LIST = [
   { key: 'macos', label: 'macOS' },
@@ -25,7 +23,6 @@ const OS_LIST = [
 ] as const;
 
 const versionSuffix = prod?.version ? ` · v${prod.version}` : '';
-const channelName = (r: ChannelRelease) => (r.channel === 'beta' ? 'Beta' : 'Alpha');
 ---
 
 <div class="download" data-download>
@@ -81,10 +78,10 @@ const channelName = (r: ChannelRelease) => (r.channel === 'beta' ? 'Beta' : 'Alp
             <>
               {i > 0 && ' · '}
               <a class="arch-arm" href={r.files.macos.main.url}>
-                {channelName(r)} v{r.version}
+                Beta v{r.version}
               </a>
               <a class="arch-x86" href={r.files.macos.intel.url}>
-                {channelName(r)} v{r.version}
+                Beta v{r.version}
               </a>
             </>
           ))}
@@ -130,7 +127,7 @@ const channelName = (r: ChannelRelease) => (r.channel === 'beta' ? 'Beta' : 'Alp
             <>
               {i > 0 && ' · '}
               <a href={r.files.windows.main.url}>
-                {channelName(r)} v{r.version}
+                Beta v{r.version}
               </a>
             </>
           ))}
@@ -171,7 +168,7 @@ const channelName = (r: ChannelRelease) => (r.channel === 'beta' ? 'Beta' : 'Alp
             <>
               {i > 0 && ' · '}
               <a href={r.files.linux.main.url}>
-                {channelName(r)} v{r.version}
+                Beta v{r.version}
               </a>
             </>
           ))}

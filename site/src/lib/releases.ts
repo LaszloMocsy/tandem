@@ -4,15 +4,15 @@ import { RELEASES_URL } from '../consts';
 
 const RELEASES_API = 'https://api.github.com/repos/LaszloMocsy/tandem/releases?per_page=100';
 
-export type Channel = 'production' | 'beta' | 'alpha';
+export type Channel = 'production' | 'beta';
 
-/** A parsed release tag, following the spec's build environments. */
+/** A parsed release tag: vX.Y.Z for production, vX.Y.Z-beta.N for a beta. */
 export interface Version {
   channel: Channel;
   major: number;
   minor: number;
   patch: number;
-  /** The N in -beta.N or -alpha.N; 0 for production. */
+  /** The N in -beta.N; 0 for production. */
   pre: number;
   /** The tag without its leading v, such as 0.2.0-beta.1. */
   text: string;
@@ -45,8 +45,6 @@ export interface Downloads {
   production: ChannelRelease | null;
   /** Only set when newer than the production release. */
   beta: ChannelRelease | null;
-  /** Only set when newer than the production release. */
-  alpha: ChannelRelease | null;
   hasProduction: boolean;
   /** True when releases couldn't be fetched and every link points at the releases page. */
   fallback: boolean;
@@ -64,7 +62,7 @@ export interface GitHubRelease {
   assets: { name: string; browser_download_url: string }[];
 }
 
-const TAG = /^v(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta)\.(\d+))?$/;
+const TAG = /^v(\d+)\.(\d+)\.(\d+)(?:-(beta)\.(\d+))?$/;
 
 /** Classifies a tag by channel, or returns null for tags that match none. */
 export function parseTag(tag: string): Version | null {
@@ -80,9 +78,9 @@ export function parseTag(tag: string): Version | null {
   };
 }
 
-const CHANNEL_RANK: Record<Channel, number> = { alpha: 0, beta: 1, production: 2 };
+const CHANNEL_RANK: Record<Channel, number> = { beta: 0, production: 1 };
 
-/** Semver order: a pre-release sorts before its own production version, alpha before beta. */
+/** Semver order: a beta sorts before its own production version. */
 export function compareVersions(a: Version, b: Version): number {
   return (
     a.major - b.major ||
@@ -119,7 +117,7 @@ export function matchAssets(release: GitHubRelease): Files {
   };
 }
 
-/** Keeps the newest release per channel, and drops beta and alpha unless they're newer than production. */
+/** Keeps the newest release per channel, and drops the beta unless it's newer than production. */
 export function pickReleases(releases: GitHubRelease[]): Downloads {
   const newest: Partial<Record<Channel, { version: Version; release: GitHubRelease }>> = {};
   for (const release of releases) {
@@ -152,7 +150,6 @@ export function pickReleases(releases: GitHubRelease[]): Downloads {
   return {
     production: toChannel('production'),
     beta: toChannel('beta'),
-    alpha: toChannel('alpha'),
     hasProduction: prod !== undefined,
     fallback: false,
     releasesUrl: RELEASES_URL,
@@ -176,7 +173,6 @@ export function fallbackDownloads(): Downloads {
       },
     },
     beta: null,
-    alpha: null,
     hasProduction: true,
     fallback: true,
     releasesUrl: RELEASES_URL,

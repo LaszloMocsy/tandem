@@ -63,7 +63,7 @@ export interface AppSettings {
   theme: Theme
   /** The app's database file, with the project list and these settings. */
   appDbPath: string
-  /** The channel updates come from, or `null` for dev and alpha builds, which never update. */
+  /** The channel updates come from, or `null` for dev builds, which never update. */
   updateChannel: UpdateChannel | null
   /** Whether the app looks for an update when it starts. */
   checkUpdates: boolean

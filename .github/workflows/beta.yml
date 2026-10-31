@@ -1,0 +1,72 @@
+name: Beta
+
+# Run by hand on a release/vX.Y.Z branch (Actions → Beta → Run workflow,
+# or `gh workflow run beta.yml --ref release/vX.Y.Z`). It tags the branch's
+# head vX.Y.Z-beta.N, one past the highest beta of X.Y.Z on origin, and
+# starts the Release workflow for that tag, which builds a draft pre-release.
+# The version files keep X.Y.Z; only the beta's build carries X.Y.Z-beta.N.
+#
+# A tag pushed with GITHUB_TOKEN doesn't trigger other workflows, so this
+# starts Release through workflow_dispatch on the tag, as the Tag workflow
+# does for stable releases. No extra token or secret is needed.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+# One beta per branch at a time, so two runs can't pick the same number.
+concurrency:
+  group: beta-${{ github.ref }}
+  cancel-in-progress: false
+
+# The rust-toolchain action is pinned to a commit SHA and there's no build
+# cache, since this workflow can push tags.
+
+jobs:
+  tag:
+    name: Tag the beta and start the release
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Check this runs for a release branch
+        if: github.ref_type != 'branch' || !startsWith(github.ref_name, 'release/')
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          echo "::error::Run Beta on a release/vX.Y.Z branch, not $REF"
+          exit 1
+
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+
+      # The branch must be release/vX.Y.Z with X.Y.Z in the version files,
+      # higher than main's, and vX.Y.Z not released yet. The number follows
+      # the beta tags on origin, drafts included, so a deleted draft's number
+      # isn't reused.
+      - name: Pick the beta's tag
+        id: beta
+        run: |
+          tag=$(cargo --locked xtask version next-beta)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create the tag
+        env:
+          TAG: ${{ steps.beta.outputs.tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          git tag "$TAG" "$SHA"
+          git push origin "refs/tags/$TAG"
+
+      - name: Start the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.beta.outputs.tag }}
+        run: |
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$TAG"
+          echo "Tagged $TAG and started the Release workflow for it."

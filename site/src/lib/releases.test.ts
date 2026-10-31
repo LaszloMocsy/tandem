@@ -41,10 +41,9 @@ function release(tag: string, opts: { draft?: boolean; assets?: string[] } = {})
 }
 
 describe('parseTag', () => {
-  test('classifies production, beta and alpha tags', () => {
+  test('classifies production and beta tags', () => {
     expect(parseTag('v1.2.3')).toMatchObject({ channel: 'production', major: 1, minor: 2, patch: 3, text: '1.2.3' });
     expect(parseTag('v0.2.0-beta.4')).toMatchObject({ channel: 'beta', pre: 4, text: '0.2.0-beta.4' });
-    expect(parseTag('v0.2.0-alpha.1')).toMatchObject({ channel: 'alpha', pre: 1, text: '0.2.0-alpha.1' });
   });
 
   test('ignores tags that match no channel', () => {
@@ -53,6 +52,7 @@ describe('parseTag', () => {
       'v1.2',
       'v1.2.3.4',
       'v1.2.3-rc.1',
+      'v1.2.3-alpha.1',
       'v1.2.3-beta',
       'v1.2.3-beta.1.2',
       'v1.2.3-Beta.1',
@@ -74,10 +74,9 @@ describe('compareVersions', () => {
     expect(compareVersions(v('v0.2.0-beta.10'), v('v0.2.0-beta.9'))).toBeGreaterThan(0);
   });
 
-  test('puts pre-releases before their production version, alpha before beta', () => {
+  test('puts betas before their production version', () => {
     expect(compareVersions(v('v0.2.0-beta.1'), v('v0.2.0'))).toBeLessThan(0);
-    expect(compareVersions(v('v0.2.0-alpha.5'), v('v0.2.0-beta.1'))).toBeLessThan(0);
-    expect(compareVersions(v('v0.2.0-alpha.1'), v('v0.1.9'))).toBeGreaterThan(0);
+    expect(compareVersions(v('v0.2.0-beta.1'), v('v0.1.9'))).toBeGreaterThan(0);
   });
 });
 
@@ -88,40 +87,30 @@ describe('pickReleases', () => {
       release('v0.3.0-beta.1'),
       release('v0.2.0'),
       release('v0.3.0-beta.2'),
-      release('v0.4.0-alpha.3'),
-      release('v0.4.0-alpha.12'),
       release('v0.1.5'),
     ]);
     expect(d.production?.version).toBe('0.2.0');
     expect(d.beta?.version).toBe('0.3.0-beta.2');
-    expect(d.alpha?.version).toBe('0.4.0-alpha.12');
     expect(d.hasProduction).toBe(true);
     expect(d.fallback).toBe(false);
   });
 
-  test('hides beta and alpha that are not newer than production', () => {
-    const d = pickReleases([
-      release('v0.3.0'),
-      release('v0.3.0-beta.2'),
-      release('v0.2.0-alpha.9'),
-    ]);
+  test('hides a beta that is not newer than production', () => {
+    const d = pickReleases([release('v0.3.0'), release('v0.3.0-beta.2')]);
     expect(d.production?.version).toBe('0.3.0');
     expect(d.beta).toBeNull();
-    expect(d.alpha).toBeNull();
   });
 
-  test('keeps pre-releases newer than production and hides older ones', () => {
-    const d = pickReleases([release('v0.3.0'), release('v0.4.0-beta.1'), release('v0.3.0-alpha.2')]);
+  test('keeps a beta newer than production', () => {
+    const d = pickReleases([release('v0.3.0'), release('v0.4.0-beta.1')]);
     expect(d.beta?.version).toBe('0.4.0-beta.1');
-    expect(d.alpha).toBeNull();
   });
 
-  test('without a production release, reports none and keeps pre-releases', () => {
-    const d = pickReleases([release('v0.2.0-beta.1'), release('v0.2.0-alpha.3')]);
+  test('without a production release, reports none and keeps the beta', () => {
+    const d = pickReleases([release('v0.2.0-beta.1')]);
     expect(d.production).toBeNull();
     expect(d.hasProduction).toBe(false);
     expect(d.beta?.version).toBe('0.2.0-beta.1');
-    expect(d.alpha?.version).toBe('0.2.0-alpha.3');
   });
 
   test('ignores drafts and tags that match no channel', () => {
@@ -133,7 +122,6 @@ describe('pickReleases', () => {
     ]);
     expect(d.production?.version).toBe('0.1.0');
     expect(d.beta).toBeNull();
-    expect(d.alpha).toBeNull();
   });
 
   test('exposes the tag, date and release page', () => {
@@ -148,7 +136,7 @@ describe('pickReleases', () => {
 
   test('an empty list has no releases', () => {
     const d = pickReleases([]);
-    expect(d).toMatchObject({ production: null, beta: null, alpha: null, hasProduction: false });
+    expect(d).toMatchObject({ production: null, beta: null, hasProduction: false });
   });
 });
 
@@ -190,7 +178,6 @@ describe('fetchDownloads', () => {
     expect(d.fallback).toBe(true);
     expect(d.hasProduction).toBe(true);
     expect(d.beta).toBeNull();
-    expect(d.alpha).toBeNull();
     const f = d.production!.files;
     for (const asset of [f.macos.main, f.macos.intel, f.windows.main, f.linux.main, f.linux.deb, f.linux.rpm]) {
       expect(asset).toEqual({ name: null, url: RELEASES_URL });
@@ -252,7 +239,7 @@ describe('pickUpdate', () => {
     expect(pickUpdate(releases, 'stable')?.tag_name).toBe('v0.1.0');
   });
 
-  test('beta offers the newest beta or production release, never alpha or drafts', () => {
+  test('beta offers the newest beta or production release, never drafts or other tags', () => {
     expect(pickUpdate(releases, 'beta')?.tag_name).toBe('v0.2.0-beta.1');
     expect(pickUpdate([...releases, updatable('v0.2.0')], 'beta')?.tag_name).toBe('v0.2.0');
   });

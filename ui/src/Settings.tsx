@@ -287,7 +287,7 @@ export type UpdateStatus =
 
 /**
  * The Updates section: the channel, the check on start, and Check now. Dev
- * and alpha builds never update, so they only say where new builds are.
+ * builds never update, so they only say where new builds are.
  */
 export function UpdatesView({
   settings,
@@ -310,7 +310,7 @@ export function UpdatesView({
       <section className="settings-section" aria-label="Updates">
         <h3>Updates</h3>
         <p className="hint">
-          Dev and alpha builds don't update themselves. New builds are on the{' '}
+          Dev builds don't update themselves. New builds are on the{' '}
           <button type="button" className="link" onClick={() => onOpenLink('releases')}>
             releases page
           </button>

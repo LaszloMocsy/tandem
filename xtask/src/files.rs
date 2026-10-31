@@ -84,6 +84,76 @@ pub fn set_tauri_version(tauri_conf: &str, old: &str, new: &str) -> Result<Strin
     one_line_changed(tauri_conf, updated, "tauri.conf.json")
 }
 
+/// `Cargo.lock` with every workspace crate but `skip` at version `old` moved
+/// to `new`, as `cargo update --workspace` would after a version change, but
+/// without cargo, so it works offline on a fresh CI runner. Dependency
+/// entries that name a workspace crate with its version follow along.
+/// Everything else stays byte for byte.
+pub fn set_lock_versions(
+    cargo_lock: &str,
+    skip: &str,
+    old: &str,
+    new: &str,
+) -> Result<String, String> {
+    let mut doc: DocumentMut = cargo_lock
+        .parse()
+        .map_err(|e| format!("Cargo.lock doesn't parse: {e}"))?;
+    let packages = doc
+        .get_mut("package")
+        .and_then(|p| p.as_array_of_tables_mut())
+        .ok_or_else(|| "Cargo.lock has no packages".to_owned())?;
+    let mut workspace = Vec::new();
+    for package in packages.iter_mut() {
+        if package.contains_key("source") {
+            continue;
+        }
+        let name = package.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        if name == skip || package.get("version").and_then(|v| v.as_str()) != Some(old) {
+            continue;
+        }
+        workspace.push(name.to_owned());
+        let item = package.get_mut("version").expect("checked above");
+        let decor = item.as_value().map(|v| v.decor().clone());
+        *item = value(new);
+        if let (Some(decor), Some(v)) = (decor, item.as_value_mut()) {
+            *v.decor_mut() = decor;
+        }
+    }
+    if workspace.is_empty() {
+        return Err(format!("Cargo.lock has no workspace crate at {old}"));
+    }
+    let named: Vec<String> = workspace.iter().map(|n| format!("{n} {old}")).collect();
+    for package in packages.iter_mut() {
+        let Some(deps) = package
+            .get_mut("dependencies")
+            .and_then(|d| d.as_array_mut())
+        else {
+            continue;
+        };
+        for dep in deps.iter_mut() {
+            if dep.as_str().is_some_and(|d| named.iter().any(|n| n == d)) {
+                let name = dep.as_str().expect("checked above").split(' ').next();
+                let decor = dep.decor().clone();
+                *dep = format!("{} {new}", name.unwrap_or_default()).into();
+                *dep.decor_mut() = decor;
+            }
+        }
+    }
+    let after = doc.to_string();
+    let (a, b): (Vec<_>, Vec<_>) = (
+        cargo_lock.split('\n').collect(),
+        after.split('\n').collect(),
+    );
+    let stray = a.len() != b.len()
+        || a.iter()
+            .zip(&b)
+            .any(|(x, y)| x != y && x.replace(old, new) != *y);
+    if stray {
+        return Err("the edit to Cargo.lock would change more than the version lines".to_owned());
+    }
+    Ok(after)
+}
+
 /// Returns `after`, or an error unless it differs from `before` in exactly one
 /// line, so an edit can't spill over into the rest of the file.
 fn one_line_changed(before: &str, after: String, file: &str) -> Result<String, String> {
@@ -190,6 +260,49 @@ version = "0.0.0"
             TAURI_CONF.replacen("  \"version\": \"0.1.0\",", "  \"version\": \"0.2.0\",", 1)
         );
         assert!(bumped.contains("      \"version\": \"0.1.0\","));
+    }
+
+    #[test]
+    fn lock_bump_changes_only_the_workspace_crates() {
+        let bumped = set_lock_versions(CARGO_LOCK, "xtask", "0.1.0", "0.2.0-beta.1").unwrap();
+        assert_eq!(
+            bumped,
+            CARGO_LOCK
+                .replace(
+                    "name = \"tandem-board-core\"\nversion = \"0.1.0\"",
+                    "name = \"tandem-board-core\"\nversion = \"0.2.0-beta.1\"",
+                )
+                .replace(
+                    "name = \"tandem-board-mcp\"\nversion = \"0.1.0\"",
+                    "name = \"tandem-board-mcp\"\nversion = \"0.2.0-beta.1\"",
+                )
+        );
+        assert_eq!(
+            lock_versions(&bumped, "xtask").unwrap(),
+            [
+                ("tandem-board-core".to_owned(), "0.2.0-beta.1".to_owned()),
+                ("tandem-board-mcp".to_owned(), "0.2.0-beta.1".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lock_bump_follows_dependencies_that_name_the_version() {
+        let lock = "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"0.1.0\"\n\n\
+                    [[package]]\nname = \"b\"\nversion = \"0.1.0\"\ndependencies = [\n \"a 0.1.0\",\n \
+                    \"serde 1.0.0\",\n]\n";
+        let bumped = set_lock_versions(lock, "xtask", "0.1.0", "0.2.0").unwrap();
+        assert_eq!(
+            bumped,
+            lock.replace("\"0.1.0\"", "\"0.2.0\"")
+                .replace("a 0.1.0", "a 0.2.0")
+        );
+    }
+
+    #[test]
+    fn lock_bump_refuses_a_lock_without_the_version() {
+        assert!(set_lock_versions(CARGO_LOCK, "xtask", "0.9.0", "1.0.0").is_err());
+        assert!(set_lock_versions("not toml [", "xtask", "0.1.0", "0.2.0").is_err());
     }
 
     #[test]

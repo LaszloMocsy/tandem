@@ -70,23 +70,31 @@ pub fn run(repo: &Repo, change: &Change) -> Result<(), String> {
     }
     println!();
     println!("Next:");
-    println!("  1. Commit the change on {branch}.");
+    println!("  1. Commit the change on {branch} and push it.");
     println!("  2. Merge feature branches into {branch}.");
-    println!("  3. Open a pull request from {branch} into main.");
-    println!("  4. Merging it tags the merge commit v{new} and starts the release.");
+    println!("  3. For a beta, run the Beta workflow on {branch}: it builds v{new}-beta.N.");
+    println!("  4. Open a pull request from {branch} into main.");
+    println!("  5. Merging it tags the merge commit v{new} and starts the stable release.");
     Ok(())
 }
 
 /// The version to move to, after asking before a lower one.
 fn target(current: Version, change: &Change) -> Result<Version, String> {
     if let Some(level) = change.next {
-        return current.next(level.into(), change.pre.map(Into::into));
+        return current.next(level.into());
     }
     let exact = change
         .exact
         .as_deref()
         .expect("clap requires --next or --exact");
     let new = Version::parse(exact.strip_prefix('v').unwrap_or(exact))?;
+    if new.is_beta() {
+        return Err(format!(
+            "the version files hold X.Y.Z only; set {} and run the Beta workflow on its \
+             release branch, which numbers the betas",
+            new.release()
+        ));
+    }
     if new == current {
         return Err(format!("the version is already {current}"));
     }
@@ -118,7 +126,7 @@ fn confirm(question: &str) -> Result<bool, String> {
 
 /// Changes all three version files or none: if any step fails, the files
 /// go back to how they were, so a later run still finds them agreeing.
-fn write(repo: &Repo, current: Version, new: Version) -> Result<(), String> {
+pub fn write(repo: &Repo, current: Version, new: Version) -> Result<(), String> {
     let (old, new) = (current.to_string(), new.to_string());
     let originals = [
         (CARGO_TOML, repo.read(CARGO_TOML, None)?),
@@ -127,11 +135,12 @@ fn write(repo: &Repo, current: Version, new: Version) -> Result<(), String> {
     ];
     let cargo_toml = files::set_cargo_version(&originals[0].1, &new)?;
     let tauri_conf = files::set_tauri_version(&originals[1].1, &old, &new)?;
+    let cargo_lock = files::set_lock_versions(&originals[2].1, env!("CARGO_PKG_NAME"), &old, &new)?;
 
     let result = repo
         .write(CARGO_TOML, &cargo_toml)
         .and_then(|()| repo.write(TAURI_CONF, &tauri_conf))
-        .and_then(|()| repo.update_lock())
+        .and_then(|()| repo.write(CARGO_LOCK, &cargo_lock))
         .and_then(|()| repo.version(None).map(drop));
     let Err(err) = result else {
         return Ok(());

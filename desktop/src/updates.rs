@@ -1,6 +1,6 @@
 //! Updates from the landing page's feeds, one per channel: stable has
 //! production releases only, beta the newest beta or production release.
-//! Dev and alpha builds never update themselves.
+//! Dev builds never update themselves.
 //!
 //! A check keeps the update it finds, and installing installs that one, so
 //! you install what the dialog showed. Before Tandem quits for the update,
@@ -143,7 +143,6 @@ mod tests {
             channel(BuildEnv::Beta, Some(UpdateChannel::Stable)),
             Some(UpdateChannel::Stable)
         );
-        assert_eq!(channel(BuildEnv::Alpha, Some(UpdateChannel::Beta)), None);
         assert_eq!(channel(BuildEnv::Dev, Some(UpdateChannel::Stable)), None);
     }
 

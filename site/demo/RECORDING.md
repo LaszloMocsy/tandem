@@ -19,7 +19,7 @@ Right after `seed.ts`, the retry task is still in Todo; `drive.ts` claims it as 
 
 ## Setup, once
 
-1. Build a release app, so there's no DEV strip: `cargo tauri build`, then open the bundle under `target/release/bundle/`. Quit any other Tandem first; only one app can serve MCP on port 4317.
+1. Build a release app, so there's no DEV strip: `TANDEM_ENV=production cargo tauri build --config '{"bundle":{"createUpdaterArtifacts":false}}'`, then open the bundle under `target/release/bundle/`. Quit any other Tandem first; only one app can serve MCP on port 4317.
 2. Quit Tandem, then run `bun site/demo/seed.ts`.
 3. Open Tandem and pick **tandem-demo** in the project switcher.
 4. Open the **Setup** panel and copy the project's MCP URL, such as `http://127.0.0.1:4317/p/tandem-demo/mcp`.

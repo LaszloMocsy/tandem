@@ -1,6 +1,8 @@
-//! Which build is running, so a dev build can't pass for a pre-release. The
+//! Which build is running, so a local build can't pass for a release. The
 //! environment is fixed at build time: `cargo tauri dev` is always dev, and
-//! release builds read `TANDEM_ENV` (`alpha`, `beta`, or unset for production).
+//! release builds read `TANDEM_ENV`: `beta` or `production`, which only the
+//! release workflow sets, or unset for dev, so a local `cargo tauri build`
+//! is a dev build too.
 
 use tandem_board_core::db::UpdateChannel;
 
@@ -8,7 +10,6 @@ use tandem_board_core::db::UpdateChannel;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuildEnv {
     Dev,
-    Alpha,
     Beta,
     Production,
 }
@@ -27,18 +28,18 @@ impl BuildEnv {
             return Some(Self::Dev);
         }
         match tandem_env.unwrap_or("") {
-            "" => Some(Self::Production),
-            "alpha" => Some(Self::Alpha),
+            "" => Some(Self::Dev),
             "beta" => Some(Self::Beta),
+            "production" => Some(Self::Production),
             _ => None,
         }
     }
 
     /// The channel this build updates from unless Settings picks another,
-    /// or `None` for dev and alpha builds, which never update themselves.
+    /// or `None` for dev builds, which never update themselves.
     pub(crate) fn update_channel(self) -> Option<UpdateChannel> {
         match self {
-            Self::Dev | Self::Alpha => None,
+            Self::Dev => None,
             Self::Beta => Some(UpdateChannel::Beta),
             Self::Production => Some(UpdateChannel::Stable),
         }
@@ -48,7 +49,6 @@ impl BuildEnv {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Dev => "Tandem DEV",
-            Self::Alpha => "Tandem ALPHA",
             Self::Beta => "Tandem BETA",
             Self::Production => "Tandem",
         }
@@ -69,29 +69,29 @@ mod tests {
 
     #[test]
     fn release_builds_follow_the_variable() {
-        assert_eq!(
-            BuildEnv::detect(false, Some("alpha")),
-            Some(BuildEnv::Alpha)
-        );
         assert_eq!(BuildEnv::detect(false, Some("beta")), Some(BuildEnv::Beta));
-        assert_eq!(BuildEnv::detect(false, None), Some(BuildEnv::Production));
         assert_eq!(
-            BuildEnv::detect(false, Some("")),
+            BuildEnv::detect(false, Some("production")),
             Some(BuildEnv::Production)
         );
     }
 
     #[test]
+    fn local_release_builds_are_dev() {
+        assert_eq!(BuildEnv::detect(false, None), Some(BuildEnv::Dev));
+        assert_eq!(BuildEnv::detect(false, Some("")), Some(BuildEnv::Dev));
+    }
+
+    #[test]
     fn unknown_values_are_refused() {
         assert_eq!(BuildEnv::detect(false, Some("rc")), None);
-        assert_eq!(BuildEnv::detect(false, Some("Alpha")), None);
-        assert_eq!(BuildEnv::detect(false, Some("production")), None);
+        assert_eq!(BuildEnv::detect(false, Some("alpha")), None);
+        assert_eq!(BuildEnv::detect(false, Some("Beta")), None);
     }
 
     #[test]
     fn only_beta_and_production_builds_update() {
         assert_eq!(BuildEnv::Dev.update_channel(), None);
-        assert_eq!(BuildEnv::Alpha.update_channel(), None);
         assert_eq!(BuildEnv::Beta.update_channel(), Some(UpdateChannel::Beta));
         assert_eq!(
             BuildEnv::Production.update_channel(),
@@ -102,7 +102,6 @@ mod tests {
     #[test]
     fn titles_name_the_environment_except_in_production() {
         assert_eq!(BuildEnv::Dev.title(), "Tandem DEV");
-        assert_eq!(BuildEnv::Alpha.title(), "Tandem ALPHA");
         assert_eq!(BuildEnv::Beta.title(), "Tandem BETA");
         assert_eq!(BuildEnv::Production.title(), "Tandem");
     }
