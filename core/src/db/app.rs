@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehav
 
 use super::backup::{backup_dir, backups_owner};
 use super::{DB_DIR, DbError, from_millis, io_error, millis, schema, timestamp_text};
+use crate::features::{Feature, Features};
 
 /// The longest project id [`AppDb::add_project`] makes, before any `-2`
 /// suffix.
@@ -189,6 +190,29 @@ impl AppDb {
             }
         }
         Ok(settings)
+    }
+
+    /// Which features are on. A flag is on only when its row holds `true`;
+    /// a missing row or any other value leaves it off.
+    pub fn features(&self) -> Result<Features, DbError> {
+        let mut features = Features::OFF;
+        let tx = self.begin(TransactionBehavior::Deferred)?;
+        let mut stmt = tx.prepare("SELECT key, value FROM settings WHERE key LIKE 'feature.%'")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (key, value) = row?;
+            if let Some(feature) = Feature::from_key(&key) {
+                features.set(feature, value == "true");
+            }
+        }
+        Ok(features)
+    }
+
+    /// Turns a feature on or off, stored as `true` or `false`.
+    pub fn set_feature(&self, feature: Feature, on: bool) -> Result<(), DbError> {
+        self.set_setting(feature.key(), Some(if on { "true" } else { "false" }))
     }
 
     /// Sets the MCP server's port; `None` goes back to the default.

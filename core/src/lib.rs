@@ -3,6 +3,7 @@
 //! service. Has no Tauri dependency.
 
 pub mod db;
+pub mod features;
 pub mod git;
 pub mod graph;
 pub mod markdown;
