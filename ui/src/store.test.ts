@@ -1,5 +1,12 @@
 import { expect, test } from 'vitest'
-import { CommandError, type ProjectInfo, type TaskSummary, type TasksChanged } from './api.ts'
+import {
+  CommandError,
+  FEATURES_OFF,
+  type Features,
+  type ProjectInfo,
+  type TaskSummary,
+  type TasksChanged,
+} from './api.ts'
 import { createBoardStore, type BoardDeps } from './store.ts'
 
 function projectInfo(id: string, open = true): ProjectInfo {
@@ -50,6 +57,8 @@ function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) 
   const handlers = new Set<(event: TasksChanged) => void>()
   const fetches: string[] = []
   let hold: { promise: Promise<void> } | null = null
+  let features: Features = { ...FEATURES_OFF }
+  const fake = { featuresFail: false, production: false }
   const deps: BoardDeps = {
     api: {
       listProjects: async () => projects,
@@ -75,6 +84,20 @@ function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) 
         if (!list) throw new CommandError('project_not_found', `project \`${project}\` is not open`)
         return list
       },
+      getFeatures: async () => {
+        if (fake.featuresFail) throw new CommandError('internal', 'app.db is locked')
+        return features
+      },
+      setFeature: async (feature, on) => {
+        if (fake.production) {
+          throw new CommandError(
+            'invalid_argument',
+            "feature flags can't be changed in a production build",
+          )
+        }
+        features = { ...features, [feature]: on }
+        return features
+      },
     },
     onTasksChanged: async (handler) => {
       handlers.add(handler)
@@ -83,6 +106,7 @@ function fakeApp(projects: ProjectInfo[], tasks: Record<string, TaskSummary[]>) 
   }
   return {
     deps,
+    fake,
     fetches,
     tasks,
     emit: (project: string, changed: string[] = []) => {
@@ -224,4 +248,40 @@ test('removing the project on screen shows the next open one, and errors are kep
   await store.refetch()
   expect(store.getState().error).toMatchObject({ code: 'project_not_found' })
   expect(store.getState().tasks).toEqual([task('bbbbbbb')])
+})
+
+test('features load on start and change through the app', async () => {
+  const app = fakeApp([projectInfo('a')], { a: [] })
+  const store = createBoardStore(app.deps)
+  expect(store.getState().features).toEqual(FEATURES_OFF)
+  await store.setFeature('canvas', true)
+  const fresh = createBoardStore(app.deps)
+  await fresh.start()
+  expect(fresh.getState().features).toEqual({ ...FEATURES_OFF, canvas: true })
+
+  await fresh.setFeature('canvas', false)
+  expect(fresh.getState().features).toEqual(FEATURES_OFF)
+  app.fake.production = true
+  await expect(fresh.setFeature('structure', true)).rejects.toMatchObject({
+    code: 'invalid_argument',
+  })
+  expect(fresh.getState().features).toEqual(FEATURES_OFF)
+})
+
+test('features that fail to load stay off, and the board still starts', async () => {
+  const app = fakeApp([projectInfo('a')], { a: [task('aaaaaaa')] })
+  app.fake.featuresFail = true
+  const store = createBoardStore(app.deps)
+  const error = console.error
+  console.error = () => {}
+  try {
+    await store.start()
+  } finally {
+    console.error = error
+  }
+  expect(store.getState()).toMatchObject({
+    features: FEATURES_OFF,
+    project: 'a',
+    tasks: [task('aaaaaaa')],
+  })
 })

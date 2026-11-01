@@ -1,12 +1,19 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import type { AppSettings, BackupInfo, DeletedTask, ProjectInfo } from './api.ts'
+import {
+  FEATURES_OFF,
+  type AppSettings,
+  type BackupInfo,
+  type DeletedTask,
+  type ProjectInfo,
+} from './api.ts'
 import { APP_VERSION, type BuildEnv } from './buildEnv.ts'
 import { CleanUpDeletedForm, RestoreBackupForm } from './dialogs.tsx'
 import {
   AppSettingsView,
   BackupsView,
   DeletedTasksView,
+  LabsView,
   ProjectSettingsView,
   Settings,
   type SettingsApi,
@@ -254,6 +261,8 @@ test('without an open board, only the App tab can be chosen', () => {
       onProjectsChanged={noop}
       onRemove={noop}
       onUpdate={noop}
+      features={FEATURES_OFF}
+      onFeature={async () => {}}
     />,
   )
   expect(html).toMatch(/role="tab" class="tab" aria-selected="true"[^>]*>App</)
@@ -458,4 +467,45 @@ test('dev builds have no update settings', () => {
   expect(html).toContain('don&#x27;t update themselves')
   expect(html).not.toContain('update-channel')
   expect(html).not.toContain('Check now')
+})
+
+test('Labs shows in every build but production', () => {
+  const view = (env: BuildEnv) =>
+    renderToStaticMarkup(
+      <AppSettingsView
+        settings={running}
+        portText="4317"
+        portError={null}
+        themeError={null}
+        busy={false}
+        onPortText={noop}
+        onApplyPort={noop}
+        onTheme={noop}
+        linkError={null}
+        onOpenLink={noop}
+        showError={null}
+        onShow={noop}
+        labs={<LabsView features={FEATURES_OFF} error={null} onFeature={noop} />}
+        env={env}
+        version="0.2.0"
+      />,
+    )
+  expect(view('dev')).toContain('aria-label="Labs"')
+  expect(view('beta')).toContain('aria-label="Labs"')
+  expect(view('production')).not.toContain('aria-label="Labs"')
+})
+
+test('Labs has a switch for each feature, checked when it is on', () => {
+  const html = renderToStaticMarkup(
+    <LabsView
+      features={{ ...FEATURES_OFF, canvas: true }}
+      error="feature flags can't be changed in a production build"
+      onFeature={noop}
+    />,
+  )
+  const switches = [...html.matchAll(/<input type="checkbox"( checked="")?\/>(\w+)/g)].map(
+    ([, checked, label]) => `${label}${checked ? ' on' : ''}`,
+  )
+  expect(switches).toEqual(['Structure', 'Canvas on', 'Assistant', 'Shaping', 'Automation'])
+  expect(html).toContain('role="alert">feature flags can&#x27;t be changed in a production build')
 })
