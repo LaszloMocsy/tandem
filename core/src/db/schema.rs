@@ -1,9 +1,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use jiff::Timestamp;
+use rusqlite::{Connection, OptionalExtension};
 
-use super::{DbError, io_error};
+use super::{DbError, backup, io_error};
 
 /// `app.db`: the project list and the app's settings.
 ///
@@ -140,10 +141,13 @@ CREATE TABLE restoring (
 ];
 
 /// Opens or creates the database at `path` in WAL mode, with foreign keys
-/// enforced, and brings its schema up to date. `migrations[n]` takes the
-/// schema from version `n` to `n + 1`; the version is kept in
-/// `PRAGMA user_version`. Returns whether the database is new.
-pub(super) fn open(path: &Path, migrations: &[&str]) -> Result<(Connection, bool), DbError> {
+/// enforced, and brings its schema up to date; see [`migrate`]. Returns
+/// whether the database is new.
+pub(super) fn open(
+    path: &Path,
+    migrations: &[&str],
+    backups: Option<&Path>,
+) -> Result<(Connection, bool), DbError> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(io_error(dir))?;
     }
@@ -160,26 +164,75 @@ pub(super) fn open(path: &Path, migrations: &[&str]) -> Result<(Connection, bool
     // Safe with WAL: a crash can lose the last commits, never corrupt the file.
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
-    let created = migrate(&mut conn, path, migrations)?;
+    let created = migrate(&mut conn, path, migrations, backups)?;
     Ok((conn, created))
 }
 
-/// Runs the migrations the database is missing. Returns whether it had
-/// none yet.
+/// Runs the migrations the database is missing. `migrations[n]` takes the
+/// schema from version `n` to `n + 1`; the version is kept in
+/// `PRAGMA user_version`. Returns whether the database had none yet.
+///
+/// The migrations run in one `BEGIN IMMEDIATE` transaction with foreign
+/// keys off, so one can rebuild a table, as changing a column's `CHECK`
+/// takes, without `DROP TABLE` cascading into the tables that refer to it.
+/// `PRAGMA foreign_key_check` then has to find nothing, or the whole
+/// transaction is rolled back with [`DbError::DanglingForeignKey`]. Foreign
+/// keys are enforced afterwards as they were before.
+///
+/// An existing database is first backed up into `backups`, if given, with
+/// [`backup::write`]. `VACUUM INTO` can't run in a transaction, so the
+/// backup is taken just before it: another process's commit in between is
+/// not in the backup.
 pub(super) fn migrate(
     conn: &mut Connection,
     path: &Path,
     migrations: &[&str],
+    backups: Option<&Path>,
 ) -> Result<bool, DbError> {
+    let version = check_version(conn, path, migrations)?;
+    if version == migrations.len() as i64 {
+        return Ok(false);
+    }
+    if let Some(dir) = backups
+        && version > 0
+    {
+        backup::write(conn, dir, Timestamp::now())?;
+    }
+    let enforced: bool = conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    conn.pragma_update(None, "foreign_keys", false)?;
+    // A failed transaction has been rolled back by now, so the pragma
+    // takes effect either way.
+    let applied = apply(conn, path, migrations);
+    let restored = conn.pragma_update(None, "foreign_keys", enforced);
+    let version = applied?;
+    restored?;
+    Ok(version == 0)
+}
+
+/// Runs the missing migrations in one transaction and checks the foreign
+/// keys they leave. Returns the version the database had.
+fn apply(conn: &mut Connection, path: &Path, migrations: &[&str]) -> Result<i64, DbError> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    // Again: another process may have migrated it meanwhile.
     let version = check_version(&tx, path, migrations)?;
-    let supported = migrations.len() as i64;
     for migration in &migrations[version as usize..] {
         tx.execute_batch(migration)?;
     }
-    tx.pragma_update(None, "user_version", supported)?;
+    let dangling = tx
+        .query_row("PRAGMA foreign_key_check", [], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(2)?))
+        })
+        .optional()?;
+    if let Some((table, parent)) = dangling {
+        return Err(DbError::DanglingForeignKey {
+            path: path.to_owned(),
+            table,
+            parent,
+        });
+    }
+    tx.pragma_update(None, "user_version", migrations.len() as i64)?;
     tx.commit()?;
-    Ok(version == 0)
+    Ok(version)
 }
 
 /// The schema version of the database on `conn`, refused with
@@ -201,4 +254,206 @@ pub(super) fn check_version(
         });
     }
     Ok(version)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// Rebuilds `tasks` with a wider `status` CHECK, as SQLite needs to
+    /// change one.
+    const REBUILD_TASKS: &str = "
+CREATE TABLE tasks_new (
+  seq            INTEGER PRIMARY KEY,
+  id             TEXT NOT NULL UNIQUE,
+  title          TEXT NOT NULL,
+  status         TEXT NOT NULL CHECK (status IN ('backlog','todo','in_progress','review','finished','done')),
+  priority       TEXT NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
+  parent         INTEGER REFERENCES tasks (seq),
+  blocked_reason TEXT,
+  created_by     INTEGER NOT NULL REFERENCES actors (id),
+  created_at     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  reviewed_at    INTEGER,
+  deleted_at     INTEGER,
+  relevant_files TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(relevant_files)),
+  description    TEXT NOT NULL DEFAULT ''
+) STRICT;
+INSERT INTO tasks_new SELECT * FROM tasks;
+DROP TABLE tasks;
+ALTER TABLE tasks_new RENAME TO tasks;
+CREATE INDEX tasks_by_parent ON tasks (parent);
+";
+
+    /// The tables that refer to `tasks`, each with the rows they hold.
+    const CHILD_ROWS: &[(&str, i64)] = &[
+        ("task_deps", 1),
+        ("criteria", 2),
+        ("events", 3),
+        ("leases", 1),
+        ("task_labels", 2),
+    ];
+
+    struct Env {
+        _dir: TempDir,
+        path: std::path::PathBuf,
+        backups: std::path::PathBuf,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            let dir = TempDir::new().unwrap();
+            Self {
+                path: dir.path().join("test.db"),
+                backups: dir.path().join("backups"),
+                _dir: dir,
+            }
+        }
+
+        /// A database at the current schema with two tasks, the second a
+        /// child of the first and depending on it, and rows in every
+        /// table that refers to them.
+        fn seeded(self) -> Self {
+            let (conn, created) = open(&self.path, PROJECT_MIGRATIONS, None).unwrap();
+            assert!(created);
+            conn.execute_batch(
+                "
+INSERT INTO actors (id, kind, name, first_seen, last_seen) VALUES (1, 'user', 'me', 0, 0);
+INSERT INTO tasks (seq, id, title, status, created_by, created_at, updated_at)
+  VALUES (5, 'aaaaaaa', 'Parent', 'todo', 1, 0, 0);
+INSERT INTO tasks (seq, id, title, status, parent, created_by, created_at, updated_at)
+  VALUES (9, 'bbbbbbb', 'Child', 'in_progress', 5, 1, 0, 0);
+INSERT INTO task_deps (task, depends_on) VALUES (9, 5);
+INSERT INTO labels (id, name) VALUES (1, 'ui'), (2, 'core');
+INSERT INTO task_labels (task, label) VALUES (5, 1), (9, 2);
+INSERT INTO criteria (task, position, text) VALUES (9, 1, 'one'), (9, 2, 'two');
+INSERT INTO events (task, at, actor, kind) VALUES (5, 0, 1, 'created'), (9, 0, 1, 'created'),
+  (9, 1, 1, 'started');
+INSERT INTO leases (task, actor, claimed_at, expires_at) VALUES (9, 1, 0, 1);
+",
+            )
+            .unwrap();
+            self
+        }
+
+        fn migrations(extra: &'static str) -> Vec<&'static str> {
+            let mut migrations = PROJECT_MIGRATIONS.to_vec();
+            migrations.push(extra);
+            migrations
+        }
+
+        fn open(&self, migrations: &[&str]) -> Result<(Connection, bool), DbError> {
+            open(&self.path, migrations, Some(&self.backups))
+        }
+    }
+
+    fn count(conn: &Connection, table: &str) -> i64 {
+        conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
+    }
+
+    fn pragma(conn: &Connection, name: &str) -> i64 {
+        conn.pragma_query_value(None, name, |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn rebuilding_tasks_keeps_the_rows_that_refer_to_them() {
+        let env = Env::new().seeded();
+        let migrations = Env::migrations(REBUILD_TASKS);
+        let (conn, created) = env.open(&migrations).unwrap();
+        assert!(!created);
+        assert_eq!(pragma(&conn, "user_version"), 4);
+        assert_eq!(pragma(&conn, "foreign_keys"), 1);
+        for &(table, rows) in CHILD_ROWS {
+            assert_eq!(count(&conn, table), rows, "{table}");
+        }
+        let tasks: Vec<(i64, String, Option<i64>)> = conn
+            .prepare("SELECT seq, id, parent FROM tasks ORDER BY seq")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            tasks,
+            [
+                (5, "aaaaaaa".to_owned(), None),
+                (9, "bbbbbbb".to_owned(), Some(5))
+            ]
+        );
+        // The new CHECK holds, and the foreign keys still cascade.
+        conn.execute("UPDATE tasks SET status = 'review' WHERE seq = 9", [])
+            .unwrap();
+        conn.execute("DELETE FROM tasks WHERE seq = 9", []).unwrap();
+        assert_eq!(count(&conn, "criteria"), 0);
+        assert_eq!(count(&conn, "leases"), 0);
+    }
+
+    #[test]
+    fn a_migration_that_leaves_a_dangling_foreign_key_is_rolled_back() {
+        let env = Env::new().seeded();
+        let migrations = Env::migrations("DELETE FROM tasks WHERE seq = 5;");
+        let err = env.open(&migrations).unwrap_err();
+        assert!(
+            matches!(&err, DbError::DanglingForeignKey { table, parent, .. }
+                if parent == "tasks" && CHILD_ROWS.iter().any(|(t, _)| t == table)),
+            "{err:?}"
+        );
+        let (conn, _) = open(&env.path, PROJECT_MIGRATIONS, None).unwrap();
+        assert_eq!(pragma(&conn, "user_version"), 3);
+        assert_eq!(count(&conn, "tasks"), 2);
+        for &(table, rows) in CHILD_ROWS {
+            assert_eq!(count(&conn, table), rows, "{table}");
+        }
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced_again_after_a_failed_migration() {
+        let env = Env::new().seeded();
+        let mut conn = Connection::open(&env.path).unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        for bad in ["DELETE FROM tasks WHERE seq = 5;", "NOT SQL;"] {
+            let migrations = Env::migrations(bad);
+            assert!(migrate(&mut conn, &env.path, &migrations, None).is_err());
+            assert_eq!(pragma(&conn, "foreign_keys"), 1);
+            assert_eq!(pragma(&conn, "user_version"), 3);
+        }
+        // And stay off for a connection that had them off.
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        let migrations = Env::migrations(REBUILD_TASKS);
+        migrate(&mut conn, &env.path, &migrations, None).unwrap();
+        assert_eq!(pragma(&conn, "foreign_keys"), 0);
+    }
+
+    #[test]
+    fn an_existing_database_is_backed_up_before_it_is_migrated() {
+        let env = Env::new().seeded();
+        let migrations = Env::migrations(REBUILD_TASKS);
+        drop(env.open(&migrations).unwrap());
+        let backups = backup::list(&env.backups).unwrap();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(backups[0].tasks, Some(2));
+        // The backup has the schema from before the migration.
+        let saved = Connection::open(&backups[0].path).unwrap();
+        assert_eq!(pragma(&saved, "user_version"), 3);
+        drop(saved);
+
+        // Opening it again migrates nothing, so backs up nothing.
+        drop(env.open(&migrations).unwrap());
+        assert_eq!(backup::list(&env.backups).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_new_database_is_not_backed_up() {
+        let env = Env::new();
+        let (_, created) = env.open(PROJECT_MIGRATIONS).unwrap();
+        assert!(created);
+        drop(env.open(PROJECT_MIGRATIONS).unwrap());
+        assert!(!env.backups.exists());
+    }
 }

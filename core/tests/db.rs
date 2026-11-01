@@ -2,6 +2,7 @@ use std::fs;
 
 use jiff::Timestamp;
 use rusqlite::Connection;
+use tandem_board_core::db::backup::{self, backup_dir};
 use tandem_board_core::db::{
     AppDb, AppSettings, DbError, ProjectDb, Theme, UpdateChannel, app_db_path, delete_project_db,
     folder_name, project_db_path,
@@ -68,6 +69,26 @@ fn a_new_project_database_has_the_whole_schema() {
 
     // Opening it again runs nothing and creates nothing.
     assert!(!ProjectDb::open(data.path(), "test").unwrap().created());
+    assert!(!backup_dir(data.path(), "test").exists());
+}
+
+#[test]
+fn an_older_project_database_is_backed_up_before_it_is_migrated() {
+    let data = TempDir::new().unwrap();
+    drop(ProjectDb::open(data.path(), "test").unwrap());
+    // Take it back to schema 2, before `restoring`.
+    let conn = Connection::open(project_db_path(data.path(), "test")).unwrap();
+    conn.execute_batch("DROP TABLE restoring; PRAGMA user_version = 2;")
+        .unwrap();
+    drop(conn);
+
+    let db = ProjectDb::open(data.path(), "test").unwrap();
+    assert!(!db.created());
+    assert_eq!(pragma(db.connection(), "user_version"), 3);
+    let backups = backup::list(&backup_dir(data.path(), "test")).unwrap();
+    assert_eq!(backups.len(), 1);
+    let saved = Connection::open(&backups[0].path).unwrap();
+    assert_eq!(pragma(&saved, "user_version"), 2);
 }
 
 #[test]

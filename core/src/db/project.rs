@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, MAIN_DB, Transaction, TransactionBehavior};
 
+use super::backup::backup_dir;
 use super::{DB_DIR, DbError, io_error, is_valid_project_id, schema};
 use crate::model::TaskId;
 
@@ -70,16 +71,26 @@ pub struct ProjectDb {
 
 impl ProjectDb {
     /// Opens or creates the database of project `project_id` in `data_dir`.
+    /// An existing database that needs migrating is backed up into the
+    /// project's backup folder first.
     pub fn open(data_dir: &Path, project_id: &str) -> Result<Self, DbError> {
         if !is_valid_project_id(project_id) {
             return Err(DbError::InvalidProjectId(project_id.to_owned()));
         }
-        Self::open_at(&project_db_path(data_dir, project_id))
+        Self::open_with(
+            &project_db_path(data_dir, project_id),
+            Some(&backup_dir(data_dir, project_id)),
+        )
     }
 
-    /// Opens or creates the database at `path`.
+    /// Opens or creates the database at `path`. Nothing is backed up
+    /// before migrating it.
     pub fn open_at(path: &Path) -> Result<Self, DbError> {
-        let (conn, created) = schema::open(path, schema::PROJECT_MIGRATIONS)?;
+        Self::open_with(path, None)
+    }
+
+    fn open_with(path: &Path, backups: Option<&Path>) -> Result<Self, DbError> {
+        let (conn, created) = schema::open(path, schema::PROJECT_MIGRATIONS, backups)?;
         Ok(Self {
             conn,
             path: path.to_owned(),
@@ -130,7 +141,9 @@ impl ProjectDb {
         let mut conn = Connection::open(scratch).map_err(DbError::from)?;
         conn.pragma_update(None, "foreign_keys", true)
             .map_err(DbError::from)?;
-        schema::migrate(&mut conn, scratch, schema::PROJECT_MIGRATIONS)?;
+        // The scratch file is a copy of a backup, and the current state was
+        // backed up before the restore, so nothing is backed up here.
+        schema::migrate(&mut conn, scratch, schema::PROJECT_MIGRATIONS, None)?;
         let tx = conn.transaction().map_err(DbError::from)?;
         let out = prepare(&tx)?;
         tx.commit().map_err(DbError::from)?;
