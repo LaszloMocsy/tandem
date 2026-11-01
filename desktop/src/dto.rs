@@ -1,8 +1,11 @@
 //! The shapes commands and events exchange with the UI, in camelCase. They
 //! mirror the service's types; `ui/src/api.ts` declares the same shapes.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 use tandem_board_core::db::Changes;
+use tandem_board_core::features::{Feature, Features};
 use tandem_board_core::model::{self, Priority, Status, TaskId};
 use tandem_board_core::service::{self, LogEntry};
 
@@ -27,6 +30,16 @@ impl TasksChanged {
             removed: changes.removed.iter().map(ToString::to_string).collect(),
         }
     }
+}
+
+/// Which features are on, by name, such as `{"assistant":false,…}`.
+pub type FeaturesInfo = BTreeMap<&'static str, bool>;
+
+pub fn features_info(features: Features) -> FeaturesInfo {
+    Feature::ALL
+        .into_iter()
+        .map(|feature| (feature.as_str(), features.is_on(feature)))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -441,6 +454,15 @@ impl From<Finish> for service::Finish {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn features_are_sent_by_name() {
+        let features = Features::OFF.with(Feature::Canvas, true);
+        assert_eq!(
+            serde_json::to_string(&features_info(features)).unwrap(),
+            r#"{"assistant":false,"automation":false,"canvas":true,"shaping":false,"structure":false}"#
+        );
+    }
 
     #[test]
     fn a_delete_check_is_sent_in_camel_case() {

@@ -53,6 +53,7 @@ pub fn run() {
             };
             open_main_window(app)?;
             apply_theme(app.handle(), projects.theme()?);
+            projects.load_features()?;
             projects.start_mcp()?;
             projects.open_all()?;
             let projects = Arc::new(projects);
@@ -72,6 +73,8 @@ pub fn run() {
             commands::set_theme,
             commands::set_update_channel,
             commands::set_check_updates,
+            commands::get_features,
+            commands::set_feature,
             commands::check_for_update,
             commands::install_update,
             commands::set_project_name,
