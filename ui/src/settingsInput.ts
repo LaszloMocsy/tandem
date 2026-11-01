@@ -1,6 +1,44 @@
 // The Settings page's checks, as plain functions so they can be tested
 // without the desktop app.
 
+import type { Feature } from './api.ts'
+import type { BuildEnv } from './buildEnv.ts'
+
+/** Whether Settings shows Labs: in every build but production, which keeps
+ * every feature off. */
+export function showsLabs(env: BuildEnv): boolean {
+  return env !== 'production'
+}
+
+/** The features Labs lists, in order, with what each turns on. */
+export const LAB_FEATURES: readonly { feature: Feature; label: string; description: string }[] = [
+  {
+    feature: 'structure',
+    label: 'Structure',
+    description: 'Milestones, epics, dependencies and the new statuses on the board.',
+  },
+  {
+    feature: 'canvas',
+    label: 'Canvas',
+    description: 'A second view that shows and edits the same structure.',
+  },
+  {
+    feature: 'assistant',
+    label: 'Assistant',
+    description: 'A project chat that answers from the board and the repo.',
+  },
+  {
+    feature: 'shaping',
+    label: 'Shaping',
+    description: 'From a rough note to a committed plan on the canvas.',
+  },
+  {
+    feature: 'automation',
+    label: 'Automation',
+    description: 'Agents ask instead of guessing, and routine moves happen on their own.',
+  },
+]
+
 /** The port typed into Settings, or why it can't be used. */
 export function parsePort(text: string): { port: number } | { problem: string } {
   const trimmed = text.trim()

@@ -8,19 +8,21 @@
 //! lease; without it, a call is attributed to the client name from
 //! `clientInfo`.
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ServerCapabilities, ServerConfig,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResultType,
+    ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
+use tandem_board_core::features::{Feature, Features};
 use tandem_board_core::model::{InvalidId, Priority, Status, TaskId, Unmet};
 use tandem_board_core::service::{
     Actor, Agent, Finish, NewTask, Saved, Service, ServiceError, TaskDetail, TaskEdit, TaskFilter,
@@ -54,19 +56,52 @@ const INSTRUCTIONS: &str = concat!(
     task_rules!()
 );
 
+/// Which tools belong to unfinished work, and the feature each needs. A
+/// tool whose feature is off is left out of `tools/list`, and calling it is
+/// refused with `disabled`. Each entry goes once its feature ships.
+pub type ToolFeatures = &'static [(&'static str, Feature)];
+
+/// The tools behind a feature flag.
+pub const TOOL_FEATURES: ToolFeatures = &[];
+
+/// The features that are on, shared by every endpoint and changed while
+/// the server runs.
+pub type SharedFeatures = Arc<RwLock<Features>>;
+
 /// The tool handler for one project.
 #[derive(Clone)]
 pub struct TandemTools {
     service: Arc<Service>,
     tool_router: ToolRouter<Self>,
+    features: SharedFeatures,
+    tool_features: ToolFeatures,
 }
 
 impl TandemTools {
+    /// The tools for `service`, with every feature off.
     pub fn new(service: Arc<Service>) -> Self {
+        Self::with_features(service, SharedFeatures::default(), TOOL_FEATURES)
+    }
+
+    /// The tools for `service`, hiding each tool in `tool_features` whose
+    /// feature is off in `features`.
+    pub fn with_features(
+        service: Arc<Service>,
+        features: SharedFeatures,
+        tool_features: ToolFeatures,
+    ) -> Self {
         Self {
             service,
             tool_router: Self::tool_router(),
+            features,
+            tool_features,
         }
+    }
+
+    /// The feature `tool` needs, if it needs one that is off.
+    fn disabled_by(&self, tool: &str) -> Option<Feature> {
+        let features = *self.features.read().unwrap_or_else(PoisonError::into_inner);
+        disabled_by(self.tool_features, features, tool)
     }
 
     /// Runs a service call on a blocking thread: the service does database
@@ -398,6 +433,35 @@ impl ServerHandler for TandemTools {
             .with_instructions(INSTRUCTIONS)
     }
 
+    /// Every tool but those whose feature is off.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        let mut tools = self.tool_router.list_all();
+        tools.retain(|tool| self.disabled_by(&tool.name).is_none());
+        Ok(ListToolsResult {
+            result_type: Some(ResultType::COMPLETE),
+            tools,
+            meta: None,
+            next_cursor: None,
+            // Flags change while the server runs, so the list is never cached.
+            ttl_ms: supports_cache_hints.then_some(0),
+            cache_scope: supports_cache_hints.then_some(CacheScope::Public),
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        if self.disabled_by(name).is_some() {
+            return None;
+        }
+        self.tool_router.get(name).cloned()
+    }
+
     /// Routes the call to its tool. Arguments that don't fit the tool's
     /// schema come back from rmcp as a plain-text error; they are turned
     /// into the same structured `invalid_argument` error as every other
@@ -407,6 +471,9 @@ impl ServerHandler for TandemTools {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
+        if let Some(feature) = self.disabled_by(&request.name) {
+            return Ok(disabled(&request.name, feature).into());
+        }
         let call = ToolCallContext::new(self, request, context);
         match self.tool_router.call(call).await? {
             CallToolResponse::Complete(result)
@@ -673,6 +740,24 @@ fn error(code: &str, message: &str) -> CallToolResult {
     )
 }
 
+/// The refusal of a tool whose feature is off.
+fn disabled(tool: &str, feature: Feature) -> CallToolResult {
+    error(
+        "disabled",
+        &format!("{tool} needs the {feature} feature, which is turned off in Tandem"),
+    )
+}
+
+/// The feature `tool` needs, if `tool_features` gives it one that is off
+/// in `features`.
+fn disabled_by(tool_features: ToolFeatures, features: Features, tool: &str) -> Option<Feature> {
+    tool_features
+        .iter()
+        .find(|(name, _)| *name == tool)
+        .map(|&(_, feature)| feature)
+        .filter(|&feature| !features.is_on(feature))
+}
+
 fn service_error(e: ServiceError) -> CallToolResult {
     error(e.code(), &e.to_string())
 }
@@ -720,4 +805,34 @@ fn detail_json(detail: &TaskDetail) -> Value {
         })).collect::<Vec<_>>(),
         "review_feedback": detail.review_feedback,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_tool_is_behind_a_feature_twice() {
+        for (index, (tool, _)) in TOOL_FEATURES.iter().enumerate() {
+            assert!(
+                TOOL_FEATURES[..index]
+                    .iter()
+                    .all(|(other, _)| other != tool),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tool_is_disabled_only_while_its_feature_is_off() {
+        const GATED: ToolFeatures = &[("plan", Feature::Structure), ("draw", Feature::Canvas)];
+        let off = Features::OFF;
+        assert_eq!(disabled_by(GATED, off, "plan"), Some(Feature::Structure));
+        assert_eq!(disabled_by(GATED, off, "draw"), Some(Feature::Canvas));
+        assert_eq!(disabled_by(GATED, off, "list_tasks"), None);
+        let structure = off.with(Feature::Structure, true);
+        assert_eq!(disabled_by(GATED, structure, "plan"), None);
+        assert_eq!(disabled_by(GATED, structure, "draw"), Some(Feature::Canvas));
+        assert_eq!(disabled_by(TOOL_FEATURES, off, "list_tasks"), None);
+    }
 }

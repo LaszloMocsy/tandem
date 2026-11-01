@@ -10,4 +10,4 @@ mod server;
 mod tools;
 
 pub use server::{DEFAULT_ADDR, Endpoints, McpServer, ServeError, endpoint_path, router};
-pub use tools::TandemTools;
+pub use tools::{SharedFeatures, TOOL_FEATURES, TandemTools, ToolFeatures};

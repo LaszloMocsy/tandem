@@ -7,6 +7,7 @@ use tandem_board_core::db::{
     AppDb, AppSettings, DbError, ProjectDb, Theme, UpdateChannel, app_db_path, delete_project_db,
     folder_name, project_db_path,
 };
+use tandem_board_core::features::{Feature, Features};
 use tempfile::TempDir;
 
 fn names(conn: &Connection, kind: &str) -> Vec<String> {
@@ -283,6 +284,74 @@ fn unreadable_app_settings_fall_back_to_defaults() {
     conn.execute("UPDATE settings SET value = '0' WHERE key = 'mcp_port'", [])
         .unwrap();
     assert_eq!(app.settings().unwrap().mcp_port, None);
+}
+
+#[test]
+fn features_default_off_and_persist() {
+    let data = TempDir::new().unwrap();
+    let app = AppDb::open(data.path()).unwrap();
+    assert_eq!(app.features().unwrap(), Features::OFF);
+
+    app.set_feature(Feature::Structure, true).unwrap();
+    app.set_feature(Feature::Shaping, true).unwrap();
+    app.set_feature(Feature::Shaping, false).unwrap();
+    drop(app);
+
+    let app = AppDb::open(data.path()).unwrap();
+    assert_eq!(
+        app.features().unwrap(),
+        Features::OFF.with(Feature::Structure, true)
+    );
+    // Flags are settings rows of their own, holding `true` or `false`, and
+    // leave the other settings alone.
+    assert_eq!(app.settings().unwrap(), AppSettings::default());
+    let conn = Connection::open(app_db_path(data.path())).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM settings ORDER BY key")
+        .unwrap();
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("feature.shaping".to_owned(), "false".to_owned()),
+            ("feature.structure".to_owned(), "true".to_owned()),
+        ]
+    );
+
+    for feature in Feature::ALL {
+        app.set_feature(feature, true).unwrap();
+    }
+    assert_eq!(
+        app.features().unwrap().enabled().count(),
+        Feature::ALL.len()
+    );
+}
+
+#[test]
+fn only_true_turns_a_feature_on() {
+    let data = TempDir::new().unwrap();
+    let app = AppDb::open(data.path()).unwrap();
+    let conn = Connection::open(app_db_path(data.path())).unwrap();
+    conn.execute_batch(
+        "INSERT INTO settings VALUES ('feature.structure', 'TRUE'), ('feature.canvas', '1'),
+           ('feature.assistant', 'yes'), ('feature.shaping', ''), ('feature.later', 'true'),
+           ('FEATURE.AUTOMATION', 'true'), ('structure', 'true');",
+    )
+    .unwrap();
+    assert_eq!(app.features().unwrap(), Features::OFF);
+    conn.execute(
+        "UPDATE settings SET value = 'true' WHERE key = 'feature.canvas'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        app.features().unwrap(),
+        Features::OFF.with(Feature::Canvas, true)
+    );
 }
 
 #[test]
