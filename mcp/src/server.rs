@@ -9,11 +9,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use tandem_board_core::features::Features;
 use tandem_board_core::service::Service;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
-use crate::tools::TandemTools;
+use crate::tools::{SharedFeatures, TOOL_FEATURES, TandemTools, ToolFeatures};
 
 /// Where the MCP server listens unless configured otherwise.
 pub const DEFAULT_ADDR: SocketAddr =
@@ -47,21 +48,46 @@ struct Endpoint {
 }
 
 /// The projects the server has endpoints for. Projects can be added and
-/// removed while the server runs; clones share the same list.
+/// removed while the server runs; clones share the same list, and the same
+/// feature flags.
 #[derive(Clone)]
 pub struct Endpoints {
     projects: Arc<RwLock<BTreeMap<String, Endpoint>>>,
     cancel: CancellationToken,
+    features: SharedFeatures,
+    tool_features: ToolFeatures,
 }
 
 impl Endpoints {
-    /// No endpoints yet. Cancelling `cancel`, as stopping the server does,
-    /// ends every endpoint's sessions.
+    /// No endpoints yet, with every feature off. Cancelling `cancel`, as
+    /// stopping the server does, ends every endpoint's sessions.
     pub fn new(cancel: &CancellationToken) -> Self {
+        Self::with_tool_features(cancel, TOOL_FEATURES)
+    }
+
+    /// Like [`Endpoints::new`], but with `tool_features` saying which tools
+    /// need which feature, in place of [`TOOL_FEATURES`].
+    pub fn with_tool_features(cancel: &CancellationToken, tool_features: ToolFeatures) -> Self {
         Self {
             projects: Arc::default(),
             cancel: cancel.clone(),
+            features: SharedFeatures::default(),
+            tool_features,
         }
+    }
+
+    /// Turns features on and off for every endpoint. Open sessions see the
+    /// change on their next request.
+    pub fn set_features(&self, features: Features) {
+        *self
+            .features
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = features;
+    }
+
+    /// The features that are on.
+    pub fn features(&self) -> Features {
+        *self.features.read().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Serves `service` at the project's endpoint, replacing any endpoint
@@ -92,8 +118,16 @@ impl Endpoints {
             .enforce_origin_validation()
             .with_cancellation_token(cancel.clone());
         let tools = Arc::clone(&service);
+        let features = Arc::clone(&self.features);
+        let tool_features = self.tool_features;
         let mcp = StreamableHttpService::new(
-            move || Ok(TandemTools::new(Arc::clone(&tools))),
+            move || {
+                Ok(TandemTools::with_features(
+                    Arc::clone(&tools),
+                    Arc::clone(&features),
+                    tool_features,
+                ))
+            },
             Arc::new(LocalSessionManager::default()),
             config,
         );
