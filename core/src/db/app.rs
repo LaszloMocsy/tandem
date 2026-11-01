@@ -46,7 +46,7 @@ impl AppDb {
     /// Opens [`app_db_path`], creating the folder and database if needed.
     pub fn open(data_dir: &Path) -> Result<Self, DbError> {
         let path = app_db_path(data_dir);
-        let (conn, _) = schema::open(&path, schema::APP_MIGRATIONS)?;
+        let (conn, _) = schema::open(&path, schema::APP_MIGRATIONS, None)?;
         Ok(Self {
             conn,
             path,

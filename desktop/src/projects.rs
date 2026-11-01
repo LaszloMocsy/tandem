@@ -10,7 +10,8 @@
 //! of a repo opens the same project, with one board and one MCP URL.
 //!
 //! Each project's database is backed up while it changes, at most once an
-//! hour, and on launch and quit; see [`Projects::back_up_changed`].
+//! hour, and on launch and quit; see [`Projects::back_up_changed`]. Core
+//! also backs it up before migrating it to a newer schema.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -480,6 +481,9 @@ impl Projects {
             user_name: git::user_name(&project.last_path).unwrap_or_else(|| "user".to_owned()),
             ..Config::default()
         };
+        // Opening may back the database up before migrating it, so mark
+        // the backup folder as the project's first.
+        self.backup_dir(project)?;
         let service = Arc::new(Service::open(&self.data_dir, &project.id, config)?);
         let task_dir = project.last_path.join(TASK_DIR);
         if service.is_new() && task_dir.is_dir() {

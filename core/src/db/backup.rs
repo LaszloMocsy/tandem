@@ -1,7 +1,8 @@
 //! Backups of a project's database, in the app's data directory:
 //! `<data_dir>/backups/<project-id>/<time>.db`, each a full copy made with
 //! `VACUUM INTO`, named by the UTC time it was made, such as
-//! `20261023T093000.123Z.db`.
+//! `20261023T093000.123Z.db`. One is made whenever an existing database
+//! is about to be migrated to a newer schema.
 //!
 //! The folder also holds a `git-dir` file naming the project's git common
 //! dir, so the backups of a removed project are never shown to a

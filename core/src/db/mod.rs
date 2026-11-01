@@ -68,6 +68,15 @@ pub enum DbError {
         version: i64,
         supported: i64,
     },
+    #[error(
+        "migrating {} left a row in `{table}` that refers to a missing row in `{parent}`",
+        path.display()
+    )]
+    DanglingForeignKey {
+        path: PathBuf,
+        table: String,
+        parent: String,
+    },
     #[error("`{0}` is not a valid project id")]
     InvalidProjectId(String),
     #[error("{} is not a Tandem project database", path.display())]
