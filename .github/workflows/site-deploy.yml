@@ -1,4 +1,4 @@
-name: Redeploy site
+name: Deploy site
 
 # The landing page reads the GitHub releases at build time, so publishing a
 # release must rebuild it to update the download links. Releases start as
@@ -6,11 +6,19 @@ name: Redeploy site
 # fires for pre-releases, which the page lists when they're newer than
 # production.
 #
-# This deploys with the Vercel CLI rather than a deploy hook. A hook build
-# goes through Vercel's Git build pipeline, so site/vercel.json's
-# ignoreCommand would cancel it: the release commit usually doesn't touch
-# site/. A prebuilt deploy uploads output built here, so no Git build runs and
-# nothing can skip it. This is Vercel's documented way to deploy on releases:
+# This is the only production deploy. Vercel's Git integration deploys only
+# release/vX.Y.Z branches, as previews: site/vercel.json turns off Git
+# deployments for every other branch, main included. Each push to a release
+# branch updates its preview, the pre-production site for that release, at
+# the branch's stable URL. A deploy from main would come too early anyway:
+# only release branches merge into main, and the release is still a draft
+# when they do. To ship a site change without a release, run this workflow
+# by hand (Actions → Deploy site → Run workflow, or
+# `gh workflow run site-deploy.yml`); it always deploys main.
+#
+# This deploys with the Vercel CLI: a prebuilt deploy uploads output built
+# here, so no Git build runs and site/vercel.json's Git settings don't apply.
+# This is Vercel's documented way to deploy on releases:
 # https://vercel.com/kb/guide/can-you-deploy-based-on-tags-releases-on-vercel
 #
 # Setup: a VERCEL_TOKEN repository secret (an access token scoped to the
@@ -25,6 +33,7 @@ name: Redeploy site
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -110,10 +119,18 @@ jobs:
       - name: Install the Vercel CLI
         run: npm install --global vercel@65.1.0
 
+      # The CLI refuses to deploy unless the project's Root Directory (site/)
+      # exists, even for a prebuilt deploy, which uploads only .vercel/output.
+      # Nothing from the repo is checked out here, so an empty one stands in.
       - name: Deploy
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
+          mkdir -p site
           url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
-          echo "Release $TAG published; deployed the site to $url."
+          if [ -n "$TAG" ]; then
+            echo "Release $TAG published; deployed the site to $url."
+          else
+            echo "Deployed main's site to $url."
+          fi
