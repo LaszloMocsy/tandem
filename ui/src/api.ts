@@ -69,6 +69,30 @@ export interface AppSettings {
   checkUpdates: boolean
 }
 
+/** A piece of unfinished work behind a flag, turned on in Settings → Labs. */
+export type Feature = 'structure' | 'canvas' | 'assistant' | 'shaping' | 'automation'
+
+/** Every feature, in the order Labs lists them. */
+export const FEATURES: readonly Feature[] = [
+  'structure',
+  'canvas',
+  'assistant',
+  'shaping',
+  'automation',
+]
+
+/** Which features are on. Production builds have every one off. */
+export type Features = Record<Feature, boolean>
+
+/** Every feature off, as before the app says otherwise. */
+export const FEATURES_OFF: Features = {
+  structure: false,
+  canvas: false,
+  assistant: false,
+  shaping: false,
+  automation: false,
+}
+
 /** What opening a folder did. */
 export type Opened =
   | { kind: 'project'; project: ProjectInfo }
@@ -346,6 +370,13 @@ export const api = {
   setUpdateChannel: (channel: UpdateChannel) =>
     call<AppSettings>('set_update_channel', { channel }),
   setCheckUpdates: (check: boolean) => call<AppSettings>('set_check_updates', { check }),
+  getFeatures: () => call<Features>('get_features'),
+  /**
+   * Turns a feature on or off, for the board and the MCP server, which
+   * leaves out the feature's tools while it is off. Refused in production
+   * builds.
+   */
+  setFeature: (feature: Feature, on: boolean) => call<Features>('set_feature', { feature, on }),
   /**
    * Looks for a newer version on the update channel; `null` when there is
    * none or the build never updates. `onStart`, it also gives `null` when

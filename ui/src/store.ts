@@ -9,7 +9,10 @@ import {
   api as tauriApi,
   CommandError,
   onTasksChanged as tauriOnTasksChanged,
+  FEATURES_OFF,
   type Api,
+  type Feature,
+  type Features,
   type Opened,
   type ProjectInfo,
   type TaskSummary,
@@ -27,6 +30,8 @@ export interface BoardState {
   loading: boolean
   /** The latest failed fetch, cleared by the next one that succeeds. */
   error: CommandError | null
+  /** Which features are on; every one off until they load. */
+  features: Features
 }
 
 export interface BoardStore {
@@ -51,10 +56,15 @@ export interface BoardStore {
   removeProject(id: string): Promise<void>
   /** Refetches the tasks of the project on screen. */
   refetch(): Promise<void>
+  /** Turns a feature on or off. A refusal leaves the features as they were. */
+  setFeature(feature: Feature, on: boolean): Promise<void>
 }
 
 export interface BoardDeps {
-  api: Pick<Api, 'listProjects' | 'openProject' | 'removeProject' | 'listTasks'>
+  api: Pick<
+    Api,
+    'listProjects' | 'openProject' | 'removeProject' | 'listTasks' | 'getFeatures' | 'setFeature'
+  >
   onTasksChanged: (handler: (event: TasksChanged) => void) => Promise<() => void>
 }
 
@@ -64,6 +74,7 @@ const initialState: BoardState = {
   tasks: [],
   loading: false,
   error: null,
+  features: FEATURES_OFF,
 }
 
 export function createBoardStore(
@@ -149,6 +160,12 @@ export function createBoardStore(
         if (event.project === state.project) void refetch()
       })
       await unlisten
+      // Without them, every feature stays off and the board is as before.
+      try {
+        set({ features: await api.getFeatures() })
+      } catch (error) {
+        console.error('could not load the features', error)
+      }
       await refreshProjects()
       if (state.project === null) {
         await show(state.projects.find((project) => project.open)?.id ?? null)
@@ -181,6 +198,10 @@ export function createBoardStore(
     },
 
     refetch,
+
+    async setFeature(feature, on) {
+      set({ features: await api.setFeature(feature, on) })
+    },
   }
 }
 
@@ -204,4 +225,9 @@ export function useBoard<T>(
 ): T {
   const snapshot = () => select(store.getState())
   return useSyncExternalStore(store.subscribe, snapshot, snapshot)
+}
+
+/** Which features are on, re-rendering when they change. */
+export function useFeatures(store: BoardStore = board): Features {
+  return useBoard((state) => state.features, store)
 }

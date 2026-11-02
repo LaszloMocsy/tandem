@@ -28,6 +28,7 @@ use tandem_board_core::db::{
     AppDb, AppSettings, Changes, Project, ProjectDb, Theme, UpdateChannel, app_db_path,
     delete_project_db, folder_name, normalize_project_name, project_db_path, timestamp_text,
 };
+use tandem_board_core::features::{Feature, Features};
 use tandem_board_core::git;
 use tandem_board_core::markdown::TASK_DIR;
 use tandem_board_core::service::{Config, Service};
@@ -208,6 +209,46 @@ impl Projects {
                 Ok((dir, true))
             }
         }
+    }
+
+    /// Which features are on in this build; see [`BuildEnv::has_labs`].
+    pub fn features(&self) -> Result<Features, Error> {
+        self.features_in(BuildEnv::current())
+    }
+
+    fn features_in(&self, env: BuildEnv) -> Result<Features, Error> {
+        if !env.has_labs() {
+            return Ok(Features::OFF);
+        }
+        Ok(lock(&self.app_db).features()?)
+    }
+
+    /// Gives the MCP server the features that are on, as on launch.
+    pub fn load_features(&self) -> Result<(), Error> {
+        self.mcp.endpoints().set_features(self.features()?);
+        Ok(())
+    }
+
+    /// Turns a feature on or off, in `app.db` and for the MCP server.
+    /// Refused in production builds, which have no Labs.
+    pub fn set_feature(&self, feature: Feature, on: bool) -> Result<Features, Error> {
+        self.set_feature_in(BuildEnv::current(), feature, on)
+    }
+
+    fn set_feature_in(&self, env: BuildEnv, feature: Feature, on: bool) -> Result<Features, Error> {
+        if !env.has_labs() {
+            return Err(Error::new(
+                "invalid_argument",
+                "feature flags can't be changed in a production build",
+            ));
+        }
+        let features = {
+            let app_db = lock(&self.app_db);
+            app_db.set_feature(feature, on)?;
+            app_db.features()?
+        };
+        self.mcp.endpoints().set_features(features);
+        Ok(features)
     }
 
     pub fn theme(&self) -> Result<Theme, Error> {
@@ -1040,6 +1081,43 @@ mod tests {
         let backups = env.projects.backups(&id).unwrap();
         assert_eq!(backups.len(), 1);
         assert_eq!(backups[0].tasks, Some(1));
+    }
+
+    #[test]
+    fn features_reach_the_mcp_server_except_in_production() {
+        let env = Env::new(TempDir::new().unwrap());
+        assert_eq!(
+            env.projects.features_in(BuildEnv::Dev).unwrap(),
+            Features::OFF
+        );
+
+        let structure = Features::OFF.with(Feature::Structure, true);
+        let set = env
+            .projects
+            .set_feature_in(BuildEnv::Beta, Feature::Structure, true)
+            .unwrap();
+        assert_eq!(set, structure);
+        assert_eq!(env.endpoints.features(), structure);
+        assert_eq!(env.projects.features_in(BuildEnv::Dev).unwrap(), structure);
+
+        // Production builds have no Labs: what a beta stored stays off, and
+        // can't be changed.
+        assert_eq!(
+            env.projects.features_in(BuildEnv::Production).unwrap(),
+            Features::OFF
+        );
+        let refused = env
+            .projects
+            .set_feature_in(BuildEnv::Production, Feature::Canvas, true)
+            .unwrap_err();
+        assert_eq!(refused.code, "invalid_argument");
+        assert_eq!(env.endpoints.features(), structure);
+
+        // A relaunch loads the stored flags into the new server.
+        let env = env.relaunch();
+        assert_eq!(env.endpoints.features(), Features::OFF);
+        env.projects.load_features().unwrap();
+        assert_eq!(env.endpoints.features(), env.projects.features().unwrap());
     }
 
     #[test]

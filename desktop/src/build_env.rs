@@ -45,6 +45,13 @@ impl BuildEnv {
         }
     }
 
+    /// Whether this build has Labs: feature flags for unfinished work.
+    /// Production builds have none, and keep every feature off whatever
+    /// `app.db` says, so flags turned on in a beta never reach a release.
+    pub(crate) fn has_labs(self) -> bool {
+        self != Self::Production
+    }
+
     /// The native window title, which also shows in the Dock and Cmd-Tab.
     pub(crate) fn title(self) -> &'static str {
         match self {
@@ -80,6 +87,13 @@ mod tests {
     fn local_release_builds_are_dev() {
         assert_eq!(BuildEnv::detect(false, None), Some(BuildEnv::Dev));
         assert_eq!(BuildEnv::detect(false, Some("")), Some(BuildEnv::Dev));
+    }
+
+    #[test]
+    fn every_build_but_production_has_labs() {
+        assert!(BuildEnv::Dev.has_labs());
+        assert!(BuildEnv::Beta.has_labs());
+        assert!(!BuildEnv::Production.has_labs());
     }
 
     #[test]

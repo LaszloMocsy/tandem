@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { expect, test } from 'vitest'
-import type { ProjectInfo, TaskSummary } from './api.ts'
+import { FEATURES_OFF, type ProjectInfo, type TaskSummary } from './api.ts'
 import App from './App.tsx'
 import { createBoardStore } from './store.ts'
 
@@ -39,6 +39,8 @@ function store(projects: ProjectInfo[], tasks: TaskSummary[]) {
       openProject: async () => ({ kind: 'project', project }),
       removeProject: async () => true,
       listTasks: async () => tasks,
+      getFeatures: async () => FEATURES_OFF,
+      setFeature: async () => FEATURES_OFF,
     },
     onTasksChanged: async () => () => {},
   })

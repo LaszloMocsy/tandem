@@ -1,5 +1,14 @@
 import { expect, test } from 'vitest'
-import { fileManager, folderName, MAX_NAME_LENGTH, nameProblem, parsePort } from './settingsInput.ts'
+import { FEATURES } from './api.ts'
+import {
+  fileManager,
+  folderName,
+  LAB_FEATURES,
+  MAX_NAME_LENGTH,
+  nameProblem,
+  parsePort,
+  showsLabs,
+} from './settingsInput.ts'
 
 test('ports are whole numbers from 1 to 65535', () => {
   expect(parsePort(' 4400 ')).toEqual({ port: 4400 })
@@ -31,4 +40,18 @@ test('the file manager is named for the system', () => {
   )
   expect(fileManager('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')).toBe('Explorer')
   expect(fileManager('Mozilla/5.0 (X11; Linux x86_64)')).toBe('file manager')
+})
+
+test('Labs shows in dev and beta builds, never in production', () => {
+  expect(showsLabs('dev')).toBe(true)
+  expect(showsLabs('beta')).toBe(true)
+  expect(showsLabs('production')).toBe(false)
+})
+
+test('Labs lists every feature once, in order, with a label and a description', () => {
+  expect(LAB_FEATURES.map(({ feature }) => feature)).toEqual(FEATURES)
+  for (const { label, description } of LAB_FEATURES) {
+    expect(label).not.toBe('')
+    expect(description).toMatch(/\.$/)
+  }
 })

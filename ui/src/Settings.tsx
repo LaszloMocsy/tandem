@@ -5,6 +5,8 @@ import type {
   BackupInfo,
   DeletedTask,
   ExportFormat,
+  Feature,
+  Features,
   Link,
   Place,
   ProjectInfo,
@@ -18,7 +20,14 @@ import { useDeletedTasks } from './deletedTasks.ts'
 import { CleanUpDeletedForm, Dialog, RestoreBackupForm } from './dialogs.tsx'
 import { errorMessage, formatTime } from './edit.ts'
 import { CopyButton } from './panels.tsx'
-import { fileManager, folderName, nameProblem, parsePort } from './settingsInput.ts'
+import {
+  fileManager,
+  folderName,
+  LAB_FEATURES,
+  nameProblem,
+  parsePort,
+  showsLabs,
+} from './settingsInput.ts'
 import { applyTheme } from './theme.ts'
 
 export type SettingsTab = 'app' | 'project'
@@ -70,6 +79,8 @@ export function Settings({
   onProjectsChanged,
   onRemove,
   onUpdate,
+  features,
+  onFeature,
 }: {
   tab: SettingsTab
   project: ProjectInfo | undefined
@@ -83,6 +94,10 @@ export function Settings({
   onRemove: (project: ProjectInfo) => void
   /** Check now found an update, for the update dialog. */
   onUpdate: (update: UpdateInfo) => void
+  /** Which features are on, for Labs. */
+  features: Features
+  /** Turns a feature on or off; rejects if the app refuses. */
+  onFeature: (feature: Feature, on: boolean) => Promise<void>
 }) {
   const id = useId()
   const projectTab = project?.open ? project : undefined
@@ -131,7 +146,13 @@ export function Settings({
         </div>
         <section id={`${id}-panel`} role="tabpanel" aria-labelledby={`${id}-${shown}`}>
           {shown === 'app' || !projectTab ? (
-            <AppTab api={api} onPortChanged={onProjectsChanged} onUpdate={onUpdate} />
+            <AppTab
+              api={api}
+              onPortChanged={onProjectsChanged}
+              onUpdate={onUpdate}
+              features={features}
+              onFeature={onFeature}
+            />
           ) : (
             <ProjectTab
               key={projectTab.id}
@@ -153,10 +174,14 @@ function AppTab({
   api,
   onPortChanged,
   onUpdate,
+  features,
+  onFeature,
 }: {
   api: SettingsApi
   onPortChanged: () => void
   onUpdate: (update: UpdateInfo) => void
+  features: Features
+  onFeature: (feature: Feature, on: boolean) => Promise<void>
 }) {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -166,6 +191,7 @@ function AppTab({
   const [themeError, setThemeError] = useState<string | null>(null)
   const [linkError, setLinkError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [labsError, setLabsError] = useState<string | null>(null)
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ kind: 'idle' })
   const show = useShowInFolder(api)
 
@@ -229,6 +255,15 @@ function AppTab({
     }
   }
 
+  async function toggleFeature(feature: Feature, on: boolean) {
+    setLabsError(null)
+    try {
+      await onFeature(feature, on)
+    } catch (error) {
+      setLabsError(errorMessage(error))
+    }
+  }
+
   async function openLink(link: Link) {
     setLinkError(null)
     try {
@@ -274,7 +309,54 @@ function AppTab({
           onOpenLink={(link) => void openLink(link)}
         />
       }
+      labs={
+        <LabsView
+          features={features}
+          error={labsError}
+          onFeature={(feature, on) => void toggleFeature(feature, on)}
+        />
+      }
     />
+  )
+}
+
+/**
+ * The Labs section: a switch for each piece of unfinished work. Off, a
+ * feature's part of the board is hidden and agents don't get its MCP tools.
+ */
+export function LabsView({
+  features,
+  error,
+  onFeature,
+}: {
+  features: Features
+  error: string | null
+  onFeature: (feature: Feature, on: boolean) => void
+}) {
+  return (
+    <section className="settings-section" aria-label="Labs">
+      <h3>Labs</h3>
+      {LAB_FEATURES.map(({ feature, label, description }) => (
+        <label key={feature} className="settings-check">
+          <input
+            type="checkbox"
+            checked={features[feature]}
+            onChange={(event) => onFeature(feature, event.target.checked)}
+          />
+          {label}
+          <span className="muted">{description}</span>
+        </label>
+      ))}
+      {error && (
+        <p className="field-error" role="alert">
+          {error}
+        </p>
+      )}
+      <p className="hint">
+        Unfinished work, for trying it before it ships. A feature that's off hides its part of the
+        board and its MCP tools. Production builds keep every feature off.
+      </p>
+    </section>
   )
 }
 
@@ -407,7 +489,7 @@ function PlaceValue({
 
 /**
  * The App tab: the MCP server's port, the theme, where the app keeps its
- * data, and the running version.
+ * data, the running version and, outside production, Labs.
  */
 export function AppSettingsView({
   settings,
@@ -423,6 +505,7 @@ export function AppSettingsView({
   showError,
   onShow,
   updates,
+  labs,
   env = BUILD_ENV,
   version = APP_VERSION,
   manager = fileManager(),
@@ -441,6 +524,8 @@ export function AppSettingsView({
   onShow: (place: Place) => void
   /** The Updates section, before About. */
   updates?: ReactNode
+  /** The Labs section, after About; left out in production builds. */
+  labs?: ReactNode
   /** The build to describe in About; the running one unless a test says otherwise. */
   env?: BuildEnv
   version?: string
@@ -583,6 +668,7 @@ export function AppSettingsView({
           Include the version when you report a bug. Links open in your browser.
         </p>
       </section>
+      {showsLabs(env) && labs}
     </>
   )
 }

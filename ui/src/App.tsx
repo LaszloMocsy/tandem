@@ -57,7 +57,7 @@ function focusedTask(): string | null {
 }
 
 function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppApi }) {
-  const { projects, project, tasks, loading, error } = useBoard((state) => state, store)
+  const { projects, project, tasks, loading, error, features } = useBoard((state) => state, store)
   const now = useNow(LEASE_TICK_MS)
   const current = projects.find((p) => p.id === project)
 
@@ -314,6 +314,8 @@ function App({ store = board, api = tauriApi }: { store?: BoardStore; api?: AppA
           onProjectsChanged={() => void store.refreshProjects()}
           onRemove={projectActions.askRemove}
           onUpdate={updates.show}
+          features={features}
+          onFeature={store.setFeature}
         />
       ) : project === null ? (
         <Welcome

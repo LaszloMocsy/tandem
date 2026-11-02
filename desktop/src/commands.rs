@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use jiff::SignedDuration;
 use tandem_board_core::db::{Theme, UpdateChannel};
+use tandem_board_core::features::Feature;
 use tandem_board_core::model::TaskId;
 use tandem_board_core::service::{Actor, Service};
 use tauri::{AppHandle, State};
@@ -17,8 +18,8 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::build_env::BuildEnv;
 use crate::dto::{
-    AgentInfo, DeleteCheck, DeletedTask, Finish, NewTask, Saved, TaskDetail, TaskEdit, TaskFilter,
-    TaskSummary,
+    AgentInfo, DeleteCheck, DeletedTask, FeaturesInfo, Finish, NewTask, Saved, TaskDetail,
+    TaskEdit, TaskFilter, TaskSummary, features_info,
 };
 use crate::error::{Error, NEWER_SCHEMA};
 use crate::links::Link;
@@ -147,6 +148,29 @@ pub async fn set_check_updates(
 ) -> Result<AppSettingsInfo> {
     let projects = Arc::clone(&projects);
     blocking(move || projects.set_check_updates(check)).await
+}
+
+/// Which features are on, by name, such as `{ "structure": false, … }`.
+/// Every feature is off in production builds.
+#[tauri::command]
+pub async fn get_features(projects: State<'_, Arc<Projects>>) -> Result<FeaturesInfo> {
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.features().map(features_info)).await
+}
+
+/// Turns a feature on or off, for the board and the MCP server. Refused in
+/// production builds.
+#[tauri::command]
+pub async fn set_feature(
+    projects: State<'_, Arc<Projects>>,
+    feature: String,
+    on: bool,
+) -> Result<FeaturesInfo> {
+    let feature: Feature = feature
+        .parse()
+        .map_err(|e: String| Error::new("invalid_argument", e))?;
+    let projects = Arc::clone(&projects);
+    blocking(move || projects.set_feature(feature, on).map(features_info)).await
 }
 
 /// Looks for a newer version on the build's update channel. `None` when

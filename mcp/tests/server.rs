@@ -9,9 +9,12 @@ use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RoleClient, RunningSe
 use rmcp::transport::StreamableHttpClientTransport;
 use serde_json::{Value, json};
 use tandem_board_core::db::project_db_path;
+use tandem_board_core::features::{Feature, Features};
 use tandem_board_core::model::{Status, TaskId};
 use tandem_board_core::service::{Actor, Config, NewTask, Service, TaskFilter};
-use tandem_board_mcp::{Endpoints, McpServer, ServeError, endpoint_path};
+use tandem_board_mcp::{
+    Endpoints, McpServer, ServeError, TOOL_FEATURES, ToolFeatures, endpoint_path,
+};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -39,10 +42,15 @@ struct Env {
 
 impl Env {
     async fn new() -> Self {
+        Self::with_tool_features(TOOL_FEATURES).await
+    }
+
+    /// A server where `tool_features` says which tools need which feature.
+    async fn with_tool_features(tool_features: ToolFeatures) -> Self {
         let data = TempDir::new().unwrap();
         let service = Arc::new(Service::open(data.path(), "demo", Config::default()).unwrap());
         let cancel = CancellationToken::new();
-        let endpoints = Endpoints::new(&cancel);
+        let endpoints = Endpoints::with_tool_features(&cancel, tool_features);
         endpoints.insert("demo", Arc::clone(&service));
         let server = McpServer::bind(
             "127.0.0.1:0".parse().unwrap(),
@@ -534,6 +542,63 @@ async fn errors_carry_the_specs_codes() {
     let edit = json!({ "id": dep.as_str(), "depends_on": [blocked.as_str()] });
     assert_eq!(code(&client, "update_task", edit).await, "cycle_detected");
     assert!(!env.markdown(dep).contains("depends_on"));
+}
+
+/// The tools a client lists, sorted.
+async fn tool_names(client: &Client) -> BTreeSet<String> {
+    let tools = client.list_all_tools().await.unwrap();
+    tools.iter().map(|tool| tool.name.to_string()).collect()
+}
+
+#[tokio::test]
+async fn turning_features_on_changes_no_tool_yet() {
+    // No tool is behind a flag yet, so every flag on or off lists the same
+    // tools as v0.1.0.
+    assert!(TOOL_FEATURES.is_empty());
+    let env = Env::new().await;
+    let client = env.client("claude-code", Protocol::Latest).await;
+    let off = tool_names(&client).await;
+    assert_eq!(env.endpoints.features(), Features::OFF);
+    let all = Feature::ALL
+        .into_iter()
+        .fold(Features::OFF, |features, feature| {
+            features.with(feature, true)
+        });
+    env.endpoints.set_features(all);
+    assert_eq!(tool_names(&client).await, off);
+}
+
+#[tokio::test]
+async fn a_tool_whose_feature_is_off_is_hidden_and_refused() {
+    const GATED: ToolFeatures = &[("next_task", Feature::Structure)];
+    let env = Env::with_tool_features(GATED).await;
+    for protocol in PROTOCOLS {
+        let client = env.client("claude-code", protocol).await;
+        env.endpoints.set_features(Features::OFF);
+        let names = tool_names(&client).await;
+        assert!(!names.contains("next_task"), "{protocol:?}");
+        assert!(names.contains("list_tasks"), "{protocol:?}");
+        let error = call(&client, "next_task", json!({})).await.unwrap_err();
+        assert_eq!(error["code"], json!("disabled"), "{protocol:?}");
+        assert_eq!(
+            error["message"],
+            json!("next_task needs the structure feature, which is turned off in Tandem")
+        );
+        // Even arguments that don't fit are refused as disabled first.
+        assert_eq!(
+            code(&client, "next_task", json!({ "nope": 1 })).await,
+            "disabled"
+        );
+
+        // The same session sees the flag change on its next request.
+        env.endpoints
+            .set_features(Features::OFF.with(Feature::Canvas, true));
+        assert!(!tool_names(&client).await.contains("next_task"));
+        env.endpoints
+            .set_features(Features::OFF.with(Feature::Structure, true));
+        assert!(tool_names(&client).await.contains("next_task"));
+        call(&client, "next_task", json!({})).await.unwrap();
+    }
 }
 
 #[tokio::test]
